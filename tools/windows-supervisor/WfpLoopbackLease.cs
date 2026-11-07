@@ -10,6 +10,7 @@ internal sealed class WfpLoopbackLease : IDisposable
     private const uint DynamicSession = 1;
     private const uint ClearActionRight = 8;
     private const uint SublayerPersistent = 0x01;
+    private const ushort FixtureSublayerWeight = 0xFFFE;
     // Persistent, boot-time, provider context, permit-if-unregistered, disabled.
     private const uint DisallowedFilterFlags = 0x37;
     private const uint ActionBlock = 0x00001001;
@@ -31,16 +32,20 @@ internal sealed class WfpLoopbackLease : IDisposable
     private IntPtr engine;
     private readonly Guid sublayerKey;
     private readonly Guid[] filterKeys;
+    private readonly ulong[] filterIds;
     private bool removalVerified;
 
-    private WfpLoopbackLease(IntPtr engine, Guid sublayerKey, Guid[] filterKeys)
+    private WfpLoopbackLease(IntPtr engine, Guid sublayerKey, Guid[] filterKeys, ulong[] filterIds)
     {
         this.engine = engine;
         this.sublayerKey = sublayerKey;
         this.filterKeys = filterKeys;
+        this.filterIds = filterIds;
     }
 
     internal int Count { get { return filterKeys.Length; } }
+    internal ulong[] FilterIds { get { return (ulong[])filterIds.Clone(); } }
+    internal ushort VerifiedSublayerWeight { get; private set; }
 
     internal static WfpLoopbackLease Install(byte[] packageSid, out bool failureCleanupVerified)
     {
@@ -61,7 +66,7 @@ internal sealed class WfpLoopbackLease : IDisposable
         Guid sublayerKey = Guid.NewGuid();
         var filterKeys = new Guid[Layers.Length];
         var filterIds = new ulong[Layers.Length];
-        var lease = new WfpLoopbackLease(engine, sublayerKey, filterKeys);
+        var lease = new WfpLoopbackLease(engine, sublayerKey, filterKeys, filterIds);
         bool transaction = false;
         IntPtr conditionPointer = IntPtr.Zero;
         GCHandle pinnedSid = new GCHandle();
@@ -78,7 +83,7 @@ internal sealed class WfpLoopbackLease : IDisposable
             Check(FwpmTransactionBegin0(engine, 0), "WFP_TRANSACTION_BEGIN");
             transaction = true;
             var sublayer = new Sublayer {
-                Key = sublayerKey, Weight = UInt16.MaxValue,
+                Key = sublayerKey, Weight = FixtureSublayerWeight,
                 Display = new DisplayData { Name = "CLU-E disposable package-only block" },
             };
             Check(FwpmSubLayerAdd0(engine, ref sublayer, IntPtr.Zero), "WFP_SUBLAYER_ADD");
@@ -97,7 +102,7 @@ internal sealed class WfpLoopbackLease : IDisposable
             Check(FwpmTransactionCommit0(engine), "WFP_TRANSACTION_COMMIT");
             transaction = false;
 
-            VerifySublayer(engine, sublayerKey);
+            lease.VerifiedSublayerWeight = VerifySublayer(engine, sublayerKey);
             for (int index = 0; index < Layers.Length; index++)
                 VerifyFilter(engine, filterKeys[index], filterIds[index], Layers[index], sublayerKey, expectedSid);
             return lease;
@@ -116,7 +121,7 @@ internal sealed class WfpLoopbackLease : IDisposable
         }
     }
 
-    private static void VerifySublayer(IntPtr engine, Guid key)
+    private static ushort VerifySublayer(IntPtr engine, Guid key)
     {
         IntPtr result;
         Check(FwpmSubLayerGetByKey0(engine, ref key, out result), "WFP_SUBLAYER_GET");
@@ -130,10 +135,11 @@ internal sealed class WfpLoopbackLease : IDisposable
             // persistence bit is the sublayer flag that changes that lifetime check.
             if ((layer.Flags & SublayerPersistent) != 0)
                 throw new InvalidOperationException("WFP_SUBLAYER_PERSISTENT_0x" + layer.Flags.ToString("X8"));
-            if (layer.Weight != UInt16.MaxValue)
+            if (layer.Weight != FixtureSublayerWeight)
                 throw new InvalidOperationException("WFP_SUBLAYER_WEIGHT_0x" + layer.Weight.ToString("X8"));
             if (!ProviderUnassigned(layer.ProviderKey))
                 throw new InvalidOperationException("WFP_SUBLAYER_PROVIDER_ASSIGNED");
+            return layer.Weight;
         }
         finally { FwpmFreeMemory0(ref result); }
     }

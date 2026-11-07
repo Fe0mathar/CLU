@@ -226,6 +226,55 @@ function Write-DiagnosticFile([string] $Path, [System.Collections.IDictionary] $
     } finally { $stream.Dispose() }
 }
 
+function Get-WfpAttribution([System.Collections.IDictionary] $CanaryReport) {
+    $summary = [ordered]@{ state = 'FILTERED_LEASE_INCOMPLETE'; bfe = $null; security = $null; bindCases = $null }
+    $wfp = $CanaryReport['wfp']
+    if ($null -eq $wfp -or $null -eq $wfp.filtered) { return $summary }
+    $filtered = $wfp.filtered
+    $summary.bfe = $filtered.dropEvidence
+    if ($null -eq $summary.bfe -or $null -eq $summary.bfe.filterIds) { return $summary }
+
+    $lease = $filtered.lease
+    if ($null -eq $lease -or $lease.mode -ne 'filtered' -or $lease.filterCount -ne 6 -or
+        !$lease.observedInJobPackageSid -or !$lease.uniqueSid -or !$lease.gateReleased -or
+        !$lease.jobEmpty -or !$lease.filtersRemoved) { return $summary }
+    if (!$wfp.hostControl -or !$wfp.bindContrast) {
+        $summary.state = 'BIND_CONTRAST_UNPROVEN'
+        return $summary
+    }
+
+    $cases = @('ipv4Tcp', 'ipv6Tcp', 'ipv4Udp', 'ipv6Udp')
+    $attributed = [ordered]@{}
+    $bfeHits = $summary.bfe.bindHits
+    foreach ($key in $cases) {
+        $attributed[$key] = $null -ne $bfeHits -and $bfeHits[$key] -gt 0
+    }
+    if ($attributed.Values -contains $false) {
+        try {
+            $reader = Join-Path $PSScriptRoot 'WfpSecurityEvents.ps1'
+            Assert-NoReparsePath $reader
+            . $reader
+            $query = @{ FilterIds = @($summary.bfe.filterIds); Start = [datetime] $filtered.startedAt; End = [datetime] $filtered.finishedAt }
+            $summary.security = Get-WfpSecurityBindEvidence @query
+            if ($summary.security.state -eq 'MATCHED') {
+                $securityHits = $summary.security.hits
+                foreach ($key in $cases) { $attributed[$key] = $attributed[$key] -or $securityHits.$key -gt 0 }
+            }
+        } catch { $summary.security = [ordered]@{ state = 'UNAVAILABLE'; hits = $null } }
+    }
+    $summary.bindCases = $attributed
+    if ($attributed.Values -notcontains $false) {
+        $summary.state = 'ALL_BIND_DROPS_ATTRIBUTED'
+    } elseif ($attributed.Values -contains $true -or
+        ($null -ne $summary.bfe.hitsByFilter -and
+            ($summary.bfe.hitsByFilter[4] -gt 0 -or $summary.bfe.hitsByFilter[5] -gt 0))) {
+        $summary.state = 'PARTIAL_BIND_DROP_ATTRIBUTION'
+    } else {
+        $summary.state = 'BIND_DENIED_ATTRIBUTION_UNPROVEN'
+    }
+    return $summary
+}
+
 $stage = $null
 $report = $null
 $mxcHash = $null
@@ -291,7 +340,7 @@ try {
         throw 'The Windows .NET Framework 4.x C# compiler and System.Web.Extensions are required.'
     }
     $sourceNames = @('Supervisor.cs', 'Protocol.cs', 'NativeJob.cs',
-        'WfpBootstrapRun.cs', 'WfpContainerIdentity.cs', 'WfpLoopbackLease.cs')
+        'WfpBootstrapRun.cs', 'WfpContainerIdentity.cs', 'WfpLoopbackLease.cs', 'WfpDropObservation.cs')
     $sources = foreach ($sourceName in $sourceNames) {
         $source = Join-Path $PSScriptRoot $sourceName
         Assert-NoReparsePath $source
@@ -374,6 +423,8 @@ internal static class MxcPin {
     }
     if (!(Test-Path -LiteralPath $stagedReport -PathType Leaf)) { throw 'The native canary runner did not write a diagnostic report.' }
     Assert-NoReparsePath $stagedReport
+    $canaryReport = Get-Content -LiteralPath $stagedReport -Raw | ConvertFrom-Json -AsHashtable
+    $wfpAttribution = if ($WfpDiagnostic) { Get-WfpAttribution $canaryReport } else { $null }
     $payload = [ordered]@{
         schemaVersion = 'clue-mxc-supervisor-diagnostic/1'
         checkedAt = [DateTime]::UtcNow.ToString('o')
@@ -387,9 +438,11 @@ internal static class MxcPin {
         canaryUiMode = 'CONTAINER_SCOPED_WIN32K'
         wfpDiagnostic = [bool] $WfpDiagnostic
         canaryExitCode = $code
-        canaryReport = (Get-Content -LiteralPath $stagedReport -Raw | ConvertFrom-Json -AsHashtable)
+        canaryReport = $canaryReport
+        wfpAttribution = $wfpAttribution
     }
     Write-DiagnosticFile $report $payload
+    if ($WfpDiagnostic) { Write-Host ('[CLU-E WFP attribution] ' + $wfpAttribution.state) }
     Write-Host "[4/4] Diagnostic report: $report"
     Write-Host 'Native proof remains blocked pending a supported intra-sandbox loopback enforcement mechanism.'
     exit $code
@@ -412,6 +465,7 @@ internal static class MxcPin {
                 wfpDiagnostic = [bool] $WfpDiagnostic
                 canaryExitCode = $null
                 canaryReport = $null
+                wfpAttribution = $null
             })
             Write-Host "Diagnostic report: $report"
         } catch { Write-Host 'The diagnostic report could not be written.' }

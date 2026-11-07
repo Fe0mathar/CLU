@@ -116,6 +116,26 @@ function wfpLeaseEvidence(run) {
   };
 }
 
+function wfpDropEvidence(run) {
+  const ids = [...run.stderr.matchAll(/^\[CLU-E WFP IDS\] (65534) ([1-9]\d{0,19}(?: [1-9]\d{0,19}){5})\r?$/gmu)];
+  const events = [...run.stderr.matchAll(/^\[CLU-E WFP DROPS\] ([A-Z0-9_]{1,96}) (\d{1,10}(?: \d{1,10}){9})\r?$/gmu)];
+  const filterIds = ids.length === 1 ? ids[0][2].split(' ') : [];
+  if (new Set(filterIds).size !== 6 || filterIds.some((id) => BigInt(id) > 18446744073709551615n)) {
+    return { filterIds: null, verifiedSublayerWeight: null, state: 'FILTER_IDS_UNVERIFIED', hitsByFilter: null, bindHits: null };
+  }
+  const verifiedSublayerWeight = Number(ids[0][1]);
+  const counts = events.length === 1 ? events[0][2].split(' ').map(Number) : [];
+  if (counts.length !== 10 || counts.some((count) => count > 2147483647)) {
+    return { filterIds, verifiedSublayerWeight, state: 'BFE_EVENT_EVIDENCE_UNAVAILABLE', hitsByFilter: null, bindHits: null };
+  }
+  return {
+    filterIds, verifiedSublayerWeight,
+    state: events[0][1],
+    hitsByFilter: counts.slice(0, 6),
+    bindHits: { ipv4Tcp: counts[6], ipv6Tcp: counts[7], ipv4Udp: counts[8], ipv6Udp: counts[9] },
+  };
+}
+
 function matrixEvidence(value) {
   const keys = ['ipv4Tcp', 'ipv6Tcp', 'ipv4Udp', 'ipv6Udp'];
   const states = /^(DELIVERED|UNAVAILABLE|(?:BIND|CONNECT|SEND)_(?:DENIED|ERROR|TIMEOUT))$/u;
@@ -129,12 +149,15 @@ async function exerciseWfp(report, run, workspace) {
   const net = await import('node:net');
   const hostBefore = await loopbackMatrix(net, dgram);
   const collect = async (mode, timeoutMs = NORMAL_TIMEOUT) => {
+    const startedAt = new Date().toISOString();
     const result = await run({ timeoutMs, args: [
       '-e', WFP_BOOTSTRAP, mode, join(workspace, 'wfp-' + mode + '-pid.txt'), join(workspace, 'wfp-' + mode + '-gate.txt'),
     ] });
     return {
+      startedAt, finishedAt: new Date().toISOString(),
       exitCode: result.code, timedOut: result.timedOut, lease: wfpLeaseEvidence(result),
       matrix: matrixEvidence(parsedOutput(result)), diagnostic: supervisorDiagnostic(result),
+      dropEvidence: mode === 'filtered' ? wfpDropEvidence(result) : null,
       wfpError: result.stderr.match(/^\[CLU-E WFP ERROR\] (WFP_[A-Z0-9_]{1,70}(?:_0x[A-F0-9]{8})?)\r?$/mu)?.[1] ?? null,
     };
   };
@@ -155,12 +178,19 @@ async function exerciseWfp(report, run, workspace) {
     control.lease.gateReleased && control.lease.jobEmpty;
   const controlledDifference = containedBlocked && control.matrix !== null &&
     Object.values(control.matrix).every((value) => value === 'DELIVERED');
+  const bindContrast = Boolean(controlCompleted && filtered.matrix !== null &&
+    Object.entries(control.matrix).every(([key, value]) => {
+      const postBindStep = key.endsWith('Tcp') ? 'CONNECT_' : 'SEND_';
+      return (value === 'DELIVERED' || value.startsWith(postBindStep)) && filtered.matrix[key] === 'BIND_DENIED';
+    }));
   const leaseLifecycle = validLease(filtered, 'filtered') && validLease(deadline, 'deadline') &&
     deadline.exitCode === 124 && !deadline.timedOut;
   report.wfp = { hostBefore, hostAfter, hostControl, control, filtered, deadline, containedBlocked,
-    controlCompleted, controlledDifference, leaseLifecycle };
-  report.wfpStatus = !leaseLifecycle || !hostControl || !controlCompleted || !containedBlocked ? 'FAIL' :
-    controlledDifference ? 'FILTER_DIFFERENTIAL_OBSERVED' : 'FILTER_BOUND_ATTRIBUTION_UNPROVEN';
+    controlCompleted, controlledDifference, bindContrast, leaseLifecycle };
+  if (!leaseLifecycle || !hostControl || !controlCompleted || !containedBlocked) report.wfpStatus = 'FAIL';
+  else if (bindContrast) report.wfpStatus = 'BIND_DENIAL_CONTRAST_OBSERVED';
+  else if (controlledDifference) report.wfpStatus = 'FILTER_DIFFERENTIAL_OBSERVED';
+  else report.wfpStatus = 'FILTER_BOUND_ATTRIBUTION_UNPROVEN';
   console.info('[CLU-E WFP diagnostic]', report.wfpStatus);
 }
 
@@ -576,7 +606,7 @@ async function qualify(wfpDiagnostic) {
   if (wfpDiagnostic) {
     report.canaryStatus = 'NOT_EXECUTED';
     report.status = report.blocker === null && report.fixtureRemoved === true &&
-      ['FILTER_DIFFERENTIAL_OBSERVED', 'FILTER_BOUND_ATTRIBUTION_UNPROVEN'].includes(report.wfpStatus)
+      ['BIND_DENIAL_CONTRAST_OBSERVED', 'FILTER_DIFFERENTIAL_OBSERVED', 'FILTER_BOUND_ATTRIBUTION_UNPROVEN'].includes(report.wfpStatus)
       ? 'WFP_DIAGNOSTIC_COMPLETE' : 'WFP_DIAGNOSTIC_FAILED';
     if (report.status === 'WFP_DIAGNOSTIC_FAILED') report.blocker ??= 'WFP_PROBE_EVIDENCE_INCOMPLETE';
   } else if (report.blocker !== null || report.fixtureRemoved === false || REQUIRED.some((id) => report.cases[id] === 'FAIL')) {

@@ -9,6 +9,8 @@ internal sealed class WfpBootstrapRun
 {
     private readonly Request request;
     private WfpLoopbackLease lease;
+    private WfpDropObservation dropObservation;
+    private ulong[] verifiedFilterIds;
     private bool observed;
     private bool released;
     private bool unique;
@@ -64,6 +66,11 @@ internal sealed class WfpBootstrapRun
                 lease = WfpLoopbackLease.Install(packageSid, out installFailureCleanupVerified);
                 filterCount = lease.Count;
                 if (filterCount != 6) throw new InvalidOperationException("WFP_FILTER_COUNT_INVALID");
+                if (request.wfpMode == "filtered")
+                {
+                    verifiedFilterIds = lease.FilterIds;
+                    dropObservation = WfpDropObservation.Start(verifiedFilterIds);
+                }
             }
             catch (InvalidOperationException error)
             {
@@ -82,10 +89,30 @@ internal sealed class WfpBootstrapRun
     internal bool Finish(bool jobEmpty)
     {
         bool filtersRemoved = !installAttempted || installFailureCleanupVerified;
-        if (lease != null)
+        try
         {
-            try { filtersRemoved = lease.ReleaseAndVerify(); }
-            catch { filtersRemoved = false; }
+            if (verifiedFilterIds != null)
+            {
+                Console.Error.WriteLine("[CLU-E WFP IDS] " +
+                    lease.VerifiedSublayerWeight.ToString(CultureInfo.InvariantCulture) + " " +
+                    String.Join(" ", Array.ConvertAll(verifiedFilterIds, id => id.ToString(CultureInfo.InvariantCulture))));
+            }
+            if (dropObservation != null)
+            {
+                int[] bindHits;
+                string state = dropObservation.Finish(out bindHits);
+                Console.Error.WriteLine("[CLU-E WFP DROPS] " + state + " " +
+                    String.Join(" ", Array.ConvertAll(dropObservation.LayerHits, count => count.ToString(CultureInfo.InvariantCulture))) + " " +
+                    String.Join(" ", Array.ConvertAll(bindHits, count => count.ToString(CultureInfo.InvariantCulture))));
+            }
+        }
+        finally
+        {
+            if (lease != null)
+            {
+                try { filtersRemoved = lease.ReleaseAndVerify(); }
+                catch { filtersRemoved = false; }
+            }
         }
         Console.Error.WriteLine("[CLU-E WFP] " + request.wfpMode + " " + Bit(observed) + " " +
             filterCount + " " + Bit(released) + " " + Bit(jobEmpty) + " " +
