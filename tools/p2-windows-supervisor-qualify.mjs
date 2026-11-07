@@ -30,6 +30,13 @@ function parsedOutput(run) {
   catch { return null; }
 }
 
+function supervisorDiagnostic(run) {
+  // Report a bounded code from the supervisor's refusal path. Keep raw output private.
+  if (run.code !== 125) return null;
+  const matches = [...run.stderr.matchAll(/^\[CLU-E supervisor\] (MXC_IMAGE_PIN_MISMATCH|MXC_EXECUTION_REFUSED|WIN32_ERROR_\d{1,10}|REFUSED \([A-Za-z]{1,64}\)\.)\r?$/gmu)];
+  return matches.length === 1 ? matches[0][1] : null;
+}
+
 function writeRequest(root, request) {
   const dir = mkdtempSync(join(root, 'request-'));
   const file = join(dir, 'request.json');
@@ -223,6 +230,7 @@ async function exercise({ report, root, supervisor, resolveWindowsSupervisor, ru
   const candidatePass = passed(candidateRun, changed.args[1]);
   set('allowed-command', baselinePass && candidatePass ? 'PASS' : 'FAIL', {
     baselinePass, candidatePass, baselineExit: baseRun.code, candidateExit: candidateRun.code,
+    baselineDiagnostic: supervisorDiagnostic(baseRun), candidateDiagnostic: supervisorDiagnostic(candidateRun),
   });
   if (!baselinePass || !candidatePass) return;
 
