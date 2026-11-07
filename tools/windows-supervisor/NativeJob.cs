@@ -19,7 +19,7 @@ internal static class NativeJob
     private const int JobList = 0x0002000D;
 
     internal static int Run(string engine, string log, string config, string systemRoot, int timeout,
-        out bool deadlineExpired, Action<IntPtr> observe = null)
+        out bool deadlineExpired, Action<IntPtr> observe = null, Action onJobEmpty = null)
     {
         deadlineExpired = false;
         var clock = Stopwatch.StartNew();
@@ -109,6 +109,7 @@ internal static class NativeJob
             {
                 Check(TerminateJobObject(job, 125));
                 WaitForEmptyJob(job);
+                if (onJobEmpty != null) onJobEmpty();
                 throw;
             }
 
@@ -116,6 +117,7 @@ internal static class NativeJob
             if (wait == WaitObject) Check(GetExitCodeProcess(process.Process, out exit));
             Check(TerminateJobObject(job, wait == WaitTimeout ? 124U : 125U));
             WaitForEmptyJob(job);
+            if (onJobEmpty != null) onJobEmpty();
             deadlineExpired = wait == WaitTimeout;
             return unchecked((int)exit);
         }

@@ -57,8 +57,7 @@ internal static class Supervisor
                         try
                         {
                             exit = NativeJob.Run(engine, log, config, request.systemRoot, remaining,
-                                out deadlineExpired, wfp.Observe);
-                            jobEmpty = true;
+                                out deadlineExpired, wfp.Observe, () => jobEmpty = true);
                         }
                         finally { lifecycleComplete = wfp.Finish(jobEmpty); }
                         if (!lifecycleComplete) return Refuse("WFP_BOOTSTRAP_LIFECYCLE_INCOMPLETE");

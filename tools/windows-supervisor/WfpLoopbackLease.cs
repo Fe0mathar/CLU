@@ -9,7 +9,9 @@ internal sealed class WfpLoopbackLease : IDisposable
     private const uint RpcAuthnWinnt = 10;
     private const uint DynamicSession = 1;
     private const uint ClearActionRight = 8;
-    private const uint DisallowedFilterFlags = 0x17; // Persistent, boot-time, provider context, disabled.
+    private const uint SublayerPersistent = 0x01;
+    // Persistent, boot-time, provider context, permit-if-unregistered, disabled.
+    private const uint DisallowedFilterFlags = 0x37;
     private const uint ActionBlock = 0x00001001;
     private const int MatchEqual = 0;
     private const int SidValue = 13;
@@ -40,8 +42,9 @@ internal sealed class WfpLoopbackLease : IDisposable
 
     internal int Count { get { return filterKeys.Length; } }
 
-    internal static WfpLoopbackLease Install(byte[] packageSid)
+    internal static WfpLoopbackLease Install(byte[] packageSid, out bool failureCleanupVerified)
     {
+        failureCleanupVerified = false;
         if (packageSid == null || packageSid.Length != 40)
             throw new ArgumentException("The diagnostic requires one unique AppContainer package SID.");
         byte[] expectedSid = (byte[])packageSid.Clone();
@@ -58,6 +61,7 @@ internal sealed class WfpLoopbackLease : IDisposable
         Guid sublayerKey = Guid.NewGuid();
         var filterKeys = new Guid[Layers.Length];
         var filterIds = new ulong[Layers.Length];
+        var lease = new WfpLoopbackLease(engine, sublayerKey, filterKeys);
         bool transaction = false;
         IntPtr conditionPointer = IntPtr.Zero;
         GCHandle pinnedSid = new GCHandle();
@@ -96,12 +100,13 @@ internal sealed class WfpLoopbackLease : IDisposable
             VerifySublayer(engine, sublayerKey);
             for (int index = 0; index < Layers.Length; index++)
                 VerifyFilter(engine, filterKeys[index], filterIds[index], Layers[index], sublayerKey, expectedSid);
-            return new WfpLoopbackLease(engine, sublayerKey, filterKeys);
+            return lease;
         }
         catch
         {
             if (transaction) FwpmTransactionAbort0(engine);
-            FwpmEngineClose0(engine);
+            try { failureCleanupVerified = lease.ReleaseAndVerify(); }
+            catch { failureCleanupVerified = false; }
             throw;
         }
         finally
@@ -119,8 +124,16 @@ internal sealed class WfpLoopbackLease : IDisposable
         {
             if (result == IntPtr.Zero) throw new InvalidOperationException("WFP_SUBLAYER_READBACK_MISSING");
             var layer = (Sublayer)Marshal.PtrToStructure(result, typeof(Sublayer));
-            if (layer.Key != key || layer.Flags != 0 || layer.Weight != UInt16.MaxValue || layer.ProviderKey != IntPtr.Zero)
-                throw new InvalidOperationException("WFP_SUBLAYER_READBACK_MISMATCH");
+            if (layer.Key != key)
+                throw new InvalidOperationException("WFP_SUBLAYER_KEY_MISMATCH");
+            // Dynamic lifetime is established by the engine session. The documented
+            // persistence bit is the sublayer flag that changes that lifetime check.
+            if ((layer.Flags & SublayerPersistent) != 0)
+                throw new InvalidOperationException("WFP_SUBLAYER_PERSISTENT_0x" + layer.Flags.ToString("X8"));
+            if (layer.Weight != UInt16.MaxValue)
+                throw new InvalidOperationException("WFP_SUBLAYER_WEIGHT_0x" + layer.Weight.ToString("X8"));
+            if (!ProviderUnassigned(layer.ProviderKey))
+                throw new InvalidOperationException("WFP_SUBLAYER_PROVIDER_ASSIGNED");
         }
         finally { FwpmFreeMemory0(ref result); }
     }
@@ -133,10 +146,16 @@ internal sealed class WfpLoopbackLease : IDisposable
         {
             if (result == IntPtr.Zero) throw new InvalidOperationException("WFP_FILTER_READBACK_MISSING");
             var filter = (Filter)Marshal.PtrToStructure(result, typeof(Filter));
-            if (filter.Key != key || id == 0 || filter.Id != id || filter.LayerKey != layer || filter.SublayerKey != sublayer ||
-                (filter.Flags & (ClearActionRight | DisallowedFilterFlags)) != ClearActionRight || filter.Action.Type != ActionBlock ||
-                filter.ConditionCount != 1 || filter.Conditions == IntPtr.Zero || filter.ProviderKey != IntPtr.Zero)
-                throw new InvalidOperationException("WFP_FILTER_READBACK_MISMATCH");
+            if (filter.Key != key || id == 0 || filter.Id != id || filter.LayerKey != layer || filter.SublayerKey != sublayer)
+                throw new InvalidOperationException("WFP_FILTER_IDENTITY_MISMATCH");
+            if ((filter.Flags & (ClearActionRight | DisallowedFilterFlags)) != ClearActionRight)
+                throw new InvalidOperationException("WFP_FILTER_FLAGS_0x" + filter.Flags.ToString("X8"));
+            if (filter.Action.Type != ActionBlock)
+                throw new InvalidOperationException("WFP_FILTER_ACTION_0x" + filter.Action.Type.ToString("X8"));
+            if (!ProviderUnassigned(filter.ProviderKey))
+                throw new InvalidOperationException("WFP_FILTER_PROVIDER_ASSIGNED");
+            if (filter.ConditionCount != 1 || filter.Conditions == IntPtr.Zero)
+                throw new InvalidOperationException("WFP_FILTER_CONDITION_SHAPE");
             var condition = (FilterCondition)Marshal.PtrToStructure(filter.Conditions, typeof(FilterCondition));
             IntPtr observedSid = condition.Value.Data;
             if (condition.Key != PackageId || condition.Match != MatchEqual || condition.Value.Type != SidValue ||
@@ -148,6 +167,11 @@ internal sealed class WfpLoopbackLease : IDisposable
                 if (bytes[index] != sid[index]) throw new InvalidOperationException("WFP_PACKAGE_SCOPE_READBACK_MISMATCH");
         }
         finally { FwpmFreeMemory0(ref result); }
+    }
+
+    private static bool ProviderUnassigned(IntPtr provider)
+    {
+        return provider == IntPtr.Zero || (Guid)Marshal.PtrToStructure(provider, typeof(Guid)) == Guid.Empty;
     }
 
     // Call after terminating and observing the exact fixture tree. The independent
@@ -167,6 +191,7 @@ internal sealed class WfpLoopbackLease : IDisposable
         {
             foreach (Guid filterKey in filterKeys)
             {
+                if (filterKey == Guid.Empty) continue;
                 Guid key = filterKey;
                 IntPtr result;
                 uint status = FwpmFilterGetByKey0(observer, ref key, out result);

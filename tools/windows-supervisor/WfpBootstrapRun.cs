@@ -12,6 +12,8 @@ internal sealed class WfpBootstrapRun
     private bool observed;
     private bool released;
     private bool unique;
+    private bool installAttempted;
+    private bool installFailureCleanupVerified;
     private int filterCount;
 
     internal WfpBootstrapRun(Request request)
@@ -58,7 +60,8 @@ internal sealed class WfpBootstrapRun
         {
             try
             {
-                lease = WfpLoopbackLease.Install(packageSid);
+                installAttempted = true;
+                lease = WfpLoopbackLease.Install(packageSid, out installFailureCleanupVerified);
                 filterCount = lease.Count;
                 if (filterCount != 6) throw new InvalidOperationException("WFP_FILTER_COUNT_INVALID");
             }
@@ -78,7 +81,7 @@ internal sealed class WfpBootstrapRun
 
     internal bool Finish(bool jobEmpty)
     {
-        bool filtersRemoved = filterCount == 0;
+        bool filtersRemoved = !installAttempted || installFailureCleanupVerified;
         if (lease != null)
         {
             try { filtersRemoved = lease.ReleaseAndVerify(); }
