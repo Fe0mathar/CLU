@@ -22,6 +22,7 @@ REM Use the installed Windows tools even when Explorer inherited an older PATH.
 if exist "%SystemRoot%\System32\where.exe" set "PATH=%SystemRoot%\System32;%PATH%"
 if exist "%ProgramFiles%\Git\cmd\git.exe" set "PATH=%ProgramFiles%\Git\cmd;%PATH%"
 if exist "%ProgramFiles%\GitHub CLI\gh.exe" set "PATH=%ProgramFiles%\GitHub CLI;%PATH%"
+if exist "config\project-profiles.yaml" set "CLU_SHOW_HOST_CONSOLE=1"
 
 echo [1/3] Building CLU-E from source...
 call npm run build

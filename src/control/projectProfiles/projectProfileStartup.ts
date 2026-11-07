@@ -20,6 +20,7 @@ import { z } from 'zod';
 
 import { hashBytes, nowIso } from '../../shared/ids.js';
 import {
+  PROJECT_PROFILE_HASH_VERSION,
   absolutePathForm,
   isoTimestampSchema,
   projectIdSchema,
@@ -105,6 +106,7 @@ export interface ProjectProfileCutoverOptions {
   readonly confirmation: string;
   readonly actor?: Actor;
   readonly now?: () => string;
+  readonly verifyWorkspace?: (record: ProjectProfileRecord) => void;
 }
 
 export interface ProjectProfileCutoverResult {
@@ -198,11 +200,7 @@ export function loadActiveProjectProfileForStartup(repoRoot: string): ActiveStar
   }
   const record = registry.getProfile(pointer.projectId);
   assertProjectProfileHash(record, `Project Profile ${record.profile.projectId}`);
-  if (
-    pointer.projectProfileHash !== record.projectProfileHash ||
-    pointer.profileGeneration !== record.generation ||
-    pointer.targetRootIdentity !== record.profile.targetRootIdentity
-  ) {
+  if (!pointerMatchesRecord(pointer, record)) {
     throw new ProjectProfileStartupError(
       'STARTUP_POINTER_STALE',
       `Active Project Profile pointer for ${pointer.projectId} does not match the durable profile generation. Re-activate the project explicitly.`,
@@ -211,13 +209,22 @@ export function loadActiveProjectProfileForStartup(repoRoot: string): ActiveStar
   return Object.freeze({ selector, selectorPath, registry, pointer, record });
 }
 
+function pointerMatchesRecord(pointer: ActiveProjectPointer, record: ProjectProfileRecord): boolean {
+  return pointer.projectId === record.profile.projectId &&
+    pointer.projectProfileHash === record.projectProfileHash &&
+    pointer.profileGeneration === record.generation &&
+    pointer.targetRootIdentity === record.profile.targetRootIdentity;
+}
+
 export function projectProfileCutoverConfirmation(record: ProjectProfileRecord): string {
-  return `CUTOVER ${record.profile.projectId} ${record.projectProfileHash.slice(0, 12)}`;
+  const digestOffset = PROJECT_PROFILE_HASH_VERSION.length + 1;
+  const digestPrefix = record.projectProfileHash.slice(digestOffset, digestOffset + 12);
+  return `CUTOVER ${record.profile.projectId} ${record.generation} ${digestPrefix}`;
 }
 
 /**
- * Performs the explicit one-way startup cutover. It does not migrate/adopt the workspace; callers
- * must run the dedicated migration first. The legacy configuration is preserved byte-for-byte.
+ * Enables explicit profile startup. The caller can check the exact workspace in read-only mode
+ * before publication. This operation preserves the legacy configuration byte-for-byte.
  */
 export function enableProjectProfileStartup(
   options: ProjectProfileCutoverOptions,
@@ -250,6 +257,15 @@ export function enableProjectProfileStartup(
     );
   }
   const legacyBytes = readFileSync(legacyConfigPath);
+  options.verifyWorkspace?.(record);
+  const verified = options.registry.getProfile(record.profile.projectId);
+  if (verified.generation !== record.generation || verified.projectProfileHash !== record.projectProfileHash ||
+    !readFileSync(legacyConfigPath).equals(legacyBytes)) {
+    throw new ProjectProfileStartupError(
+      'STARTUP_POINTER_STALE',
+      'Project Profile or installation configuration changed during cutover verification. Read and verify the current state.',
+    );
+  }
   const legacyHash = hashBytes(legacyBytes);
   const backupRelative = join('config', 'backups', `clue.config.v2.${legacyHash.slice(0, 12)}.yaml`)
     .replace(/\\/gu, '/');
@@ -269,11 +285,15 @@ export function enableProjectProfileStartup(
 
   const previous = options.registry.active();
   let pointer: ActiveProjectPointer | null = null;
+  let publishedText: string | null = null;
   try {
     pointer = options.registry.activate(record.profile.projectId, {
       actor: options.actor ?? 'creator',
       reason: 'CONFIGURATION_V3_CUTOVER',
-    });
+    }, record);
+    if (!pointerMatchesRecord(pointer, record)) {
+      throw new ProjectProfileStartupError('STARTUP_POINTER_STALE', 'Cutover activated a different Project Profile generation.');
+    }
     const recordedAt = now();
     const selector = projectProfileStartupSchema.parse({
       version: PROJECT_PROFILE_STARTUP_VERSION,
@@ -294,9 +314,12 @@ export function enableProjectProfileStartup(
         recorded_by: options.actor ?? 'creator',
       },
     });
-    writeTextAtomically(selectorPath, stringifyYaml(selector, { lineWidth: 0 }));
+    const selectorText = stringifyYaml(selector, { lineWidth: 0 });
+    writeTextAtomically(selectorPath, selectorText, { createOnly: true });
+    publishedText = selectorText;
     const loaded = loadActiveProjectProfileForStartup(options.repoRoot);
-    if (loaded === null || loaded.pointer.projectId !== record.profile.projectId) {
+    if (loaded === null || !pointerMatchesRecord(loaded.pointer, record) ||
+      loaded.pointer.registryGeneration !== pointer.registryGeneration || loaded.pointer.activatedAt !== pointer.activatedAt) {
       throw new ProjectProfileStartupError(
         'STARTUP_POINTER_STALE',
         'Configuration-v3 cutover verification did not resolve the requested active project.',
@@ -311,16 +334,21 @@ export function enableProjectProfileStartup(
       pointer,
     });
   } catch (error) {
-    if (existsSync(selectorPath)) removeFileDurably(selectorPath);
+    if (publishedText !== null && existsSync(selectorPath) && readFileSync(selectorPath, 'utf8') === publishedText) {
+      removeFileDurably(selectorPath);
+    }
     if (previous !== null && pointer !== null && previous.projectId !== pointer.projectId) {
       try {
         options.registry.activate(previous.projectId, {
           actor: options.actor ?? 'creator',
           reason: 'CONFIGURATION_V3_CUTOVER_ROLLBACK',
+        }, {
+          generation: previous.profileGeneration,
+          projectProfileHash: previous.projectProfileHash,
+          registryGeneration: pointer.registryGeneration,
         });
       } catch {
-        // Preserve the original cutover failure. Legacy-v2 startup remains selected because the
-        // selector was removed; the registry pointer is not consulted in legacy mode.
+        // Preserve the cutover failure and any intervening registry mutation.
       }
     }
     throw error;

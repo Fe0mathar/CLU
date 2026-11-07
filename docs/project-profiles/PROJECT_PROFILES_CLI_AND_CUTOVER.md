@@ -16,13 +16,19 @@ After all implementation batches are installed and the Windows preflight is gree
 3. clue project validate <projectId>
 4. clue project adopt-legacy <projectId> --confirmation "ADOPT LEGACY WORKSPACE ..."
 5. run the explicit Host/Git/Chrome/GPT readiness commands as required
-6. clue project cutover-v3 <projectId> --confirmation "CUTOVER ..."
+6. clue project cutover-v3 <projectId> --confirmation "CUTOVER <id> <generation> <12 digest characters>"
 7. restart and verify `clue project active`
 ```
 
 Migration, workspace adoption and startup cutover are deliberately separate. A profile may be
 created and reviewed without claiming ownership of an existing workspace, and a workspace may be
 adopted without changing startup authority.
+
+## Existing native profile with a fresh workspace
+
+Use `clue project init <id>` to preview the saved generation, workspace paths and confirmation phrase. Repeat the command with `--confirmation` and the exact phrase to initialize its owned workspace and founding mission. Use `clue project readiness <id> --operation local-proof` to verify the opened profile workspace read-only. A legacy workspace uses the migration and adoption sequence above.
+
+For a profile-bound startup, use the `cutover-v3` confirmation shown above. The digest is the first 12 hexadecimal characters after `profile:v1:`. Cutover requires a successful read-only open of the exact workspace and its current mission. Restart through `CLUE-Dashboard.bat` and verify `clue project active`. The legacy Windows P2 setup launcher serves the separate legacy runtime.
 
 ## Rollback
 

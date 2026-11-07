@@ -486,7 +486,11 @@ export function mountConfigurationPanel(options) {
   async function activateProfile() {
     const snapshot = state.snapshot();
     const record = snapshot.selectedRecord;
-    if (!record || snapshot.dirty || snapshot.validation?.valid !== true) return;
+    if (!record || snapshot.dirty) return;
+    if (snapshot.validation?.valid !== true) {
+      state.setNotice('bad', 'PROJECT_VALIDATION_REQUIRED: Validate the saved profile in the Project card before activation.');
+      return;
+    }
     const token = state.beginActivation();
     const allowed = options.onActivationPending?.(record, snapshot.validation);
     if (allowed === false) {

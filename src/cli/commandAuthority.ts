@@ -99,6 +99,13 @@ export const COMMAND_AUTHORITIES: readonly CommandAuthority[] = [
     rationale: 'validates profile, authority, benchmark, recognition and Git identity without durable writes',
   },
   {
+    command: 'project init',
+    capability: 'fs.write.workspace',
+    mutates: true,
+    requiresMission: false,
+    rationale: 'initializes one explicitly confirmed native workspace under its exact saved profile generation',
+  },
+  {
     command: 'project readiness',
     capability: 'fs.read.workspace',
     mutates: false,

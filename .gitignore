@@ -112,6 +112,10 @@ workspace/certificates/*/
 
 
 # --- Isolation zones outside the workspace -----------------------------------
+
+# Local Configuration-v3 startup selector and byte-exact cutover backups.
+/config/project-profiles.yaml
+/config/backups/clue.config.v2.*.yaml
 # `config/clue.config.yaml` places the shadow clone and the test browser profile
 # outside the repository (`F:/CLU/shadow/clue`, `F:/CLU/chrome-profile`). Git cannot
 # express an absolute path, and does not need to. These relative rules exist because

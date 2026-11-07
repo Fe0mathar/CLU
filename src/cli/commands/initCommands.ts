@@ -21,7 +21,6 @@ import {
   createWorkspaceLayout,
   findRepoRoot,
   loadConfig,
-  resolveConfigPaths,
   withRuntime,
 } from '../../control/runtime.js';
 import { printChecks, short, write, type Check } from '../output/formatter.js';
@@ -35,7 +34,7 @@ const runGuarded = (work: () => number): number => guardedWith(work, write);
 
 function commandInit(): number {
   const repoRoot = findRepoRoot();
-  const config = resolveConfigPaths(loadConfig(repoRoot), repoRoot);
+  const config = loadConfig(repoRoot, { resolvePaths: true });
   createWorkspaceLayout(config.workspace.root);
 
   return withRuntime({ withLog: true, verifyLog: 'tail' }, (runtime) => {

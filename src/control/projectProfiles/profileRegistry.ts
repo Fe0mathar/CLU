@@ -165,6 +165,12 @@ export interface ProjectProfileMutationOptions {
   readonly reason?: string;
 }
 
+interface ProjectProfileActivationPrecondition {
+  readonly generation: number;
+  readonly projectProfileHash: string;
+  readonly registryGeneration?: number;
+}
+
 function mutationOptions(value: ProjectProfileMutationOptions | Actor | undefined): ProjectProfileMutationOptions {
   if (value === undefined) return { actor: 'creator' };
   return typeof value === 'string' ? { actor: value } : value;
@@ -405,13 +411,24 @@ export class ProjectProfileRegistry {
     });
   }
 
-  public activate(projectId: string, options?: ProjectProfileMutationOptions | Actor): ActiveProjectPointer {
+  public activate(
+    projectId: string,
+    options?: ProjectProfileMutationOptions | Actor,
+    expected?: ProjectProfileActivationPrecondition,
+  ): ActiveProjectPointer {
     const id = projectIdSchema.parse(projectId);
     const operation = mutationOptions(options);
     return withExclusiveFileLock(this.lockPath, () => {
       this.recoverLocked();
       const state = this.readState();
       const record = this.getProfileFromState(state, id);
+      if (expected !== undefined && (record.generation !== expected.generation ||
+        record.projectProfileHash !== expected.projectProfileHash ||
+        (expected.registryGeneration !== undefined && state.generation !== expected.registryGeneration))) {
+        throw new ProfileRegistryError('ACTIVE_POINTER_CONFLICT',
+          `Project Profile ${id} or its registry changed before activation. Read and verify the current generation.`,
+          { projectId: id });
+      }
       const activatedAt = this.now();
       const afterRegistry = sortedRegistry({ ...state, generation: state.generation + 1, activeProjectId: id, activatedAt });
       let transaction = this.makeTransaction({ operation: 'activate', options: operation, profile: record.profile, afterRegistry, previous: record });
@@ -457,6 +474,16 @@ export class ProjectProfileRegistry {
 
   public recover(): void {
     withExclusiveFileLock(this.lockPath, () => this.recoverLocked());
+  }
+
+  /** Holds the saved generation stable during an external workspace operation. */
+  public withStableProfile<T>(projectId: string, work: (record: ProjectProfileRecord) => T): T {
+    return withExclusiveFileLock(this.lockPath, () => {
+      if (readdirSync(this.transactionsDir).some((name) => name.endsWith('.json'))) {
+        throw new ProfileRegistryError('REGISTRY_INTEGRITY_FAILED', 'Recover the pending Project Profile transaction before initializing a workspace.');
+      }
+      return work(this.getProfile(projectId));
+    });
   }
 
   private getProfileFromState(state: ProjectProfileRegistryState, projectId: string): ProjectProfileRecord {

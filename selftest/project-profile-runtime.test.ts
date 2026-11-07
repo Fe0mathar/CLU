@@ -17,7 +17,7 @@ import { computeProjectProfileHash } from '../src/control/projectProfiles/profil
 import type { ProjectProfileRecord } from '../src/shared/schemas.js';
 import { makeProjectProfileFixture } from './project-profile-fixture.js';
 
-function writeInstallationConfig(root: string): void {
+function writeInstallationConfig(root: string, legacyProjectId = 'legacy'): void {
   const legacyTarget = join(root, 'legacy');
   const legacyWorkspace = join(root, 'legacy-workspace');
   const legacyShadow = join(root, 'legacy-shadow');
@@ -38,7 +38,7 @@ function writeInstallationConfig(root: string): void {
   const config = {
     version: 2,
     project: {
-      id: 'legacy',
+      id: legacyProjectId,
       name: 'Legacy fixture target',
       root: legacyTarget,
       main_branch: 'main',
@@ -154,6 +154,7 @@ test('one profile record assembles one complete real runtime and read-only succe
   const runtime = openProfileRuntime(fixture.root, record, 'initialize-new');
   assert.equal(runtime.profileMode, 'project-profile');
   assert.equal(runtime.workspaceRoot, record.profile.workspaceRoot);
+  assert.equal(runtime.config.project.id, record.profile.projectId, 'the profile ID differs from the physical directory name');
   assert.equal(runtime.config.project.root, record.profile.targetRoot);
   assert.deepEqual(runtime.projectIdentity, expected);
   assert.equal(runtime.projectProfile?.projectProfileHash, record.projectProfileHash);
@@ -172,6 +173,7 @@ test('one profile record assembles one complete real runtime and read-only succe
     workspaceIdentityOnMissing: 'reject',
   });
   assert.equal(observer.readOnly, true);
+  assert.equal(observer.config.project.id, record.profile.projectId);
   assert.equal(observer.projectIdentity?.projectProfileHash, record.projectProfileHash);
   assert.equal(observer.projections.workspaceIdentity()?.initialProfileHash, record.projectProfileHash);
   observer.dispose();
@@ -181,12 +183,13 @@ test('legacy v2 startup stays unchanged and profile target identity is re-verifi
   const fixture = makeProjectProfileFixture();
   t.after(() => fixture.dispose());
   mkdirSync(join(fixture.target, 'src'), { recursive: true });
-  writeInstallationConfig(fixture.root);
+  writeInstallationConfig(fixture.root, 'legacy-config-id');
 
   const legacy = openRuntime({ repoRoot: fixture.root, withLog: true });
   assert.equal(legacy.profileMode, 'legacy-v2');
   assert.equal(legacy.projectProfile, null);
   assert.equal(legacy.projectIdentity, null);
+  assert.equal(legacy.config.project.id, 'legacy', 'legacy-v2 still infers a mismatched ID from the physical directory');
   legacy.dispose();
 
   const registry = new ProjectProfileRegistry(fixture.profiles);

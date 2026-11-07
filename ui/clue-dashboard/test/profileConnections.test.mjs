@@ -77,6 +77,9 @@ test('profile connection controls register a verified GitHub checkout and ask Wi
     assert.match(root.innerHTML, /Select a saved Project Profile to connect its checkout/);
     assert.match(root.innerHTML, /Select a saved Project Profile to configure its key/);
     await panel.load();
+    await click('activate-project');
+    assert.match(root.innerHTML, /PROJECT_VALIDATION_REQUIRED/);
+    assert.ok(calls.every(({ path }) => !path.endsWith('/activate')));
     await click('sign-in-github');
     assert.match(root.innerHTML, /SIGN_IN_STARTED/);
     await click('list-github-repositories');

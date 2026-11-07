@@ -116,6 +116,7 @@ test('DEV-P1-07: read-only and mission are the defaults, and the exceptions are 
     'project create',
     'project cutover-v3',
     'project delete',
+    'project init',
     'project list',
     'project migrate-legacy',
     'project readiness',

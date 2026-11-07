@@ -20,6 +20,7 @@ import {
   projectProfileCutoverConfirmation,
   ProjectProfileRegistry,
 } from '../../control/projectProfiles/index.js';
+import { bootstrapProjectWorkspace } from '../../control/projectProfiles/projectWorkspaceBootstrap.js';
 import {
   deleteConfirmation,
   ProjectProfilesApiService,
@@ -164,6 +165,40 @@ export function registerProjectCommands(program: Command): void {
     });
 
   project
+    .command('init')
+    .description('preview or initialize one exact native Project Profile workspace')
+    .argument('<project-id>')
+    .option('--confirmation <phrase>', 'INIT WORKSPACE <id> <generation> <hash-prefix>')
+    .action((projectId: string, options: { readonly confirmation?: string }) => {
+      process.exitCode = guarded(() => {
+        const context = projectContext(project.opts<ProjectGroupOptions>());
+        const record = context.registry.getProfile(projectId);
+        const digest = record.projectProfileHash.slice('profile:v1:'.length);
+        const expected = `INIT WORKSPACE ${record.profile.projectId} ${record.generation} ${digest.slice(0, 12)}`;
+        if (options.confirmation === undefined) {
+          output({
+            state: 'CONFIRMATION_REQUIRED',
+            projectId: record.profile.projectId,
+            profileGeneration: record.generation,
+            workspaceRoot: record.profile.workspaceRoot,
+            databasePath: record.profile.state.databasePath,
+            confirmation: expected,
+          });
+          return 0;
+        }
+        if (options.confirmation !== expected) throw new Error(`Workspace initialization requires exact confirmation: ${expected}`);
+        output(bootstrapProjectWorkspace({
+          repoRoot: context.repoRoot,
+          registry: context.registry,
+          projectId: record.profile.projectId,
+          expectedGeneration: record.generation,
+          expectedProfileHash: record.projectProfileHash,
+        }));
+        return 0;
+      });
+    });
+
+  project
     .command('readiness')
     .description('calculate operation-specific readiness through a profile-bound read-only runtime')
     .argument('<project-id>')
@@ -241,7 +276,7 @@ export function registerProjectCommands(program: Command): void {
         const pointer = context.registry.activate(record.profile.projectId, {
           actor: 'cli',
           reason: 'CLI_NEXT_STARTUP_ACTIVATION',
-        });
+        }, record);
         output({ pointer, effective: 'next startup or ProjectRuntimeManager live switch' });
         return 0;
       });
@@ -288,9 +323,9 @@ export function registerProjectCommands(program: Command): void {
 
   project
     .command('cutover-v3')
-    .description('enable profile-bound startup after migration, adoption and validation')
+    .description('enable profile-bound startup for a validated, initialized workspace')
     .argument('<project-id>')
-    .requiredOption('--confirmation <phrase>', 'CUTOVER <id> <hash-prefix>')
+    .requiredOption('--confirmation <phrase>', 'CUTOVER <id> <generation> <hash-prefix>')
     .action((projectId: string, options: { readonly confirmation: string }) => {
       process.exitCode = guarded(() => {
         const context = projectContext(project.opts<ProjectGroupOptions>());
@@ -303,6 +338,21 @@ export function registerProjectCommands(program: Command): void {
           projectId,
           confirmation: options.confirmation,
           actor: 'cli',
+          verifyWorkspace: (candidate) => {
+            const validation = validateProjectProfileRecord(candidate);
+            if (!validation.valid) throw new Error(`Run project validate ${candidate.profile.projectId} and resolve the validation issues before cutover.`);
+            const runtime = openProjectRuntime(candidate, {
+              repoRoot: context.repoRoot,
+              withLog: false,
+              readOnly: true,
+            });
+            try {
+              runtime.requireMission();
+              runtime.requireFreshProjections();
+            } finally {
+              runtime.dispose();
+            }
+          },
         }));
         return 0;
       });
@@ -317,8 +367,8 @@ export function registerProjectCommands(program: Command): void {
         if (options.confirmation !== 'DISABLE PROJECT PROFILE STARTUP') {
           throw new Error('Rollback requires exact confirmation: DISABLE PROJECT PROFILE STARTUP');
         }
-        const context = projectContext(project.opts<ProjectGroupOptions>());
-        output({ disabled: disableProjectProfileStartup(context.repoRoot), profileDataDeleted: false });
+        const repoRoot = findRepoRoot(project.opts<ProjectGroupOptions>().repoRoot);
+        output({ disabled: disableProjectProfileStartup(repoRoot), profileDataDeleted: false });
         return 0;
       });
     });

@@ -14,6 +14,7 @@ const EXPECTED = [
   'create',
   'cutover-v3',
   'delete',
+  'init',
   'list',
   'migrate-legacy',
   'readiness',
@@ -68,6 +69,9 @@ test('Batch 6: state-changing commands require explicit file, generation or conf
   assert.deepEqual(requiredOptions(child('adopt-legacy')), ['--confirmation']);
   assert.deepEqual(requiredOptions(child('cutover-v3')), ['--confirmation']);
   assert.deepEqual(requiredOptions(child('rollback-v3')), ['--confirmation']);
+  const initialization = child('init');
+  assert.ok(initialization.options.some((option) => option.long === '--confirmation'));
+  assert.deepEqual(requiredOptions(initialization), [], 'init without confirmation is a preview');
 });
 
 test('Batch 6: CLI exposes credential references only, never an API-key value option', () => {

@@ -449,13 +449,17 @@ export function loadLegacyConfig(repoRoot: string): ClueConfig {
  * Loads the effective configuration for readers that do not assemble a Runtime themselves.
  * Legacy-v2 remains the default. When the explicit Configuration-v3 selector exists, target-
  * specific values are projected from the registry's exact active Project Profile generation.
+ * Callers that need absolute paths can resolve them here without losing the profile identity.
  */
-export function loadConfig(repoRoot: string): ClueConfig {
+export function loadConfig(repoRoot: string, options: { readonly resolvePaths?: boolean } = {}): ClueConfig {
   const installationConfig = loadLegacyConfig(repoRoot);
   const startup = loadActiveProjectProfileForStartup(repoRoot);
-  return startup === null
+  const config = startup === null
     ? installationConfig
     : resolveProjectRuntimeBinding(installationConfig, startup.record).config;
+  return options.resolvePaths === true
+    ? resolveConfigPaths(config, repoRoot, { projectProfileBound: startup !== null })
+    : config;
 }
 
 /**
@@ -564,10 +568,15 @@ function resolveConfiguredPath(label: string, value: string, repoRoot: string): 
  * roots below and `patching.policy_file` are `pathSchema` — a non-empty string — which is why
  * they are the ones that could go wrong.
  */
-export function resolveConfigPaths(config: ClueConfig, repoRoot: string): ClueConfig {
+export function resolveConfigPaths(
+  config: ClueConfig,
+  repoRoot: string,
+  options: { readonly projectProfileBound?: boolean } = {},
+): ClueConfig {
   const absolute = (label: string, value: string): string =>
     resolveConfiguredPath(label, value, repoRoot);
-  const project = normalizeTargetIdentity(config.project);
+  // A Project Profile already binds its distinct ID to the verified physical root.
+  const project = options.projectProfileBound === true ? config.project : normalizeTargetIdentity(config.project);
 
   const resolved: ClueConfig = {
     ...config,
@@ -596,7 +605,7 @@ export function resolveConfigPaths(config: ClueConfig, repoRoot: string): ClueCo
 }
 
 /**
- * C0 — truthful target identity (review §3.2). The scanned root is the ground truth for
+ * C0 — truthful legacy target identity (review §3.2). The scanned root is the ground truth for
  * WHICH program is the target; the framework itself is target-agnostic. When the configured
  * id/name disagree with the root basename — the internal contradiction the review flags
  * (`id: murugan` while `root: .../CLU`) — identity is derived from the root so the graph,
@@ -876,7 +885,9 @@ export function openRuntime(options: RuntimeOptions): Runtime {
     selectedProfile === null
       ? null
       : resolveProjectRuntimeBinding(installationConfig, selectedProfile);
-  const config = resolveConfigPaths(projectBinding?.config ?? installationConfig, repoRoot);
+  const config = resolveConfigPaths(projectBinding?.config ?? installationConfig, repoRoot, {
+    projectProfileBound: projectBinding !== null,
+  });
   const workspaceRoot = config.workspace.root;
   const projectIdentity = projectBinding?.identity ?? null;
   const projectState = projectBinding?.state ?? null;

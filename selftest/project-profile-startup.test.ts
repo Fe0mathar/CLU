@@ -72,6 +72,7 @@ test('Batch 6: startup remains legacy-v2 until an explicit state-bound cutover',
     assert.equal(loadProjectProfileStartup(fixture.root), null);
     assert.equal(registry.active(), null, 'a refused cutover must not publish an active profile');
 
+    let workspaceVerified = false;
     const result = enableProjectProfileStartup({
       repoRoot: fixture.root,
       registry,
@@ -79,8 +80,16 @@ test('Batch 6: startup remains legacy-v2 until an explicit state-bound cutover',
       confirmation: projectProfileCutoverConfirmation(record),
       actor: 'creator',
       now: () => FIXED_AT,
+      verifyWorkspace(candidate) {
+        assert.deepEqual(candidate, record);
+        assert.equal(loadProjectProfileStartup(fixture.root), null);
+        assert.equal(registry.active(), null);
+        assert.equal(existsSync(join(fixture.root, 'config', 'backups')), false);
+        workspaceVerified = true;
+      },
     });
 
+    assert.equal(workspaceVerified, true);
     assert.equal(result.state, 'enabled');
     assert.equal(existsSync(result.selectorPath), true);
     assert.equal(existsSync(result.backupPath), true);
@@ -98,6 +107,9 @@ test('Batch 6: startup remains legacy-v2 until an explicit state-bound cutover',
     assert.equal(effective.project.root, record.profile.targetRoot);
     assert.equal(effective.workspace.root, record.profile.workspaceRoot);
     assert.equal(effective.shadow.root, record.profile.shadowRoot);
+    const resolved = loadConfig(fixture.root, { resolvePaths: true });
+    assert.equal(resolved.project.id, record.profile.projectId);
+    assert.equal(resolved.project.root, record.profile.targetRoot);
 
     assert.equal(disableProjectProfileStartup(fixture.root), true);
     assert.equal(disableProjectProfileStartup(fixture.root), false, 'rollback is idempotent');
@@ -127,6 +139,66 @@ test('Batch 6: malformed Configuration-v3 selectors fail closed', () => {
         error instanceof ProjectProfileStartupError &&
         error.code === 'STARTUP_SELECTOR_MALFORMED',
     );
+  } finally {
+    fixture.dispose();
+  }
+});
+
+test('Configuration-v3 cutover refuses workspace failures and changed confirmed generations', () => {
+  const fixture = makeProjectProfileFixture();
+  try {
+    installLegacyConfiguration(fixture.root);
+    const registry = new ProjectProfileRegistry(fixture.profilesRoot, { now: () => FIXED_AT });
+    const record = registry.create(fixture.profile);
+    const options = {
+      repoRoot: fixture.root,
+      registry,
+      projectId: record.profile.projectId,
+      confirmation: projectProfileCutoverConfirmation(record),
+    };
+    assert.match(options.confirmation, /^CUTOVER alpha 1 [0-9a-f]{12}$/u);
+    assert.throws(() => enableProjectProfileStartup({
+      ...options,
+      verifyWorkspace() { throw new Error('profile database is not ready'); },
+    }), /profile database is not ready/u);
+    assert.equal(existsSync(join(fixture.root, 'config', 'backups')), false);
+    assert.equal(registry.active(), null);
+
+    assert.throws(() => enableProjectProfileStartup({
+      ...options,
+      verifyWorkspace(candidate) {
+        registry.update({ ...candidate.profile, displayName: 'New generation' }, candidate.generation);
+      },
+    }), /changed during cutover verification/u);
+    assert.equal(loadProjectProfileStartup(fixture.root), null);
+    assert.equal(registry.active(), null);
+    assert.equal(existsSync(join(fixture.root, 'config', 'backups')), false);
+    assert.throws(() => registry.activate(options.projectId, 'cli', record), /changed before activation/u);
+    assert.equal(registry.active(), null);
+    assert.throws(() => enableProjectProfileStartup(options), /requires exact confirmation/u);
+  } finally {
+    fixture.dispose();
+  }
+});
+
+test('Configuration-v3 removes its selector if publication no longer loads the verified generation', () => {
+  const fixture = makeProjectProfileFixture();
+  try {
+    installLegacyConfiguration(fixture.root);
+    const registry = new ProjectProfileRegistry(fixture.profilesRoot, { now: () => FIXED_AT });
+    const record = registry.create(fixture.profile);
+    assert.throws(() => enableProjectProfileStartup({
+      repoRoot: fixture.root,
+      registry,
+      projectId: record.profile.projectId,
+      confirmation: projectProfileCutoverConfirmation(record),
+      now() {
+        registry.update({ ...record.profile, displayName: 'Concurrent update' }, record.generation);
+        return FIXED_AT;
+      },
+    }), /did not resolve the requested active project/u);
+    assert.equal(loadProjectProfileStartup(fixture.root), null);
+    assert.equal(registry.getProfile(record.profile.projectId).generation, record.generation + 1);
   } finally {
     fixture.dispose();
   }
