@@ -188,6 +188,34 @@ function Get-MxcExecutable([string] $Arch, [string] $Stage, [string] $Destinatio
     Write-Host "Verified Microsoft MXC $version archive SHA-256 $assetHash"
 }
 
+function Copy-PinnedInstalledMxc([string] $Arch, [string] $Install, [string] $Destination, [System.Collections.IDictionary] $Evidence) {
+    if ($Arch -cne 'x64') { return $false }
+    # Exact x64 image observed after verified v1.0.1 extraction and signature validation.
+    $expected = '090f5d1f7bb93104ab08dcd4e8034ef954aeefcdaf6658dde5f7dff4cfc12f3a'
+    foreach ($directory in Get-ChildItem -LiteralPath $Install -Directory -Force) {
+        if ($directory.Name -cnotmatch '^[a-f0-9]{64}$' -or
+            ($directory.Attributes -band [IO.FileAttributes]::ReparsePoint)) { continue }
+        $source = Join-Path $directory.FullName 'wxc-exec.exe'
+        $entry = Get-Item -LiteralPath $source -Force -ErrorAction SilentlyContinue
+        if ($null -eq $entry -or $entry.PSIsContainer -or
+            ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
+            $entry.Length -lt 1 -or $entry.Length -gt 134217728) { continue }
+        Assert-NoReparsePath $source
+        if ((Get-Sha256 $source) -cne $expected) { continue }
+
+        $Evidence.state = 'INSTALLED_EXECUTABLE_CHECK'
+        [IO.File]::Copy($source, $Destination, $false)
+        if ((Get-Sha256 $Destination) -cne $expected) {
+            throw 'The installed MXC executable changed while it was copied.'
+        }
+        Assert-MicrosoftSignature $Destination
+        $Evidence.state = 'VERIFIED_INSTALLED_EXECUTABLE'
+        Write-Host 'Reusing the installed Microsoft MXC v1.0.1 x64 executable after hash and signature verification.'
+        return $true
+    }
+    return $false
+}
+
 function Write-DiagnosticFile([string] $Path, [System.Collections.IDictionary] $Report) {
     $encoded = $Report | ConvertTo-Json -Depth 20
     $stream = [IO.File]::Open($Path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
@@ -272,7 +300,9 @@ try {
     $bin = Join-Path $stage 'bin'
     Assert-NoReparsePath $bin -CreateDirectory
     $mxc = Join-Path $bin 'wxc-exec.exe'
-    Get-MxcExecutable $arch $stage $mxc $mxcDownload
+    if (!(Copy-PinnedInstalledMxc $arch $install $mxc $mxcDownload)) {
+        Get-MxcExecutable $arch $stage $mxc $mxcDownload
+    }
     if ((Invoke-ExactExecutable $mxc @('--help') $bin 15) -ne 0) {
         throw 'The signed MXC executor could not start standalone on this Windows installation.'
     }

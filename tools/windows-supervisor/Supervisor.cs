@@ -5,18 +5,21 @@ using System.IO;
 using System.Reflection;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.RegularExpressions;
 
 internal static class Supervisor
 {
     private static int Main(string[] args)
     {
         var clock = Stopwatch.StartNew();
+        string phase = "REQUEST_READ";
         try
         {
             if (args.Length != 2 || args[0] != "--request-file")
                 return Refuse("REQUEST_ARGUMENTS_INVALID");
 
             Request request = Protocol.Read(args[1]);
+            phase = "ENGINE_PIN";
             string install = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
             string engine = Protocol.CanonicalPath(Path.Combine(install, "wxc-exec.exe"), false);
             Protocol.EnsurePrivatePath(request, engine);
@@ -34,6 +37,7 @@ internal static class Supervisor
 
                 try
                 {
+                    phase = "CONFIG_WRITE";
                     using (var file = new FileStream(config, FileMode.CreateNew, FileAccess.Write, FileShare.None))
                     using (var writer = new StreamWriter(file, new UTF8Encoding(false)))
                         writer.Write(Protocol.BuildConfig(request));
@@ -41,12 +45,16 @@ internal static class Supervisor
                     int remaining = request.timeoutMs - (int)Math.Min(clock.ElapsedMilliseconds, Int32.MaxValue);
                     if (remaining < 1) return 124;
                     bool deadlineExpired;
+                    phase = "ENGINE_RUN";
                     int exit = NativeJob.Run(engine, log, config, request.systemRoot, remaining, out deadlineExpired);
                     if (deadlineExpired) return 124;
                     if (exit == 0) return 0;
                     // A protected backend record distinguishes a workload failure from an MXC
                     // startup refusal. Workload stdout/stderr cannot authorize the exit code.
-                    if (!WorkloadExitConfirmed(log, exit)) return Refuse("MXC_EXECUTION_REFUSED");
+                    phase = "ENGINE_LOG";
+                    string outcome = InspectWorkloadExit(log, exit);
+                    if (outcome != "EXIT_CONFIRMED")
+                        return Refuse("MXC_EXECUTION_REFUSED ENGINE_EXIT_" + exit + " " + outcome);
                     return exit == 124 || exit == 125 ? 1 : exit;
                 }
                 finally
@@ -58,12 +66,12 @@ internal static class Supervisor
         }
         catch (Win32Exception error)
         {
-            Console.Error.WriteLine("[CLU-E supervisor] WIN32_ERROR_" + error.NativeErrorCode);
+            Console.Error.WriteLine("[CLU-E supervisor] WIN32_ERROR_" + error.NativeErrorCode + " " + phase);
             return 125;
         }
         catch (Exception error)
         {
-            Console.Error.WriteLine("[CLU-E supervisor] REFUSED (" + error.GetType().Name + ").");
+            Console.Error.WriteLine("[CLU-E supervisor] REFUSED (" + error.GetType().Name + "). " + phase + " " + LocalSite(error));
             return 125;
         }
     }
@@ -74,27 +82,54 @@ internal static class Supervisor
             return BitConverter.ToString(sha.ComputeHash(stream)).Replace("-", "").ToLowerInvariant();
     }
 
-    private static bool WorkloadExitConfirmed(string path, int exit)
+    private static string LocalSite(Exception error)
     {
-        if (!File.Exists(path) || new FileInfo(path).Length > 1024 * 1024) return false;
+        var frames = new StackTrace(error, false).GetFrames();
+        if (frames != null)
+        {
+            foreach (StackFrame frame in frames)
+            {
+                MethodBase method = frame.GetMethod();
+                if (method == null) continue;
+                Type owner = method.DeclaringType;
+                if ((owner == typeof(Protocol) || owner == typeof(Supervisor) || owner == typeof(NativeJob)) &&
+                    Regex.IsMatch(method.Name, @"^[A-Za-z][A-Za-z0-9]{0,63}$"))
+                    return owner.Name + "." + method.Name;
+            }
+        }
+        return "SITE_UNAVAILABLE";
+    }
+
+    private static string InspectWorkloadExit(string path, int exit)
+    {
+        if (!File.Exists(path)) return "LOG_UNAVAILABLE";
+        if (new FileInfo(path).Length > 1024 * 1024) return "LOG_LIMIT";
         bool confirmed = false;
         var serializer = new System.Web.Script.Serialization.JavaScriptSerializer();
         foreach (string line in File.ReadLines(path))
         {
-            int offset = line.IndexOf('{');
-            if (offset < 0) continue;
-            var row = serializer.DeserializeObject(line.Substring(offset)) as System.Collections.Generic.Dictionary<string, object>;
-            if (row == null || !row.ContainsKey("event")) continue;
+            // The auxiliary log also contains prose. Only the documented audit prefix starts a record.
+            Match record = Regex.Match(line, @"^(?:\[[0-9]{1,20}\] )?(\{""event"":""mxc\..*)$");
+            if (!record.Success) continue;
+            System.Collections.Generic.Dictionary<string, object> row;
+            try
+            {
+                row = serializer.DeserializeObject(record.Groups[1].Value) as System.Collections.Generic.Dictionary<string, object>;
+            }
+            catch (ArgumentException) { return "LOG_RECORD_INVALID"; }
+            catch (InvalidOperationException) { return "LOG_RECORD_INVALID"; }
+            if (row == null || !row.ContainsKey("event")) return "LOG_RECORD_INVALID";
             string name = row["event"] as string;
-            if (name == "mxc.EnforcementDegraded" || name == "mxc.ConfigRejected") return false;
+            if (name == "mxc.EnforcementDegraded") return "ENFORCEMENT_DEGRADED";
+            if (name == "mxc.ConfigRejected") return "CONFIG_REJECTED";
             if (name != "mxc.ProcessExited") continue;
             if (!row.ContainsKey("backend") || (row["backend"] as string) != "processcontainer" ||
                 !row.ContainsKey("tier") || (row["tier"] as string) != "base-container" ||
                 !row.ContainsKey("exit_code") || !(row["exit_code"] is int) || (int)row["exit_code"] != exit)
-                return false;
+                return "EXIT_RECORD_MISMATCH";
             confirmed = true;
         }
-        return confirmed;
+        return confirmed ? "EXIT_CONFIRMED" : "NO_EXIT_RECORD";
     }
 
     private static int Refuse(string code)

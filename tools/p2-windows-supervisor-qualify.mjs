@@ -33,7 +33,15 @@ function parsedOutput(run) {
 function supervisorDiagnostic(run) {
   // Report a bounded code from the supervisor's refusal path. Keep raw output private.
   if (run.code !== 125) return null;
-  const matches = [...run.stderr.matchAll(/^\[CLU-E supervisor\] (MXC_IMAGE_PIN_MISMATCH|MXC_EXECUTION_REFUSED|WIN32_ERROR_\d{1,10}|REFUSED \([A-Za-z]{1,64}\)\.)\r?$/gmu)];
+  const phase = '(?:REQUEST_READ|ENGINE_PIN|CONFIG_WRITE|ENGINE_RUN|ENGINE_LOG)';
+  const site = '(?:SITE_UNAVAILABLE|(?:Protocol|Supervisor|NativeJob)\\.[A-Za-z][A-Za-z0-9]{0,63})';
+  const logState = '(?:LOG_UNAVAILABLE|LOG_LIMIT|LOG_RECORD_INVALID|ENFORCEMENT_DEGRADED|CONFIG_REJECTED|EXIT_RECORD_MISMATCH|NO_EXIT_RECORD)';
+  const pattern = new RegExp(
+    '^\\[CLU-E supervisor\\] (MXC_IMAGE_PIN_MISMATCH|MXC_EXECUTION_REFUSED(?: ENGINE_EXIT_-?\\d{1,10} ' + logState +
+    ')?|WIN32_ERROR_\\d{1,10}(?: ' + phase + ')?|REFUSED \\([A-Za-z]{1,64}\\)\\.(?: ' + phase + ' ' + site + ')?)\\r?$',
+    'gmu',
+  );
+  const matches = [...run.stderr.matchAll(pattern)];
   return matches.length === 1 ? matches[0][1] : null;
 }
 
