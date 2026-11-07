@@ -2,7 +2,8 @@
 param(
     [string] $InstallRoot,
     [string] $EvidenceRoot,
-    [switch] $WfpDiagnostic
+    [switch] $WfpDiagnostic,
+    [switch] $WfpPairedDiagnostic
 )
 
 Set-StrictMode -Version Latest
@@ -283,6 +284,7 @@ $windowsHost = $null
 $setupStage = 'HOST_PREREQUISITES'
 try {
     if ($PSVersionTable.PSVersion.Major -lt 7 -or !$IsWindows) { throw 'Run this setup on native Windows with PowerShell 7.' }
+    if ($WfpDiagnostic -and $WfpPairedDiagnostic) { throw 'Select one WFP diagnostic mode.' }
     $repo = Get-LocalPath (Split-Path -Parent (Split-Path -Parent $PSScriptRoot))
     Assert-NoReparsePath $repo
     if (!$InstallRoot) { $InstallRoot = Join-Path $env:LOCALAPPDATA 'CLU-E\WindowsSupervisor' }
@@ -313,7 +315,7 @@ try {
     if ($sessionId -eq 0 -or !$windowsHost.userInteractive) {
         throw 'Run CLUE-Windows-Supervisor.bat from your signed-in Windows desktop for this canary.'
     }
-    if ($WfpDiagnostic) {
+    if ($WfpDiagnostic -or $WfpPairedDiagnostic) {
         $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
         try {
             $principal = [Security.Principal.WindowsPrincipal]::new($identity)
@@ -369,7 +371,7 @@ try {
     Assert-NoReparsePath $bin -CreateDirectory
     $mxc = Join-Path $bin 'wxc-exec.exe'
     if (!(Copy-PinnedInstalledMxc $arch $install $mxc $mxcDownload)) {
-        if ($WfpDiagnostic) {
+        if ($WfpDiagnostic -or $WfpPairedDiagnostic) {
             $mxcDownload.state = 'VERIFIED_X64_CACHE_REQUIRED'
             throw 'The WFP diagnostic requires the previously verified x64 MXC engine under the current Windows account.'
         }
@@ -383,18 +385,80 @@ try {
     $pinSource = Join-Path $stage 'MxcPin.cs'
     $quotedTemp = $qualificationTemp.Replace('"', '""')
     $quotedNode = $node.Replace('"', '""')
+    $frameworkReferences = @('mscorlib.dll', 'System.dll', 'System.Core.dll') | ForEach-Object { '/reference:' + (Join-Path $framework $_) }
+    $compilerBase = @('/nologo', '/noconfig', '/nostdlib+', '/target:exe', '/optimize+', '/langversion:5', '/codepage:65001')
+    $diagnosticPins = ''
+    if ($WfpPairedDiagnostic) {
+        $setupStage = 'PAIRED_DIAGNOSTIC_BUILD'
+        foreach ($directory in @('fixture', 'paired\private', 'paired\workspace', 'crash\private', 'crash\workspace')) {
+            Assert-NoReparsePath (Join-Path $stage $directory) -CreateDirectory
+        }
+        $fixtureSource = Join-Path $PSScriptRoot 'WfpPairedFixture.cs'
+        $controllerSource = Join-Path $PSScriptRoot 'WfpPairedSupervisor.cs'
+        Assert-NoReparsePath $fixtureSource
+        Assert-NoReparsePath $controllerSource
+        $fixture = Join-Path $stage 'fixture\WfpPairedFixture.exe'
+        $fixtureArgs = $compilerBase + @('/platform:x64', "/out:$fixture") + $frameworkReferences + $fixtureSource
+        if ((Invoke-ExactExecutable $csc $fixtureArgs $stage 60) -ne 0) { throw 'Native bind fixture compilation failed.' }
+        Assert-NoReparsePath $fixture
+        $fixtureHash = Get-Sha256 $fixture
+        $quotedStage = $stage.Replace('"', '""')
+        $diagnosticPins = @"
+    internal const string WfpDiagnosticStage = @"$quotedStage";
+    internal const string WfpDiagnosticFixtureSha256 = "$fixtureHash";
+"@
+    }
     $generatedPin = @"
 internal static class MxcPin {
     internal const string Sha256 = "$mxcHash";
     internal const string QualificationTempRoot = @"$quotedTemp";
     internal const string QualificationNodeExe = @"$quotedNode";
+$diagnosticPins
 }
 "@
     [IO.File]::WriteAllText($pinSource, $generatedPin)
+    if ($WfpPairedDiagnostic) {
+        $controller = Join-Path $bin 'CLU-E-WfpPairedDiagnostic.exe'
+        $controllerArgs = $compilerBase + @('/platform:x64', '/main:WfpPairedSupervisor', "/out:$controller", "/reference:$web") +
+            $frameworkReferences + $sources + $pinSource + $controllerSource
+        if ((Invoke-ExactExecutable $csc $controllerArgs $stage 60) -ne 0) { throw 'Native paired diagnostic compilation failed.' }
+        Assert-NoReparsePath $controller
+        $reader = Join-Path $PSScriptRoot 'WfpPairedSetup.ps1'
+        Assert-NoReparsePath $reader
+        . $reader
+
+        $setupStage = 'PAIRED_DIAGNOSTIC_EXECUTION'
+        Write-Host '[3/4] Running paired native binds and independent abrupt-exit observation.'
+        $experiment = Invoke-WfpPairedSetup $controller $stage $fixture
+        $payload = [ordered]@{
+            schemaVersion = 'clue-mxc-supervisor-diagnostic/1'
+            checkedAt = [DateTime]::UtcNow.ToString('o')
+            setupStage = 'PAIRED_DIAGNOSTIC_COMPLETED'
+            proofAuthorization = $false
+            blocker = 'SUPPORTED_INTRA_SANDBOX_LOOPBACK_ENFORCEMENT_REQUIRED'
+            windowsHost = $windowsHost
+            engineVersion = 'v1.0.1'
+            engineSha256 = $mxcHash
+            mxcDownload = $mxcDownload
+            canaryUiMode = 'CONTAINER_SCOPED_WIN32K'
+            wfpDiagnostic = $true
+            wfpPairedDiagnostic = $true
+            fixtureSha256 = $fixtureHash
+            canaryExitCode = $null
+            canaryReport = $null
+            wfpPaired = $experiment.paired
+            wfpAttribution = $experiment.attribution
+            wfpCrash = $experiment.crash
+        }
+        Write-DiagnosticFile $report $payload
+        Write-Host ('[CLU-E paired binds] ' + $experiment.paired.state)
+        Write-Host ('[CLU-E WFP attribution] ' + $experiment.attribution.state)
+        Write-Host ('[CLU-E abrupt exit] ' + $experiment.crash.state)
+        Write-Host "[4/4] Diagnostic report: $report"
+        exit 0
+    }
     $wrapper = Join-Path $bin 'CLU-E-Windows-Supervisor.exe'
-    $frameworkReferences = @('mscorlib.dll', 'System.dll', 'System.Core.dll') | ForEach-Object { '/reference:' + (Join-Path $framework $_) }
-    $compilerArgs = @('/nologo', '/noconfig', '/nostdlib+', '/target:exe', '/optimize+', '/platform:anycpu', '/langversion:5', '/codepage:65001',
-        "/out:$wrapper", "/reference:$web") + $frameworkReferences + $sources + $pinSource
+    $compilerArgs = $compilerBase + @('/platform:anycpu', "/out:$wrapper", "/reference:$web") + $frameworkReferences + $sources + $pinSource
     if ((Invoke-ExactExecutable $csc $compilerArgs $stage 60) -ne 0) { throw 'Native supervisor compilation failed.' }
     $wrapperHash = Get-Sha256 $wrapper
     $installed = Join-Path $install $wrapperHash
@@ -462,7 +526,8 @@ internal static class MxcPin {
                 engineSha256 = $mxcHash
                 mxcDownload = $mxcDownload
                 canaryUiMode = 'CONTAINER_SCOPED_WIN32K'
-                wfpDiagnostic = [bool] $WfpDiagnostic
+                wfpDiagnostic = [bool] ($WfpDiagnostic -or $WfpPairedDiagnostic)
+                wfpPairedDiagnostic = [bool] $WfpPairedDiagnostic
                 canaryExitCode = $null
                 canaryReport = $null
                 wfpAttribution = $null

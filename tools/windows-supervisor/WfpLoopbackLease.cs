@@ -45,6 +45,7 @@ internal sealed class WfpLoopbackLease : IDisposable
 
     internal int Count { get { return filterKeys.Length; } }
     internal ulong[] FilterIds { get { return (ulong[])filterIds.Clone(); } }
+    internal Guid SublayerKey { get { return sublayerKey; } }
     internal ushort VerifiedSublayerWeight { get; private set; }
 
     internal static WfpLoopbackLease Install(byte[] packageSid, out bool failureCleanupVerified)

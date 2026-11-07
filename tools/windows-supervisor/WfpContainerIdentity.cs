@@ -19,41 +19,58 @@ internal static class WfpContainerIdentity
 
     internal static byte[] ReadForJob(IntPtr job, int pid, string expectedImage)
     {
+        using (var process = OpenForJob(job, pid))
+            return ReadForJob(job, process, expectedImage);
+    }
+
+    internal static OwnedHandle OpenForJob(IntPtr job, int pid)
+    {
         if (job == IntPtr.Zero || job == new IntPtr(-1) || pid <= 0)
             throw new InvalidDataException("A valid job and process are required.");
 
-        using (var process = OpenProcess(ProcessQueryLimitedInformation | Synchronize, false, (uint)pid))
+        var process = OpenProcess(ProcessQueryLimitedInformation | Synchronize, false, (uint)pid);
+        try
         {
             if (process.IsInvalid)
                 throw LastError();
-
             RequireLiveJobProcess(process, job);
-            var image = new StringBuilder(4096);
-            uint imageLength = (uint)image.Capacity;
-            if (!QueryFullProcessImageNameW(process, 0, image, ref imageLength))
-                throw LastError();
-            if (!String.Equals(Protocol.CanonicalPath(image.ToString(), false), expectedImage,
-                StringComparison.OrdinalIgnoreCase))
-                throw new InvalidDataException("The bootstrap image does not match the pinned Node executable.");
-            OwnedHandle token;
-            if (!OpenProcessToken(process, TokenQuery, out token))
-                throw LastError();
-            using (token)
-            {
-                if (token.IsInvalid)
-                    throw new InvalidDataException("The workload token is unavailable.");
+            return process;
+        }
+        catch
+        {
+            process.Dispose();
+            throw;
+        }
+    }
 
-                uint appContainer;
-                uint length;
-                if (!GetTokenFlag(token, TokenIsAppContainer, out appContainer, 4, out length))
-                    throw LastError();
-                if (length != 4 || appContainer != 1)
-                    throw new InvalidDataException("The workload token is outside an AppContainer.");
+    internal static byte[] ReadForJob(IntPtr job, OwnedHandle process, string expectedImage)
+    {
+        RequireLiveJobProcess(process, job);
+        var image = new StringBuilder(4096);
+        uint imageLength = (uint)image.Capacity;
+        if (!QueryFullProcessImageNameW(process, 0, image, ref imageLength))
+            throw LastError();
+        if (!String.Equals(Protocol.CanonicalPath(image.ToString(), false), expectedImage,
+            StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException("The bootstrap image does not match the pinned executable.");
+        OwnedHandle token;
+        if (!OpenProcessToken(process, TokenQuery, out token))
+            throw LastError();
+        using (token)
+        {
+            if (token.IsInvalid)
+                throw new InvalidDataException("The workload token is unavailable.");
 
-                byte[] sid = ReadPackageSid(token);
-                RequireLiveJobProcess(process, job);
-                return sid;
-            }
+            uint appContainer;
+            uint length;
+            if (!GetTokenFlag(token, TokenIsAppContainer, out appContainer, 4, out length))
+                throw LastError();
+            if (length != 4 || appContainer != 1)
+                throw new InvalidDataException("The workload token is outside an AppContainer.");
+
+            byte[] sid = ReadPackageSid(token);
+            RequireLiveJobProcess(process, job);
+            return sid;
         }
     }
 
@@ -123,7 +140,7 @@ internal static class WfpContainerIdentity
         return new Win32Exception(Marshal.GetLastWin32Error());
     }
 
-    private sealed class OwnedHandle : SafeHandleZeroOrMinusOneIsInvalid
+    internal sealed class OwnedHandle : SafeHandleZeroOrMinusOneIsInvalid
     {
         public OwnedHandle() : base(true) { }
 
