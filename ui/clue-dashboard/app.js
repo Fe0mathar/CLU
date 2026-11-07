@@ -3202,6 +3202,8 @@ const ConsoleFrameBus = (() => {
     }
 
     function installEventBridge() {
+      // Native Navigator notifications have their own UI listeners.
+      // This bridge only ingests recognition stream events.
       const names = [
         'navigator.reset', 'navigator-reset',
         'inventory.started', 'inventory-started',
@@ -3219,7 +3221,6 @@ const ConsoleFrameBus = (() => {
         'dependency.discovered', 'dependency-discovered',
         'scan.completed', 'scan-completed',
         'graph.committed', 'graph-committed',
-        'node-added', 'semantic-depth', 'discovery-complete',
         'message', 'navigator-event', 'event',
       ];
       const attached = new Set();

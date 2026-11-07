@@ -26,13 +26,14 @@ function sourceSection(startMarker, endMarker) {
   return app.slice(start, end);
 }
 
-function rendererIngestHarness({ model, physicalInventory } = {}) {
+function rendererIngestHarness({ model, physicalInventory, nav, errors } = {}) {
   const noop = () => {};
   const state = {
     snapshotId: null,
     inventoryPhase: 'AWAITING INVENTORY',
     projectGenerationGuard: createQ1ProjectGenerationGuard(),
     files: new Map(),
+    eventDisposers: [],
   };
   // Run the production ingest and hydration against the real generation guard.
   // The omitted collaborators only draw or mutate individual files, edges, and taxonomy.
@@ -41,11 +42,14 @@ function rendererIngestHarness({ model, physicalInventory } = {}) {
     sourceSection('function finite(', 'function basename('),
     sourceSection('function eventPayload(', 'function resetProjectProjection('),
     sourceSection('function ingestNavigatorEvent(', 'function recordProjectionError('),
-    '({ state, ingestNavigatorEvent, ingestAvailableRuntimeState })',
+    sourceSection('function installEventBridge(', 'function installSceneObserver('),
+    '({ state, ingestNavigatorEvent, ingestAvailableRuntimeState, installEventBridge })',
   ].join('\n'), {
     state,
     navigatorInstance: { model },
     adapter: { repositoryInventoryModel: physicalInventory },
+    nav,
+    window: { setTimeout: noop },
     extractTaxonomy: noop,
     updateAllDerivedState: noop,
     updateHud: noop,
@@ -55,7 +59,7 @@ function rendererIngestHarness({ model, physicalInventory } = {}) {
     ingestEdge: noop,
     upsertFile: noop,
     normalizeEntityKind: noop,
-    recordProjectionError: (reason) => assert.fail(reason),
+    recordProjectionError: errors ? (reason) => errors.push(reason) : (reason) => assert.fail(reason),
   });
 }
 
@@ -68,6 +72,55 @@ const navigatorEventRoutes = {
   'named adapter event': (envelope) => new CustomEvent(envelope.type, { detail: envelope }),
   'generic adapter event': (envelope) => new CustomEvent('event', { detail: { payload: envelope } }),
 };
+
+test('Q1 bridge leaves local Navigator notifications with UI listeners and guards recognition input', () => {
+  const nav = new EventTarget();
+  const errors = [];
+  const { state, installEventBridge } = rendererIngestHarness({ nav, errors });
+  const projectRecognition = {
+    identityVersion: 'clue-project-recognition-identity/1',
+    operationIdentity: {
+      projectId: 'clue1',
+      targetRootIdentity: 'path:v1:win32:' + 'a'.repeat(64),
+      projectProfileHash: 'profile:v1:' + 'b'.repeat(64),
+    },
+    profileGeneration: 6,
+    recognitionConfigHash: 'c'.repeat(64),
+  };
+  assert.equal(state.projectGenerationGuard.decide({ projectRecognition }, 'navigator-reset').accept, true);
+  installEventBridge();
+
+  const observed = [];
+  const notifications = [
+    new CustomEvent('node-added', { detail: { node: {}, unit: {}, cinematic: true } }),
+    new CustomEvent('semantic-depth', { detail: { current: 2, granularity: 'file', scope: 'scope-1' } }),
+    new CustomEvent('discovery-complete', { detail: { node: {} } }),
+  ];
+  for (const event of notifications) {
+    nav.addEventListener(event.type, (event) => observed.push(event.type));
+    nav.dispatchEvent(event);
+  }
+  assert.deepEqual(observed, notifications.map((event) => event.type));
+  assert.deepEqual(errors, []);
+  assert.equal(state.snapshotId, null);
+
+  const send = (type, payload) => nav.dispatchEvent(
+    navigatorEventRoutes['named adapter event'](navigatorEnvelope(type, payload)),
+  );
+  send('inventory.completed', { projectRecognition, snapshotId: 'physical-snapshot', fileCount: 663 });
+  assert.equal(state.snapshotId, 'physical-snapshot');
+  assert.equal(state.inventoryExpectedCount, 663);
+
+  send('inventory.completed', { snapshotId: 'missing-identity', fileCount: 1 });
+  send('inventory.completed', {
+    projectRecognition: { ...projectRecognition, profileGeneration: 5 },
+    snapshotId: 'stale-generation',
+    fileCount: 2,
+  });
+  assert.deepEqual(errors, ['PROJECT_IDENTITY_MISSING', 'STALE_PROJECT_GENERATION']);
+  assert.equal(state.snapshotId, 'physical-snapshot');
+  assert.equal(state.inventoryExpectedCount, 663);
+});
 
 for (const [route, deliver] of Object.entries(navigatorEventRoutes)) {
   test(`Q1 SURF: ${route} keeps the physical snapshot through a dotted stream replay`, () => {

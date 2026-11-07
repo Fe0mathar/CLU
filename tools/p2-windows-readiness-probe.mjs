@@ -21,7 +21,7 @@ const EXPECTED_SOURCE = {
   'src/status/statusFromRuntime.ts': '30a125131f1f0ee5c4a411bf4515015082745760550ed2224d6892d218096270',
   'src/status/statusProjector.ts': 'c6d1963172f4e087add7e50c7e1fe71164fefc9fd48676f24fd73f7441febf21',
   'tools/dashboard-status-probe.js': '59a27b1e35ce366bf12aa18cd4ad70b533cc4c9b78070e7a7136789145d5fac7',
-  'ui/clue-dashboard/app.js': '41225e60146539e6933f90cca808508bf4c6ca7397276309f666e8472746e103',
+  'ui/clue-dashboard/app.js': '68666bb5a835aa2fc5eb88caaf54d36e406760622d23989c0ab558ae1be657c9',
 };
 const CHILD_ENV_KEYS = new Set([
   'PATH', 'PATHEXT', 'SYSTEMROOT', 'WINDIR', 'COMSPEC', 'HOME', 'USERPROFILE', 'HOMEDRIVE',
@@ -197,7 +197,7 @@ function inspectSource() {
     } catch { /* missing or unreadable */ }
     return { file, expectedSha256, sha256, matches: sha256 === expectedSha256 };
   });
-  return { baseline: 'PATCH_05D', state: files.every((file) => file.matches) ? 'MATCH' : 'REVIEW_REQUIRED', files };
+  return { baseline: 'PATCH_05D_PLUS_05L', state: files.every((file) => file.matches) ? 'MATCH' : 'REVIEW_REQUIRED', files };
 }
 
 function inspectGraph(env, windows) {
