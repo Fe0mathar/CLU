@@ -1,0 +1,6 @@
+{
+  "targetQuality": { "label": "TARGET QUALITY (MA–MH)", "color": "#00a3e0" },
+  "evidenceAssurance": { "label": "EVIDENCE & ASSURANCE (MI)", "color": "#f4af2d" },
+  "acceptanceGates": { "label": "ACCEPTANCE GATES (MJ)", "color": "#ff5500" },
+  "clueSelfMetrics": { "label": "CLU-E SELF-METRICS (MK)", "color": "#39ff88" }
+}

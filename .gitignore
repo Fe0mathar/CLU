@@ -1,0 +1,166 @@
+# CLU-E Evidence Repository — versioning boundary
+#
+# Owning contract: CLUE_Git_Integration_v9.md
+#   §5.1  two-repository default. This repository is the CLU-E Evidence Repository:
+#         "CLU-E code, founding documents, policies, Great Book, status history,
+#         small receipts, evidence manifests, and release records".
+#   §3    the reference implementation does NOT assume that "large evidence artifacts
+#         belong in ordinary Git objects". Bulk evidence is content-addressed and
+#         referenced by hash, not committed.
+#   §7    the Git State Envelope carries `untracked_manifest_hash` and an optional
+#         `ignored_material_manifest_hash`.
+#   §7.1  a commit OID does not identify untracked files, generated files used by a
+#         benchmark, or sparse-checkout omissions.
+#   §8.2  the Git Worktree Pool lives under `workspace/git/worktrees/`.
+#
+# Why this file must be in-tree and versioned, not in `.git/info/exclude` or a global
+# config: §7 hashes the ignored and untracked sets into the Base Pin. A rule that does
+# not travel with the commit produces a seal over a set nobody can reconstruct.
+#
+# Backlog: DEV-P1-09. The predecessor was named `gitignore` — no leading dot — from
+# 27 July 2026. Git never read it, so every rule below was inert and 661 MB across
+# 2299 paths (node_modules, dist, a 392 MB Navigator stream, a 108 MB SQLite
+# projection) was eligible for commit. The rename is the fix; the content below is the
+# governance the item also asks for. The predecessor additionally cited
+# `CLUE_Strategy_v5.md`, which is not a document in the v9 pack, and enumerated 7 of
+# the 21 canonical workspace children — omitting the two largest.
+#
+# Governing rule, applied below in one direction only:
+#   durable truth and small receipts are IN; anything rebuildable from them, and
+#   anything bulky, is OUT.
+#
+# THIS REPOSITORY IS NOT A RECOVERY IMAGE. The event log is versioned and the artifact
+# store is not, and the log references artifacts by hash. A clone therefore carries the
+# record of what happened and none of the bytes it points at: `rehydrate` and "the graph
+# survives losing the database" both read the artifact store, so neither works from a
+# clone alone. That is §3's choice, not a defect — but it is worth saying, because the
+# header calls the event log the sole source of truth and a reader may reasonably infer
+# that cloning yields recoverable truth.
+#
+# Artifact bytes come from `workspace/blobs/` on the host and from nowhere else. No
+# automated backup path for them is implemented: `config.backup` exists in
+# `clue.config.yaml` and in `backupConfigSchema`, but it describes Git ref publication
+# for ledger durability, and no module in `src/` reads it. Preserving the artifact store
+# is currently a host responsibility with no code behind it.
+
+
+# --- Build output and toolchain ---------------------------------------------
+# Rebuildable from source by `npm ci` and `npx tsc`. `dist/` is also the surface the
+# continuation brief warns about: a stale `dist/` reports a meaningless green suite,
+# which is a reason to rebuild it, never a reason to commit it.
+node_modules/
+dist/
+*.tsbuildinfo
+
+
+# --- Workspace data plane ----------------------------------------------------
+# `src/control/runtime.ts` (WORKSPACE_DIRECTORIES) creates 21 children. Deny all of
+# them, then re-include by name. Default-deny is deliberate: a child added later is
+# excluded until someone classifies it, rather than silently entering the seal.
+#
+# Note that a relative `workspace.root` resolves against the installation root
+# (`src/control/runtime.ts`), so an in-repository `workspace/` is a supported
+# configuration and must be governed here. The shipped `config/clue.config.yaml`
+# points at `F:/CLU/workspace/clue`, outside the repository; both cases are covered.
+workspace/*
+
+# IN — event log. The append-only sole source of truth (Constitution; Architecture §3).
+# SQLite is its derivative, not its authority. Currently 454 KB.
+# If rotation is introduced, archives are hash-recorded and this rule needs revisiting.
+!workspace/events/
+workspace/events/*
+!workspace/events/events.ndjson
+
+# IN — Great Book ledger and CLUE_PERFECT / invalidation certificates, bounded to the
+# top level of each directory.
+#
+# Stated honestly: no code writes to either directory yet. Both are created empty by
+# `createWorkspaceLayout` and referenced nowhere else in `src/` — the only `ledger`
+# hits are a pipeline stage name in `viewModel.ts` and `consoleProjector.ts`, not a
+# path. These rules are declared in advance so the first record written is versioned
+# rather than lost.
+#
+# Bounded rather than open because these are the one place where an unwritten
+# directory is re-included wholesale: with no writer, nobody has decided what shape
+# the contents take, and an unbounded `!` would admit whatever appears first — a run
+# directory, a rendered export, a bulk attachment — into the seal without review.
+# Records are flat files (`experiments.ndjson`, `GREAT_BOOK_OF_EFFICIENCY.md`,
+# certificate and invalidation records), so top-level files are IN and any nested
+# subdirectory is OUT until someone classifies it. That is the same default-deny the
+# rest of this file uses; it is not a claim that a subdirectory would be wrong.
+!workspace/ledger/
+workspace/ledger/*/
+!workspace/certificates/
+workspace/certificates/*/
+
+# OUT, with the reason for each — the four children that actually carry bytes today:
+#   workspace/db/       SQLite projections; rebuildable by event replay (108 MB)
+#   workspace/graph/    Navigator streams and current pointer (392 MB); DEV-P1-06 owns
+#                       their retention and compaction
+#   workspace/blobs/    content-addressed artifacts; bulk evidence per §3, referenced
+#                       by hash from records that ARE versioned (62 MB)
+#   workspace/console/  operational-console.ndjson; a projection of Status, not an
+#                       authority (ADR-0002)
+#
+# OUT — created but not yet written by any code path, so nothing is being discarded:
+#   coverage/ documents/ environments/ findings/ implementations/ landings/ logs/
+#   patches/ proof-contracts/ runs/ snapshots/ tasks/ temp/ tests/
+#
+# OUT — Git Worktree Pool (§8.2). Leased experiment worktrees are transient and
+# reconstructible from a Base Pin; a nested checkout must never enter this history.
+#   workspace/git/worktrees/
+
+
+# --- Isolation zones outside the workspace -----------------------------------
+# `config/clue.config.yaml` places the shadow clone and the test browser profile
+# outside the repository (`F:/CLU/shadow/clue`, `F:/CLU/chrome-profile`). Git cannot
+# express an absolute path, and does not need to. These relative rules exist because
+# the Linux harness described in the continuation brief §4 builds a temporary
+# repository with POSIX roots, where both land inside the tree.
+shadow/
+chrome-profile/
+
+
+# --- Secrets -----------------------------------------------------------------
+# Belt and suspenders. Keys belong in the host secret facility; §5.3 prohibits
+# credentials embedded in remote URLs.
+.env
+.env.*
+*.key
+*.pem
+
+
+# --- Release artifacts -------------------------------------------------------
+# `npm pack` output. The archive is reproducible from the tagged tree, so the archive
+# is out and its checksum manifest is in — DEV-P1-08 owns the release command that
+# emits both, and DEV-P1-26 owns the manifest it emits.
+*.tgz
+
+# `tools/release.mjs` output: archive, per-file SHA256SUMS, gates log, report. All four
+# are regenerable from the tree the report names, and the archive is 2 MB per run. The
+# script checks for this rule by name and warns when it is absent, because an unignored
+# output directory is how release artifacts end up in the history they describe.
+release/
+
+
+# --- Editor and OS noise -----------------------------------------------------
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+
+# --- Tooling residue ---------------------------------------------------------
+coverage/
+npm-debug.log*
+
+
+# --- Deliberately NOT ignored, stated so the omission reads as a decision -----
+#   PACKAGE_SHA256SUMS.txt      evidence manifest — §5.1 names manifests as IN
+#   MANIFEST.txt                release record — §5.1 names release records as IN
+#   p0-acceptance-report.json   acceptance receipt, 26 KB — a "small receipt"
+#   probe-report.txt            read-only probe receipt, 9 KB — a "small receipt"
+#   clue-status.md              status history — §5.1 names status history as IN
+#   config/                     governed policy — §5.1 names policies as IN
+#   tools/*.mjs, tools/*.js     read-only diagnostics; source, not output

@@ -1,0 +1,9 @@
+{
+  "targetRoot": "F:/Path/To/Target",
+  "path": "F:/Path/To/Target/docs/architecture-rules.md",
+  "bindingId": "architecture-rules",
+  "kind": "additional",
+  "role": "architecture",
+  "enabled": true,
+  "order": 100
+}

@@ -1,0 +1,227 @@
+/**
+ * `clue cycle` — the cycle domain (DEV-P2-08 S5; cycle-implementation-plan v1 §5, accepted
+ * 2026-08-10 with D1–D5).
+ *
+ * Layout: ADR-0003 rev 2 — one module per domain, argument handling, one service call,
+ * printing. The plan's S5 named `open|status|advance|suspend|resume`; `drive` supersedes
+ * `open` and raw `advance` deliberately: the orchestrator's loop is the safe surface (it
+ * opens when nothing is live, locks, and advances only along seams that exist), while a
+ * hand-driven `advance` would invite arrows whose evidence nobody produced. The registry
+ * would refuse those anyway — but a surface that invites refusals it could design away is
+ * a worse surface.
+ *
+ * ## The D4 flip, visible here
+ *
+ * None of these commands passes `requireMission` to `withRuntime`. The mutating three are
+ * gated purely by their `commandAuthority` declarations through the DEV-P1-36 flip — the
+ * first commands whose mission gate flows from the registry alone. `cycle status` is
+ * declared exempt like `status`/`doctor`: a pure read that emits nothing, so a drifted
+ * basis can still be inspected.
+ */
+
+import type { Command } from 'commander';
+
+import { findRepoRoot, loadConfig, withRuntime } from '../../control/runtime.js';
+import {
+  performBenchmarkRun,
+  verifyLockedContract,
+  type PerformedRun,
+} from '../../control/benchmarkRun.js';
+import { CycleOrchestrator } from '../../cycle/cycleOrchestrator.js';
+import { readCurrentCycle } from '../../cycle/cycleRegistry.js';
+import { printChecks, short, write, type Check } from '../output/formatter.js';
+import { guarded as guardedWith } from './shared.js';
+
+const runGuarded = (work: () => number): number => guardedWith(work, write);
+
+/* ------------------------------------------------------------------------- */
+/* clue cycle status                                                          */
+/* ------------------------------------------------------------------------- */
+
+function commandCycleStatus(): number {
+  return withRuntime({ withLog: false }, (runtime) => {
+    const cycle = readCurrentCycle(runtime.projections);
+    if (cycle === null) {
+      write('No cycle in progress. `clue cycle drive` opens one.');
+      return 0;
+    }
+    const checks: Check[] = [
+      { level: 'ok', label: 'cycle', detail: cycle.id },
+      {
+        level: cycle.stage === 'SUSPENDED' ? 'warn' : 'ok',
+        label: 'stage',
+        detail:
+          cycle.stage +
+          (cycle.suspended_from === null ? '' : ` (suspended from ${cycle.suspended_from})`),
+      },
+      {
+        level: 'info',
+        label: 'grade',
+        detail: cycle.grade === null ? 'not locked yet' : cycle.grade,
+      },
+      {
+        level: 'info',
+        label: 'lock digest',
+        detail: cycle.lock_digest === null ? 'none' : short(cycle.lock_digest),
+      },
+      { level: 'info', label: 'opened', detail: cycle.opened_at },
+    ];
+    printChecks(checks);
+    return 0;
+  });
+}
+
+/* ------------------------------------------------------------------------- */
+/* clue cycle drive                                                           */
+/* ------------------------------------------------------------------------- */
+
+function commandCycleDrive(): number {
+  return withRuntime({ withLog: true, verifyLog: 'tail' }, (runtime) => {
+    const orchestrator = new CycleOrchestrator(runtime);
+    const result = orchestrator.drive();
+    if (result.performed.length === 0) {
+      write(`Cycle ${result.cycle.id} already at ${result.cycle.stage}; nothing to drive.`);
+      return 0;
+    }
+    if (result.lock !== null) {
+      write(
+        `locked ${result.lock.grade} — ${result.lock.absent.length} absence(s): ` +
+          result.lock.absent.join('; '),
+      );
+    }
+    printChecks(
+      result.performed.map((step) => ({
+        level: 'ok' as const,
+        label: step.to,
+        detail:
+          step.summary + (step.evidence === null ? '' : `  [evidence ${short(step.evidence.hash)}]`),
+      })),
+    );
+    write('');
+    write(`Cycle ${result.cycle.id} at ${result.cycle.stage} (${result.cycle.grade ?? 'ungraded'}).`);
+    return 0;
+  });
+}
+
+/* ------------------------------------------------------------------------- */
+/* clue cycle suspend / resume                                                */
+/* ------------------------------------------------------------------------- */
+
+function commandCycleSuspend(reason: string): number {
+  return withRuntime({ withLog: true, verifyLog: 'tail' }, (runtime) => {
+    const cycle = new CycleOrchestrator(runtime).suspend(reason);
+    write(`Cycle ${cycle.id} suspended from ${cycle.suspended_from ?? '?'} — ${reason}`);
+    return 0;
+  });
+}
+
+function commandCycleResume(): number {
+  return withRuntime({ withLog: true, verifyLog: 'tail' }, (runtime) => {
+    const cycle = new CycleOrchestrator(runtime).resume();
+    write(`Cycle ${cycle.id} resumed at ${cycle.stage}.`);
+    return 0;
+  });
+}
+
+/* ------------------------------------------------------------------------- */
+/* clue cycle close                                                           */
+/* ------------------------------------------------------------------------- */
+
+async function commandCycleClose(): Promise<number> {
+  // Phase 0 — read what closing requires; this lock window opens and closes here.
+  let cycleId: string;
+  let lockedBenchmark: { readonly path: string; readonly sha256: string } | null;
+  let missionVersion: string;
+  try {
+    ({ cycleId, lockedBenchmark, missionVersion } = withRuntime({ withLog: true, verifyLog: 'tail' }, (runtime) => {
+      const orchestrator = new CycleOrchestrator(runtime);
+      const cycle = orchestrator.status();
+      if (cycle === null) throw new Error('No cycle in progress to close.');
+      return { cycleId: cycle.id, lockedBenchmark: orchestrator.lockedBenchmarkOf(cycle.id), missionVersion: runtime.currentMissionId() };
+    }));
+  } catch (error) {
+    write(error instanceof Error ? error.message : String(error));
+    return 1;
+  }
+
+  // Phase 1 — the §18 closing run, UNLOCKED: the harness drives `clue` as children and
+  // they take the writer lock per act (the B4 inversion, shared via benchmarkRun.ts).
+  let performed: PerformedRun | null = null;
+  if (lockedBenchmark !== null) {
+    const repoRoot = findRepoRoot();
+    const config = loadConfig(repoRoot);
+    const verified = verifyLockedContract(config.project.root, lockedBenchmark);
+    if ('error' in verified) {
+      write(verified.error);
+      return 1;
+    }
+    write(`Cycle ${cycleId}: performing the §18 closing run against the locked contract…`);
+    performed = await performBenchmarkRun({
+      repoRoot,
+      config,
+      contract: { path: verified.path, registered: true },
+      expectedContractSha256: lockedBenchmark.sha256,
+      expectedMissionVersion: missionVersion,
+      log: (line) => write(`  … ${line}`),
+    });
+    if (!performed.outcome.ok) {
+      write(`REFUSED at ${performed.outcome.stage}: ${performed.outcome.reason}`);
+      return 1;
+    }
+  }
+
+  // Phase 2 — locked: the walk records the run (or the stated absence) and closes.
+  const closingRun = performed;
+  return runGuarded(() =>
+    withRuntime({ withLog: true, verifyLog: 'tail' }, (runtime) => {
+      const result = new CycleOrchestrator(runtime).close(closingRun);
+      printChecks(
+        result.performed.map((step) => ({
+          level: 'ok' as const,
+          label: step.to,
+          detail:
+            step.summary + (step.evidence === null ? '' : `  [evidence ${short(step.evidence.hash)}]`),
+        })),
+      );
+      write('');
+      write(`Cycle ${result.cycle.id} CLOSED (${result.cycle.grade ?? 'ungraded'}) at ${result.cycle.closed_at ?? '?'}.`);
+      return 0;
+    }),
+  );
+}
+
+/** Registers the `cycle` commands. */
+export function registerCycleCommands(program: Command): void {
+  const cycle = program.command('cycle').description('the RPI cycle stage machine');
+  cycle
+    .command('status')
+    .description('the current cycle, its stage and grade')
+    .action(() => {
+      process.exitCode = runGuarded(() => commandCycleStatus());
+    });
+  cycle
+    .command('drive')
+    .description('advance the cycle to SCREENED through lock, snapshot, recognition and screening')
+    .action(() => {
+      process.exitCode = runGuarded(() => commandCycleDrive());
+    });
+  cycle
+    .command('suspend')
+    .description("record the operator's suspension of the current cycle")
+    .requiredOption('--reason <text>', 'why the cycle is being suspended')
+    .action((options: { reason: string }) => {
+      process.exitCode = runGuarded(() => commandCycleSuspend(options.reason));
+    });
+  cycle
+    .command('close')
+    .description('close the cycle: the §18 run when the lock names a benchmark, handoff, §24 honest')
+    .action(async () => {
+      process.exitCode = await commandCycleClose();
+    });
+  cycle
+    .command('resume')
+    .description('return a suspended cycle to the stage it remembers')
+    .action(() => {
+      process.exitCode = runGuarded(() => commandCycleResume());
+    });
+}

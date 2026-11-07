@@ -1,0 +1,49 @@
+{
+  "schemaVersion": "clue-project-profiles-migration-report/1",
+  "release": "10.0-rc1",
+  "generatedAt": "2026-08-15T11:05:00.000Z",
+  "mode": "PACKAGED_READ_ONLY_BASELINE",
+  "state": "PREPARED_NOT_EXECUTED",
+  "source": {
+    "configurationPath": "config/clue.config.yaml",
+    "configurationVersion": 2,
+    "configurationSha256": "1bd8e5d202239b50b63a2658dab4187dcd86595d3095bbe2d0163c65fa780e61",
+    "activeTargetId": "clu",
+    "targetProfilePath": "targets/clu/profile.yaml",
+    "targetProfileSha256": "49a358b618aee0682e4a66fc032af9c13cbbf42f0b80ff853db6faf480dd73f2"
+  },
+  "intendedIdentity": {
+    "projectId": "clu",
+    "targetRoot": "F:/CLU/CLU",
+    "workspaceRoot": "F:/CLU/workspace/clue",
+    "shadowRoot": "F:/CLU/shadow/clue",
+    "profilesRoot": "F:/CLU/profiles",
+    "publicationState": "NO_REMOTE_YET"
+  },
+  "expectedStartupSelector": {
+    "path": "config/project-profiles.yaml",
+    "presentBeforeMigration": false
+  },
+  "executionPerformed": [],
+  "safety": {
+    "targetRepositoryModified": false,
+    "workspaceModified": false,
+    "shadowModified": false,
+    "registryModified": false,
+    "startupSelectorModified": false,
+    "gitSynchronizationPerformed": false,
+    "browserLaunched": false,
+    "openAiContacted": false,
+    "credentialBytesIncluded": false
+  },
+  "requiredLiveEvidence": [
+    "Migration creates one exact CLU Project Profile without moving the target repository.",
+    "Legacy workspace identity is adopted only through the state-bound confirmation command.",
+    "Existing event, projection, proof, cycle and Great Book history remains intact.",
+    "Configuration-v2 receives a byte-exact backup before the v3 selector is written.",
+    "Active registry pointer, Runtime generation, Status 5.8.0 and dashboard identity agree after restart.",
+    "Rollback-v3 disables startup selection only and does not delete profile or workspace data."
+  ],
+  "nextCommand": "npm run project-profiles:migration-report -- --output <external-evidence-path>",
+  "note": "Regenerate this report on the real Windows installation before any migration/adoption/cutover act."
+}

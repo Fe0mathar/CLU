@@ -1,0 +1,64 @@
+{
+  "contract_version": 1,
+  "mission_version": "MISSION-000000",
+  "cycle_id": "CYCLE-000000",
+  "snapshot_id": "0000000000000000000000000000000000000000000000000000000000000000",
+  "hypothesis": {
+    "id": "HYP-P2-FIRST-PROVEN-IMPROVEMENT",
+    "causal_claim": "A narrow recognizer change reduces cold recognition wall time while preserving the governed workload and its protective counts.",
+    "target_units": ["src/analysis/source/recognizer.ts"]
+  },
+  "baseline_state": "<describe the screened CLU-E source and its fresh registered benchmark receipt>",
+  "candidate_state": "<describe the exact behavior-preserving recognizer change>",
+  "representative_inputs": ["<record the locked clu-master contract and representative screened CLU-E input tree>"],
+  "target_measurements": [
+    {
+      "id": "SIG-001",
+      "native_unit": "ms",
+      "direction": "lower_is_better"
+    }
+  ],
+  "regression_measurements": [
+    { "id": "SIG-003", "native_unit": "count", "direction": "higher_is_better", "aggregation": "exact" },
+    { "id": "SIG-004", "native_unit": "count", "direction": "higher_is_better", "aggregation": "exact" },
+    { "id": "SIG-005", "native_unit": "count", "direction": "lower_is_better", "aggregation": "exact" },
+    { "id": "SIG-008", "native_unit": "count", "direction": "higher_is_better", "aggregation": "exact" },
+    { "id": "SIG-012", "native_unit": "count", "direction": "higher_is_better", "aggregation": "exact" },
+    { "id": "SIG-013", "native_unit": "count", "direction": "lower_is_better", "aggregation": "exact" }
+  ],
+  "mandatory_gates": [
+    { "kind": "must_not_decrease", "measure_id": "SIG-003" },
+    { "kind": "must_not_decrease", "measure_id": "SIG-004" },
+    { "kind": "must_not_increase", "measure_id": "SIG-005" },
+    { "kind": "must_not_decrease", "measure_id": "SIG-008" },
+    { "kind": "must_not_decrease", "measure_id": "SIG-012" },
+    { "kind": "must_not_increase", "measure_id": "SIG-013" }
+  ],
+  "execution": {
+    "warmup_runs": 1,
+    "repetitions": 3,
+    "max_duration_seconds": 5400,
+    "statistic": "median"
+  },
+  "invalid_run_rules": [
+    "Refuse evidence from a different screened input, mission, benchmark or execution boundary.",
+    "Refuse runs with missing or inconsistent required observations, a failed instrument or a changed environment."
+  ],
+  "confounder_rules": [
+    "Use the same host, Node build, isolation supervisor, toolchain, CPU power profile and governed workload for both runs."
+  ],
+  "required_instruments": ["benchmark:clu-master", "runner:cli-node", "harness:HRN-001"],
+  "thresholds": {
+    "success": { "measure_id": "SIG-001", "kind": "improve_pct_at_least", "pct": 5 },
+    "non_inferiority": null,
+    "rejection": { "measure_id": "SIG-001", "kind": "worsen_pct_at_least", "pct": 2 }
+  },
+  "environment_fingerprint": {
+    "node_version": "<exact Node version from the cycle input lock>",
+    "platform": "win32",
+    "arch": "x64"
+  },
+  "rollback_conditions": [
+    "Restore the preserved original source bytes if the same-work checks or mandatory regression gates fail."
+  ]
+}

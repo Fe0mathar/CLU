@@ -1,0 +1,173 @@
+# CLU-E installation configuration — schema version 2
+#
+# Shape: CLUE_Architecture_v9.md (Configuration); governance: CLU-E Documentation Governance v9.
+# Decisions: CLUE_Execution_Model_v9.md; amendments A1 (OpenAI-only) and A2 (Custodian landing).
+#
+# This file is installation policy for THIS workstation, not universal truth.
+# It is validated at load by src/shared/schemas.ts; `clue doctor` verifies every path and tool.
+# Secrets are NEVER stored here — only the names of environment variables.
+#
+# Target: CLU-E assessing itself. project.root is the CLU-E repository; the workspace and shadow
+# live outside the scanned source tree so CLU-E never recognizes its own data plane as target code.
+
+version: 2
+
+project:
+  # D1 (2026-08-11): the configuration keeps the *choice* of target; the target itself is
+  # described by targets/<id>/profile.yaml. Switching targets is this one line.
+  active_target: clu
+# CLU-E's own data plane. Lives OUTSIDE the CLU-E repository (project.root) so it is never versioned
+# and never overlaps the canonical source — the resolved-zone check refuses a workspace nested in the
+# source (DEV-P0-08/P0-13). Mirrors the shadow layout under F:/CLU.
+workspace:
+  root: "F:/CLU/workspace/clue"
+
+# Shadow clone — where CLU-E applies patches, builds, and measures (Execution Model, shadow stage).
+# A local Git clone of project.root, refreshed per snapshot, carrying its own node_modules.
+# Lives OUTSIDE the CLU-E repository so it is never versioned and never overlaps another zone.
+shadow:
+  root: "F:/CLU/shadow/clue"
+  # Local clone avoids network and shares objects with the source repository.
+  clone_mode: local
+  # Reuse the tree across experiments; refresh by fetch + hard reset to the snapshot commit.
+  persistent: true
+  # Reinstall dependencies only when the lockfile hash changes.
+  install_on_lockfile_change: true
+  install_command: "npm ci"
+
+# Hash-tracked founding documents — the permanent authority set from Documentation Governance v9
+# (DEV-P2-02: re-registered under the uniform _v9 filenames of the installed pack; content of every
+# document is byte-identical to its prior registration, verified against SHA256SUMS_v9.txt).
+# (release authority order, items 1–7). The mission version binds to the constitution hash and to
+# the content of every tracked document; `clue doctor` reports drift if any is missing or changed.
+# Navigation and release-evidence files (README, VALIDATION_REPORT) are deliberately not bound here.
+# Amendment A2 (Custodian landing) is registered as the first mission amendment.
+constitution:
+  file: "CLUE_Constitution_v9.md"
+  tracked_documents:
+    - "CLUE_Constitution_v9.md"
+    - "RPI_Core_Methodology_v9.md"
+    - "CLUE_AI_Utilization_v9.md"
+    - "CLUE_Git_Integration_v9.md"
+    - "CLUE_Canonical_Measurement_Catalogue_v9.md"
+    - "CLUE_Status_Contract_v9.md"
+    - "CLUE_Q1_System_Navigator_v9.md"
+    - "CLUE_Architecture_v9.md"
+    - "CLUE_Execution_Model_v9.md"
+    - "CLUE_Interface_Design_v9.md"
+    - "CLUE_Project_Directory_v9.md"
+
+# Murugan-side commands. Executed through the restricted PowerShell host, with the
+# SHADOW clone as working directory for all experiment and verification work.
+runtime:
+  package_manager: npm
+  scripts:
+    # The governed Stage G2 scenario set. Every entry must terminate; the development
+    # server remains available as `npm run dev` but is not evidence and is not run here.
+    typecheck: "npm run typecheck"
+    build: "npm run build"
+    selftest: "npm run selftest"
+
+browser:
+  executable: "C:/Program Files/Google/Chrome/Application/chrome.exe"
+  remote_debugging_port: 9222
+  # Dedicated test profile OUTSIDE the repo; never a personal profile.
+  profile_dir: "F:/CLU/chrome-profile"
+  allowed_origins:
+    - "http://localhost:*"
+  require_webgpu: true
+
+powershell:
+  executable: "pwsh.exe"
+  autonomous_profile: restricted
+
+analysis:
+  max_context_tokens: 120000
+  reserve_output_tokens: 20000
+  dynamic_edge_confidence_threshold: 0.75
+  monodependency_percentile: 0.35
+
+proof:
+  require_frozen_contract: true
+  inconclusive_counts_as_improvement: false
+  require_baseline: true
+  require_guardrails: true
+
+certification:
+  clean_passes: 3
+  invalidate_on_dependency_change: true
+
+equilibrium:
+  evaluation_cycles: 3
+  policy_file: "config/policies/equilibrium.yaml"
+
+# ---------------------------------------------------------------------------
+# Patch application (amendment A2, strategy Part VIII)
+# ---------------------------------------------------------------------------
+# Shadow apply is ALWAYS automatic in every mode — the proof loop never waits for a human.
+# `mode` controls only whether a PROVEN improvement lands in the canonical tree by itself.
+#
+#   AUTO    land automatically when all eligibility gates G1-G10 pass; ineligible -> NOTIFY
+#   NOTIFY  prove, commit to a ready branch, announce; Creator lands with `clue patch land <id>`
+#   OUTBOX  original spec behaviour: bundle only, no announcement, no canonical write
+#
+# Stays NOTIFY until the pilot's nine architectural properties hold (strategy §40).
+# Detailed gates, per-lane overrides, quotas, and the protected-surface list live in the
+# policy file so they can be reviewed and diffed independently of installation settings.
+patching:
+  mode: NOTIFY
+  policy_file: "config/policies/patching.yaml"
+  landing_branch_prefix: "clue/accepted/"
+  # Fast-forward only. The Custodian is forbidden to resolve conflicts (strategy §32).
+  merge_strategy: fast_forward_only
+  # Post-land verification; failure triggers automatic revert and suspends AUTO.
+  post_land_verify:
+    - typecheck
+    - regression_suite
+  auto_revert_on_post_land_failure: true
+
+notifications:
+  status_document: true
+  windows_toast: true
+  webhook_url_env: null
+
+# ---------------------------------------------------------------------------
+# Model Gateway — OpenAI exclusively (amendment A1, strategy Part VII)
+# ---------------------------------------------------------------------------
+# Creator decision P2-D4-OPENAI-GPT-5.6 (2026-08-14). OpenAI Platform is the
+# exclusive spending/budget authority. CLU-E records provider usage and pauses new AI
+# submissions after an explicit billing/funding refusal; it does not impose local USD caps.
+gateway:
+  enabled: true
+  provider: openai
+  api_key_env: "OPENAI_API_KEY"
+  # The first proof-authoritative P2 cycle uses one deterministic interactive model route.
+  default_mode: interactive
+  batch_poll_interval_seconds: 300
+  prompt_cache:
+    enabled: true
+    # Stable prefixes are placed first and kept byte-identical to stay cacheable.
+    stable_prefix_sections:
+      - constitution_excerpt
+      - output_schema
+      - domain_pack_rules
+  budget_policy_file: "config/policies/budget.yaml"
+  # Exact task -> model routes. OpenAI Platform remains the sole budget/billing authority.
+  routing_file: "config/policies/routing.yaml"
+
+# Ledger durability (strategy Part II §7).
+backup:
+  remote: "origin"
+  push_on_verdict: true
+  push_on_landing: true
+  max_remote_staleness_hours: 24
+
+security:
+  # Denied for every component except the Custodian, which requires a distinct
+  # capability token AND satisfied gates G1-G10 for a single Git landing operation.
+  canonical_source_writes: custodian_only
+  real_settlement: denied
+  redact_environment: true
+
+logging:
+  level: info

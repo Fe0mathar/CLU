@@ -1,0 +1,304 @@
+{
+  "matrixVersion": "clue-project-profiles-acceptance-matrix/1",
+  "release": "Project Profiles v10 release candidate",
+  "requirements": [
+    {
+      "id": "PP-DOD-01",
+      "title": "Multiple Project Profiles can be created, persisted, restarted and listed",
+      "tests": [
+        "selftest/project-profile-store.test.ts",
+        "selftest/project-profile-registry.test.ts",
+        "selftest/project-profiles-api.test.ts",
+        "selftest/project-cli.test.ts",
+        "selftest/project-profiles-complete-acceptance.test.ts"
+      ]
+    },
+    {
+      "id": "PP-DOD-02",
+      "title": "Project ID is editable, normalized, unique and never silently renamed",
+      "tests": [
+        "selftest/project-profile-schema.test.ts",
+        "selftest/project-profile-registry.test.ts",
+        "selftest/project-profile-draft-preparation.test.ts",
+        "ui/clue-dashboard/test/projectProfilesConfiguration.test.mjs"
+      ]
+    },
+    {
+      "id": "PP-DOD-03",
+      "title": "Target Root is selectable, canonicalized and physically identified",
+      "tests": [
+        "selftest/project-root-identity.test.ts",
+        "selftest/project-profile-draft-preparation.test.ts",
+        "ui/clue-dashboard/test/configurationEditors.test.mjs"
+      ],
+      "liveWindows": [
+        "Exercise the directory picker against F:\\CLU\\CLU and verify the displayed canonical identity."
+      ]
+    },
+    {
+      "id": "PP-DOD-04",
+      "title": "Duplicate canonical Target Roots are forbidden across spelling and alias variants",
+      "tests": [
+        "selftest/project-root-identity.test.ts",
+        "selftest/project-profile-registry.test.ts"
+      ],
+      "liveWindows": [
+        "Repeat the duplicate-root test with path case, slash, relative, junction and reparse aliases."
+      ]
+    },
+    {
+      "id": "PP-DOD-05",
+      "title": "Saved Projects are listed and selection is distinct from activation",
+      "tests": [
+        "selftest/project-profiles-api.test.ts",
+        "selftest/project-cli.test.ts",
+        "ui/clue-dashboard/test/projectProfilesConfiguration.test.mjs",
+        "ui/clue-dashboard/test/configurationState.test.mjs"
+      ]
+    },
+    {
+      "id": "PP-DOD-06",
+      "title": "Project switching changes the complete context atomically",
+      "tests": [
+        "selftest/project-switching.test.ts",
+        "selftest/surf-dive-project-switch.test.ts",
+        "selftest/project-browser-switching.test.ts",
+        "ui/clue-dashboard/test/q1ProjectSwitch.test.mjs",
+        "selftest/project-profiles-fault-injection-acceptance.test.ts",
+        "selftest/project-profiles-complete-acceptance.test.ts"
+      ]
+    },
+    {
+      "id": "PP-DOD-07",
+      "title": "SQL, event-log and artifact state are project isolated",
+      "tests": [
+        "selftest/workspace-project-identity.test.ts",
+        "selftest/project-state-isolation.test.ts",
+        "selftest/project-profile-runtime.test.ts"
+      ]
+    },
+    {
+      "id": "PP-DOD-08",
+      "title": "Great Book history is project isolated and ACCEPT-only",
+      "tests": [
+        "selftest/great-book-project-isolation.test.ts",
+        "selftest/great-book.test.ts"
+      ]
+    },
+    {
+      "id": "PP-DOD-09",
+      "title": "Recognition cache, snapshots, graph and inventory are project isolated and reusable",
+      "tests": [
+        "selftest/project-recognition-isolation.test.ts",
+        "selftest/project-recognition-reuse.test.ts",
+        "selftest/surf-dive-project-switch.test.ts"
+      ]
+    },
+    {
+      "id": "PP-DOD-10",
+      "title": "Target Description and Master Benchmark are distinguished per-project authorities",
+      "tests": [
+        "selftest/project-authority-binding.test.ts",
+        "selftest/project-benchmark-runtime.test.ts",
+        "ui/clue-dashboard/test/configurationEditors.test.mjs"
+      ]
+    },
+    {
+      "id": "PP-DOD-11",
+      "title": "Project Intent and multiple governed documents support role, order, enabled state and hash",
+      "tests": [
+        "selftest/project-profile-schema.test.ts",
+        "selftest/project-profile-hash.test.ts",
+        "selftest/project-authority-binding.test.ts",
+        "ui/clue-dashboard/test/configurationEditors.test.mjs"
+      ]
+    },
+    {
+      "id": "PP-DOD-12",
+      "title": "Governed authority drift and conflicts fail closed and stale proof assumptions",
+      "tests": [
+        "selftest/project-authority-conflict.test.ts",
+        "selftest/authority-drift-stales-proof.test.ts",
+        "selftest/mission-profile-binding.test.ts"
+      ]
+    },
+    {
+      "id": "PP-DOD-13",
+      "title": "Recognition settings and benchmark runtime are project scoped",
+      "tests": [
+        "selftest/project-recognition-isolation.test.ts",
+        "selftest/project-benchmark-runtime.test.ts",
+        "ui/clue-dashboard/test/configurationEditors.test.mjs"
+      ]
+    },
+    {
+      "id": "PP-DOD-14",
+      "title": "PowerShell Host readiness proves executable, handshake and root parity",
+      "tests": [
+        "selftest/project-host-readiness.test.ts",
+        "selftest/host-handshake.test.ts",
+        "selftest/host-ps1-git-params.test.ts"
+      ],
+      "liveWindows": [
+        "Launch the configured PowerShell host and verify Project ID, Target Root, Workspace Root and Shadow Root parity."
+      ]
+    },
+    {
+      "id": "PP-DOD-15",
+      "title": "Git readiness distinguishes valid local-only operation from invalid configuration",
+      "tests": [
+        "selftest/project-git-readiness.test.ts",
+        "selftest/manual-git-sync.test.ts"
+      ],
+      "liveWindows": [
+        "Verify F:\\CLU\\CLU repository identity and prove START CLU-E performs no fetch or push."
+      ]
+    },
+    {
+      "id": "PP-DOD-16",
+      "title": "Browser execution resolves one exact permitted target and captures bound evidence",
+      "tests": [
+        "selftest/browser-target-resolution.test.ts",
+        "selftest/browser-execution-evidence.test.ts",
+        "selftest/project-browser-switching.test.ts",
+        "selftest/project-browser-launch-script.test.ts",
+        "selftest/project-profiles-complete-acceptance.test.ts"
+      ],
+      "liveWindows": [
+        "Use a dedicated Chrome profile and debugging endpoint; prove ambiguity, wrong-origin and disappeared-target refusals."
+      ]
+    },
+    {
+      "id": "PP-DOD-17",
+      "title": "GPT configuration uses credential references, exact model identity and no fallback",
+      "tests": [
+        "selftest/project-gateway-readiness.test.ts",
+        "selftest/gateway-secret-redaction.test.ts",
+        "selftest/gateway-project-identity.test.ts"
+      ],
+      "liveWindows": [
+        "Resolve env:OPENAI_API_KEY, contact OpenAI, and prove requestedModel equals effectiveModel equals gpt-5.6 without exposing the secret."
+      ]
+    },
+    {
+      "id": "PP-DOD-18",
+      "title": "Global defaults and project overrides remain explicit and deterministic",
+      "tests": [
+        "selftest/project-profile-hash.test.ts",
+        "selftest/project-profile-draft-preparation.test.ts",
+        "ui/clue-dashboard/test/configurationEditors.test.mjs"
+      ]
+    },
+    {
+      "id": "PP-DOD-19",
+      "title": "Operation-specific readiness preserves READY_LOCAL_ONLY for local proof",
+      "tests": [
+        "selftest/project-readiness.test.ts",
+        "selftest/project-profile-status.test.ts",
+        "ui/clue-dashboard/test/projectProfilesConfiguration.test.mjs"
+      ]
+    },
+    {
+      "id": "PP-DOD-20",
+      "title": "Profile version and projectProfileHash deterministically bind behavior without secret bytes",
+      "tests": [
+        "selftest/project-profile-schema.test.ts",
+        "selftest/project-profile-hash.test.ts",
+        "selftest/project-operation-identity.test.ts",
+        "selftest/documentation-pack-selector.test.ts"
+      ]
+    },
+    {
+      "id": "PP-DOD-21",
+      "title": "Project identity participates in mission, cycle, proof, verdict and Great Book basis",
+      "tests": [
+        "selftest/mission-profile-binding.test.ts",
+        "selftest/proof-cycle-project-isolation.test.ts",
+        "selftest/great-book-project-isolation.test.ts"
+      ]
+    },
+    {
+      "id": "PP-DOD-22",
+      "title": "SURF and DIVE switch cleanly and reject stale project generations",
+      "tests": [
+        "selftest/surf-dive-project-switch.test.ts",
+        "ui/clue-dashboard/test/q1ProjectSwitch.test.mjs",
+        "ui/clue-dashboard/test/activeProjectIdentity.test.mjs"
+      ]
+    },
+    {
+      "id": "PP-DOD-23",
+      "title": "Backend APIs and CLI enforce all hard invariants independently of the UI",
+      "tests": [
+        "selftest/project-profiles-api.test.ts",
+        "selftest/project-cli.test.ts",
+        "selftest/clue-dashboard-server-authority.test.ts",
+        "selftest/command-authority.test.ts",
+        "selftest/project-profiles-acceptance-matrix.test.ts"
+      ]
+    },
+    {
+      "id": "PP-DOD-24",
+      "title": "Profile deletion never deletes Target Root, Workspace Root or Shadow Root",
+      "tests": [
+        "selftest/project-profile-store.test.ts",
+        "selftest/project-profiles-api.test.ts",
+        "selftest/project-cli.test.ts"
+      ]
+    },
+    {
+      "id": "PP-DOD-25",
+      "title": "Legacy migration, workspace adoption and Configuration v3 cutover are explicit and recoverable",
+      "tests": [
+        "selftest/project-profile-migration.test.ts",
+        "selftest/project-profile-startup.test.ts",
+        "selftest/project-cli.test.ts"
+      ]
+    },
+    {
+      "id": "PP-DOD-26",
+      "title": "Configuration UI keeps selected, draft and active identities separate and secret-safe",
+      "tests": [
+        "ui/clue-dashboard/test/configurationControlPlane.test.mjs",
+        "ui/clue-dashboard/test/configurationState.test.mjs",
+        "ui/clue-dashboard/test/actionContracts.test.mjs",
+        "ui/clue-dashboard/test/projectProfilesConfiguration.test.mjs"
+      ]
+    },
+    {
+      "id": "PP-DOD-27",
+      "title": "Status 5.8.0 and Operational Console expose one coherent active project generation",
+      "tests": [
+        "selftest/project-profile-status.test.ts",
+        "selftest/status-console-agreement.test.ts",
+        "selftest/status-seal.test.ts"
+      ]
+    },
+    {
+      "id": "PP-DOD-28",
+      "title": "Metric Catalogue remains unchanged and existing measurement projections regress cleanly",
+      "tests": [
+        "selftest/catalogue.test.ts",
+        "selftest/status-gate4-parity.test.ts"
+      ],
+      "commands": [
+        "npm run dashboard-metrics:verify"
+      ]
+    }
+  ],
+  "regressionCommands": [
+    "npm run dashboard:verify",
+    "npm run navigator:verify",
+    "npm run console:verify",
+    "npm run dashboard-metrics:verify"
+  ],
+  "authoritativeWindowsGates": [
+    "Native better-sqlite3 loads and every matrix selftest passes.",
+    "PowerShell host handshake and root parity pass on the configured executable.",
+    "Windows case, slash, junction and reparse aliases cannot bypass Target Root uniqueness.",
+    "Dedicated Chrome target resolution and evidence capture pass against one exact page.",
+    "OPENAI_API_KEY is present and the live provider reports exact model gpt-5.6 with no fallback.",
+    "The legacy workspace is preserved byte-for-byte through explicit adoption and v3 cutover.",
+    "No automatic Git synchronization occurs; NO_REMOTE_YET remains a valid local-only posture."
+  ]
+}

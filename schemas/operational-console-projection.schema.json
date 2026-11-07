@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://clu-e.local/schemas/operational-console-projection.schema.json",
+  "title": "CLU-E Operational Console Projection",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "firstSequence", "lastSequence", "droppedEvents", "collapsedEvents", "activeChannels", "currentWorkContract", "events", "seal"],
+  "properties": {
+    "schemaVersion": { "const": "1.0.0" },
+    "firstSequence": { "type": ["integer", "null"], "minimum": 0 },
+    "lastSequence": { "type": ["integer", "null"], "minimum": 0 },
+    "droppedEvents": { "type": "integer", "minimum": 0 },
+    "collapsedEvents": { "type": "integer", "minimum": 0 },
+    "activeChannels": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "enum": ["CLUE_CORE", "RECOGNITION", "GPT", "BENCHMARK", "POWERSHELL", "CHROME_CDP", "PROOF", "CUSTODIAN", "GREAT_BOOK", "STATUS"] }
+    },
+    "currentWorkContract": {
+      "anyOf": [
+        { "type": "null" },
+        { "$ref": "operational-console-event.schema.json#/$defs/currentWorkOrNull/anyOf/1" }
+      ]
+    },
+    "events": {
+      "type": "array",
+      "items": { "$ref": "operational-console-event.schema.json" }
+    },
+    "seal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["eventHeadHash", "projectionHash", "capturedAt"],
+      "properties": {
+        "eventHeadHash": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+        "projectionHash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "capturedAt": { "type": "string", "format": "date-time" }
+      }
+    }
+  }
+}

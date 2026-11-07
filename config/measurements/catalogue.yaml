@@ -1,0 +1,1387 @@
+# CLU-E Canonical Measurement Catalogue — machine-readable registry (v6 grammar)
+#
+# Single source of truth. The human-readable Markdown catalogue is GENERATED
+# from this registry and must embed a matching `Catalogue-Content-Hash` line;
+# runtime code rejects disagreement (loader: src/analysis/measure/catalogue.ts).
+#
+# Deliberately NOT declared here (derived deterministically by the loader,
+# never duplicated): grid coordinates (frozen 10x10 map), family membership,
+# family colors, and legacy aliases (Q/A/G/S -> M...). Declaring them would
+# recreate the duplication this registry exists to eliminate.
+#
+# normalizationProfileId values are forward references: the Normalization
+# Profile registry is a separate versioned artifact (implementation record
+# 19.34) delivered in a later Workstream D step. projectionType is set to the
+# conservative default signed_score for all measures except the mandatory
+# gates (gate_state); per-metric refinement (percentage/ratio/...) is a
+# catalogue-revision decision producing a new version + hash.
+#
+# sourceArtifactHash below is the sha256 of the pinned normative document.
+# DEV-P1-18: revision 6.0 pins CLUE_Canonical_Measurement_Catalogue_v9.md,
+# sha256 28df5fe2..., verified against the sealed SHA256SUMS_v9 manifest rather
+# than transcribed by hand. (The deployed pack carries that content under a
+# displaced filename; the bytes hash exactly to the manifest entry, so the
+# content — not the filename — is what this pin binds.)
+#
+# Catalogue v6 activates the four cells v3 reserved: MH03 (97), MG08 (98),
+# MI12 (99) and MK19 (100). Cells 1-96 and every legacy alias are unchanged, so
+# no completed record is renumbered; the four new IDs have no v2 legacy alias.
+# They sit outside the frozen v3 per-area cardinalities, so each declares its
+# reserved grid cell explicitly, exactly as the loader requires.
+
+catalogueId: MCAT-canonical
+version: "6.0"
+status: ACTIVE
+supersedes: "3.0"
+sourceArtifactHash: 28df5fe259ea6b4e39beada09db2f277acde16b475369e5cd21fd98b82388118
+targetProfileIds: []
+
+measures:
+  # ---------------------------------------------------------------------
+  # Area A — Purpose, value, and outcome (TARGET_QUALITY)
+  # ---------------------------------------------------------------------
+  - id: MA01
+    name: Purpose alignment
+    question: >-
+      Does the unit and the complete program still serve the reason they exist?
+    evidenceSources:
+      - Purpose Records, mission documents, user-visible outcomes, contracts, scenarios, Creator declarations
+    failurePatterns:
+      - metric improvement by narrowing or redefining purpose
+      - local convenience overriding the program mission
+    verdictImpact: Failure triggers REJECTED_PURPOSE_VIOLATION
+    projectionType: signed_score
+    normalizationProfileId: NORM-MA01-v1
+    status: ACTIVE
+
+  - id: MA02
+    name: Utility and value realization
+    question: >-
+      Does the unit deliver real value to users, the system, the Creator, or a
+      protected recovery/safety path?
+    evidenceSources:
+      - use frequency, dependent capabilities, user impact, strategic value, recovery role, cost of absence
+    failurePatterns:
+      - elegant but unused features
+      - legacy functions with no current value
+      - expensive mechanisms with negligible outcome
+    projectionType: signed_score
+    normalizationProfileId: NORM-MA02-v1
+    status: ACTIVE
+
+  - id: MA03
+    name: Capability preservation and evolution
+    question: >-
+      Are required capabilities preserved, and are newly claimed capabilities
+      real and verifiable?
+    evidenceSources:
+      - Capability Inventory, approved scenarios, public contracts, integration tests, runtime facts
+    failurePatterns:
+      - higher FPS through disabling a feature
+      - API simplification that removes supported cases
+      - silent capability degradation
+    projectionType: signed_score
+    normalizationProfileId: NORM-MA03-v1
+    status: ACTIVE
+
+  - id: MA04
+    name: Workload integrity
+    question: >-
+      Did the improved result come from doing the same required work, rather
+      than skipping, reducing, caching incorrectly, or hiding it?
+    evidenceSources:
+      - completed-work counters, entity counts, simulation steps, visual outputs, scenario checkpoints, workload hashes
+    failurePatterns:
+      - rendering fewer objects
+      - reducing simulation frequency
+      - bypassing expensive validation
+      - changing the benchmark workload
+    projectionType: signed_score
+    normalizationProfileId: NORM-MA04-v1
+    status: ACTIVE
+
+  - id: MA05
+    name: Stakeholder and user outcome
+    question: >-
+      Does the change improve or preserve outcomes experienced by the people
+      and systems the target exists to serve?
+    evidenceSources:
+      - task success, error rates, interaction outcomes, expert evaluation, user-visible latency, accessibility, safety impact
+    failurePatterns:
+      - internal optimization that worsens user experience or operator burden
+    projectionType: signed_score
+    normalizationProfileId: NORM-MA05-v1
+    status: ACTIVE
+
+  - id: MA06
+    name: Economy and total cost of ownership
+    question: >-
+      Is the delivered outcome proportional to total cost over the lifecycle?
+    evidenceSources:
+      - CPU/GPU time, memory, energy, network, storage, AI calls, maintenance effort, operational burden, licensing, test cost
+    failurePatterns:
+      - moving cost to another layer
+      - reducing runtime cost while greatly increasing maintenance or infrastructure cost
+    projectionType: signed_score
+    normalizationProfileId: NORM-MA06-v1
+    status: ACTIVE
+
+  # ---------------------------------------------------------------------
+  # Area B — Functional, semantic, and data integrity (TARGET_QUALITY)
+  # ---------------------------------------------------------------------
+  - id: MB01
+    name: Functional completeness
+    question: >-
+      Does the system implement all required functions in the assessed scope?
+    evidenceSources:
+      - capability inventory, requirements traceability, scenario coverage, missing-path analysis
+    failurePatterns:
+      - optimization that silently removes edge cases or partial functionality
+    projectionType: signed_score
+    normalizationProfileId: NORM-MB01-v1
+    status: ACTIVE
+
+  - id: MB02
+    name: Functional correctness
+    question: >-
+      Does the system produce the correct output and state for valid inputs
+      and expected conditions?
+    evidenceSources:
+      - unit, contract, integration, scenario, property-based, and reference tests
+    failurePatterns:
+      - faster execution with incorrect results
+      - success indicated before the authoritative fact exists
+    projectionType: signed_score
+    normalizationProfileId: NORM-MB02-v1
+    status: ACTIVE
+
+  - id: MB03
+    name: Contract and API conformance
+    question: >-
+      Are public and internal contracts respected, versioned, and used as
+      intended?
+    evidenceSources:
+      - type contracts, schemas, protocol tests, payload validation, consumer/provider compatibility
+    failurePatterns:
+      - request treated as fact
+      - payload drift
+      - undocumented breaking change
+      - internal detail leaked as public API
+    projectionType: signed_score
+    normalizationProfileId: NORM-MB03-v1
+    status: ACTIVE
+
+  - id: MB04
+    name: State and data integrity
+    question: >-
+      Is authoritative state correct, consistent, durable where required, and
+      free from contradictory sources of truth?
+    evidenceSources:
+      - authority maps, persistence tests, transaction tests, replay, hash comparison, invariants
+    failurePatterns:
+      - writing a derived copy
+      - lost updates
+      - duplicated authority
+      - stale cache presented as truth
+    projectionType: signed_score
+    normalizationProfileId: NORM-MB04-v1
+    status: ACTIVE
+
+  - id: MB05
+    name: Temporal and concurrency correctness
+    question: >-
+      Are ordering, timing, synchronization, races, cancellation, and
+      exactly-once/at-most-once guarantees correct?
+    evidenceSources:
+      - deterministic schedules, race probes, event ordering, lease tests, queue histories, terminal-outcome checks
+    failurePatterns:
+      - state advanced on request rather than confirmation
+      - double completion
+      - race-dependent behavior
+    projectionType: signed_score
+    normalizationProfileId: NORM-MB05-v1
+    status: ACTIVE
+
+  - id: MB06
+    name: Determinism and controlled variability
+    question: >-
+      For the same controlled input, is the result repeatable where required,
+      and is intentional variability explainable and bounded?
+    evidenceSources:
+      - seeded replays, distribution comparison, event-sequence hashes, environment declarations
+    failurePatterns:
+      - load-order dependence
+      - uncontrolled randomness
+      - hardware-dependent divergence without an envelope
+    projectionType: signed_score
+    normalizationProfileId: NORM-MB06-v1
+    status: ACTIVE
+
+  - id: MB07
+    name: Numerical and precision integrity
+    question: >-
+      Are calculations stable, sufficiently precise, correctly bounded, and
+      resistant to overflow, underflow, drift, and accumulated error?
+    evidenceSources:
+      - reference calculations, tolerance tests, long-run drift, extreme-value tests, deterministic numeric fixtures
+    failurePatterns:
+      - faster approximation outside fidelity policy
+      - unstable geometry
+      - precision loss that appears only at scale
+    projectionType: signed_score
+    normalizationProfileId: NORM-MB07-v1
+    status: ACTIVE
+
+  # ---------------------------------------------------------------------
+  # Area C — Architecture, maintainability, and comprehension (TARGET_QUALITY)
+  # ---------------------------------------------------------------------
+  - id: MC01
+    name: Complexity proportionality
+    question: >-
+      Is implementation and cognitive complexity proportional to the
+      responsibility and value delivered?
+    evidenceSources:
+      - state count, branches, exception paths, dependencies, hidden assumptions, change effort, cognitive complexity
+    failurePatterns:
+      - large framework for a small task
+      - accidental state machine
+      - complexity reduced by hiding behavior rather than simplifying it
+    projectionType: signed_score
+    normalizationProfileId: NORM-MC01-v1
+    status: ACTIVE
+
+  - id: MC02
+    name: Architectural coherence
+    question: >-
+      Does the unit follow the current architecture, authority model,
+      lifecycle, and common system patterns?
+    evidenceSources:
+      - architecture claims, pattern conformance, domain rules, source-of-truth boundaries, lifecycle tests
+    failurePatterns:
+      - a new local standard
+      - foreign-body subsystem
+      - bypass of shared infrastructure
+    projectionType: signed_score
+    normalizationProfileId: NORM-MC02-v1
+    status: ACTIVE
+
+  - id: MC03
+    name: Cohesion
+    question: >-
+      Do the responsibilities grouped inside a unit belong together and change
+      for related reasons?
+    evidenceSources:
+      - responsibility map, change history, call and data clusters, purpose records
+    failurePatterns:
+      - unrelated behavior packed into one manager
+      - file serving several independent domains
+    projectionType: signed_score
+    normalizationProfileId: NORM-MC03-v1
+    status: ACTIVE
+
+  - id: MC04
+    name: Coupling and dependency surface
+    question: >-
+      How strongly and in how many ways does the unit depend on or influence
+      other units?
+    evidenceSources:
+      - directed graph, weighted edge types, reverse impact, shared state, dynamic edges, authority crossings
+    failurePatterns:
+      - hidden temporal coupling
+      - broad fan-in/fan-out
+      - string dispatch
+      - shared mutable state
+    projectionType: signed_score
+    normalizationProfileId: NORM-MC04-v1
+    status: ACTIVE
+
+  - id: MC05
+    name: Modularity and replaceability
+    question: >-
+      Can the unit be isolated, disabled, tested, versioned, replaced, or
+      independently evolved through a stable boundary?
+    evidenceSources:
+      - interface tests, dependency inversion, feature toggles, independent fixtures, replacement experiments
+    failurePatterns:
+      - logic permanently embedded in the runtime
+      - no seam for testing or replacement
+    projectionType: signed_score
+    normalizationProfileId: NORM-MC05-v1
+    status: ACTIVE
+
+  - id: MC06
+    name: Boundary and interface quality
+    question: >-
+      Are boundaries small, explicit, stable, validated, and free of
+      implementation leakage?
+    evidenceSources:
+      - API size, schema precision, error contracts, versioning, adapter boundaries, boundary tests
+    failurePatterns:
+      - wide interfaces
+      - ambiguous errors
+      - implicit global state
+      - duplicated boundary models
+    projectionType: signed_score
+    normalizationProfileId: NORM-MC06-v1
+    status: ACTIVE
+
+  - id: MC07
+    name: Responsibility concentration
+    question: >-
+      Has too much authority, state, or coordination accumulated in one
+      function, class, file, or module?
+    evidenceSources:
+      - centrality, responsibility count, touched domains, owned state, change frequency, blast radius
+    failurePatterns:
+      - god objects
+      - universal managers
+      - one module controlling unrelated systems
+    projectionType: signed_score
+    normalizationProfileId: NORM-MC07-v1
+    status: ACTIVE
+
+  - id: MC08
+    name: Redundancy
+    question: >-
+      Does active behavior, data, state, infrastructure, or authority
+      unnecessarily duplicate another implementation?
+    evidenceSources:
+      - semantic similarity, parallel code paths, duplicate caches, duplicated schemas, dual authorities
+    failurePatterns:
+      - two active render paths
+      - repeated normalization
+      - separate local standards
+    projectionType: signed_score
+    normalizationProfileId: NORM-MC08-v1
+    status: ACTIVE
+
+  - id: MC09
+    name: Dead code
+    question: >-
+      Is the unit proven unused in the declared evidence envelope?
+    evidenceSources:
+      - static reachability, registrations, reflection/string search, runtime traces, configuration, public consumers, recovery roles
+    failurePatterns:
+      - declaring code dead because no direct caller is visible
+      - deleting dormant recovery or feature-gated paths
+    projectionType: signed_score
+    normalizationProfileId: NORM-MC09-v1
+    status: ACTIVE
+
+  - id: MC10
+    name: Obsolescence
+    question: >-
+      Does the unit still fit current architecture, dependencies, platforms,
+      and supported workflows?
+    evidenceSources:
+      - current patterns, deprecation records, replacement paths, compatibility matrix, usage and maintenance history
+    failurePatterns:
+      - code retained only because removal is difficult
+      - new code written against an already superseded approach
+    projectionType: signed_score
+    normalizationProfileId: NORM-MC10-v1
+    status: ACTIVE
+
+  - id: MC11
+    name: Technical debt
+    question: >-
+      What deliberate or accidental compromise exists, why, at what cost, and
+      under what removal condition?
+    evidenceSources:
+      - debt records, owner, age, interest cost, blocked changes, defect association, exit condition
+    failurePatterns:
+      - TODO without owner
+      - permanent temporary adapter
+      - debt hidden as ordinary architecture
+    projectionType: signed_score
+    normalizationProfileId: NORM-MC11-v1
+    status: ACTIVE
+
+  - id: MC12
+    name: Architectural entropy and evolvability
+    question: >-
+      Is the architecture becoming more ordered and easier to extend, or
+      accumulating exceptions and unpredictable change propagation?
+    evidenceSources:
+      - exception count, naming divergence, boundary erosion, graph growth, change amplification, local standards
+    failurePatterns:
+      - every feature requires another special case
+      - responsibilities become less clear after each patch
+    projectionType: signed_score
+    normalizationProfileId: NORM-MC12-v1
+    status: ACTIVE
+
+  - id: MC13
+    name: Analyzability and understandability
+    question: >-
+      Can a competent human or AI reconstruct what the unit does, why it
+      exists, and what will be affected by change?
+    evidenceSources:
+      - purpose confidence, source clarity, graph completeness, documentation, naming, traceability, onboarding effort
+    failurePatterns:
+      - behavior discoverable only through tribal knowledge
+      - misleading names
+      - purpose inferred from one weak clue
+    projectionType: signed_score
+    normalizationProfileId: NORM-MC13-v1
+    status: ACTIVE
+
+  - id: MC14
+    name: Testability
+    question: >-
+      Can behavior be isolated, controlled, observed, reproduced, and
+      falsified at reasonable cost?
+    evidenceSources:
+      - deterministic fixtures, test seams, scenario controls, stable outputs, coverage, test cost and flakiness
+    failurePatterns:
+      - only end-to-end manual verification
+      - no authoritative observable output
+      - hidden clock or global state
+    projectionType: signed_score
+    normalizationProfileId: NORM-MC14-v1
+    status: ACTIVE
+
+  - id: MC15
+    name: Observability
+    question: >-
+      Does the unit reveal enough state, timing, errors, degradation, and
+      causal context to diagnose and prove behavior?
+    evidenceSources:
+      - logs, metrics, traces, health reports, state snapshots, attribution, last-activity and fallback declarations
+    failurePatterns:
+      - silent fallback
+      - warning without source
+      - black-box subsystem
+      - telemetry removed to make the system look clean
+    projectionType: signed_score
+    normalizationProfileId: NORM-MC15-v1
+    status: ACTIVE
+
+  # ---------------------------------------------------------------------
+  # Area D — Performance, resource efficiency, and sustainability (TARGET_QUALITY)
+  # ---------------------------------------------------------------------
+  - id: MD01
+    name: Intrinsic efficiency
+    question: >-
+      Does the unit perform required work with minimal inherent waste, even
+      when current hardware hides the cost?
+    evidenceSources:
+      - operation counts, allocations, copies, transfers, redundant work, cache hit/miss behavior
+    failurePatterns:
+      - per-frame allocations
+      - avoidable data copies
+      - repeated parsing
+      - polling while idle
+    projectionType: signed_score
+    normalizationProfileId: NORM-MD01-v1
+    status: ACTIVE
+
+  - id: MD02
+    name: Cost amplification
+    question: >-
+      How does a small unit cost multiply through frequency, scale, duration,
+      concurrency, or fan-out?
+    evidenceSources:
+      - unit cost x invocation rate x object/user count x duration x concurrency
+    failurePatterns:
+      - tiny cost dismissed although executed millions of times
+    projectionType: signed_score
+    normalizationProfileId: NORM-MD02-v1
+    status: ACTIVE
+
+  - id: MD03
+    name: Critical-path influence
+    question: >-
+      Does the unit determine or materially affect completion time of a
+      critical workflow?
+    evidenceSources:
+      - traces, barriers, synchronous chains, CPU/GPU dependencies, queue waits, scheduler ordering
+    failurePatterns:
+      - optimizing off-path work while ignoring a blocking stage
+      - local speedup hidden behind a slower barrier
+    projectionType: signed_score
+    normalizationProfileId: NORM-MD03-v1
+    status: ACTIVE
+
+  - id: MD04
+    name: Throughput and latency
+    question: >-
+      How much useful work is completed per unit time, and how long does a
+      required operation take?
+    evidenceSources:
+      - FPS, requests/sec, tasks/sec, input latency, startup/load time, median duration
+    failurePatterns:
+      - throughput increased by reducing work
+      - average latency hides tail behavior
+    projectionType: signed_score
+    normalizationProfileId: NORM-MD04-v1
+    status: ACTIVE
+
+  - id: MD05
+    name: Tail behavior and cost predictability
+    question: >-
+      Are p95/p99/worst-case latency, jitter, stutter, spikes, and resource
+      bursts controlled and predictable?
+    evidenceSources:
+      - distributions, long-frame count, worst case, variance, memory spikes, queue depth
+    failurePatterns:
+      - good average FPS with severe stutter
+      - rare but catastrophic pauses
+    projectionType: signed_score
+    normalizationProfileId: NORM-MD05-v1
+    status: ACTIVE
+
+  - id: MD06
+    name: Memory and resource lifecycle
+    question: >-
+      Are memory, GPU resources, handles, listeners, workers, timers, buffers,
+      and caches owned, reused, bounded, and released correctly?
+    evidenceSources:
+      - baseline/peak/retained memory, growth slope, create-use-destroy balance, high-water marks, leak probes
+    failurePatterns:
+      - resource churn
+      - unreleased listeners
+      - cache without eviction
+      - device-loss recreation gaps
+    projectionType: signed_score
+    normalizationProfileId: NORM-MD06-v1
+    status: ACTIVE
+
+  - id: MD07
+    name: I/O, network, and storage efficiency
+    question: >-
+      Are reads, writes, requests, serialization, storage, retries, and
+      transfers necessary, batched, cached, and bounded?
+    evidenceSources:
+      - bytes transferred, request counts, retry rates, file reads, serialization cost, cache performance
+    failurePatterns:
+      - repeated full-file reads
+      - chatty APIs
+      - redundant uploads
+      - unbounded retry loops
+    projectionType: signed_score
+    normalizationProfileId: NORM-MD07-v1
+    status: ACTIVE
+
+  - id: MD08
+    name: Scalability
+    question: >-
+      How does cost and quality change as load, users, entities, worlds,
+      modules, data, or time increase?
+    evidenceSources:
+      - load curves, complexity class, saturation points, queue growth, horizontal/vertical scaling
+    failurePatterns:
+      - demo-scale success with quadratic collapse
+      - hidden global lock
+    projectionType: signed_score
+    normalizationProfileId: NORM-MD08-v1
+    status: ACTIVE
+
+  - id: MD09
+    name: Degradation shape and resource adaptability
+    question: >-
+      When resources decline or load rises, does the system degrade gradually,
+      transparently, and according to policy?
+    evidenceSources:
+      - quality profiles, throttling behavior, fallback path, minimum/standard/high/extreme environments
+    failurePatterns:
+      - sudden cliff
+      - silent quality collapse
+      - hard dependence on one hardware tier
+    projectionType: signed_score
+    normalizationProfileId: NORM-MD09-v1
+    status: ACTIVE
+
+  - id: MD10
+    name: Energy and carbon efficiency
+    question: >-
+      Is the required outcome achieved with justified energy use and, where
+      relevant, reduced software carbon intensity?
+    evidenceSources:
+      - energy proxy, runtime duration, hardware utilization, SCI-compatible functional-unit measurement, AI token/inference cost
+    failurePatterns:
+      - faster wall-clock result requiring disproportionate energy
+      - idle GPU work
+      - unnecessary model calls
+    projectionType: signed_score
+    normalizationProfileId: NORM-MD10-v1
+    status: ACTIVE
+
+  # ---------------------------------------------------------------------
+  # Area E — Reliability, resilience, and safety (TARGET_QUALITY)
+  # ---------------------------------------------------------------------
+  - id: ME01
+    name: Reliability and availability
+    question: >-
+      Does the system perform correctly and remain available over the required
+      operating period?
+    evidenceSources:
+      - failure rate, uptime/SLO, error budget, long-run tests, success ratio, mean time between failures
+    failurePatterns:
+      - passes short tests but decays over time
+      - intermittent unavailable state
+    projectionType: signed_score
+    normalizationProfileId: NORM-ME01-v1
+    status: ACTIVE
+
+  - id: ME02
+    name: Fragility and blast radius
+    question: >-
+      How much damage can a small defect, failed dependency, or local change
+      cause?
+    evidenceSources:
+      - reverse impact, failure injection, affected units, data loss scope, cascading effects
+    failurePatterns:
+      - one NPC stops the runtime
+      - one config error blocks unrelated features
+    projectionType: signed_score
+    normalizationProfileId: NORM-ME02-v1
+    status: ACTIVE
+
+  - id: ME03
+    name: Fault isolation and containment
+    question: >-
+      Are faults contained within clear boundaries without corrupting
+      unrelated state or workflows?
+    evidenceSources:
+      - sandboxing, process boundaries, error propagation, circuit breakers, transaction isolation
+    failurePatterns:
+      - one worker crash poisons shared state
+      - malformed plugin crashes the core
+    projectionType: signed_score
+    normalizationProfileId: NORM-ME03-v1
+    status: ACTIVE
+
+  - id: ME04
+    name: Resilience and recovery
+    question: >-
+      Can the system detect failure, preserve truth, recover, resume, and
+      reconstruct state correctly?
+    evidenceSources:
+      - restart tests, event replay, device-loss recovery, lease expiry, backup restore, recovery time
+    failurePatterns:
+      - recovery requires hidden memory
+      - restart loses mission state
+      - corrupted projections cannot rebuild
+    projectionType: signed_score
+    normalizationProfileId: NORM-ME04-v1
+    status: ACTIVE
+
+  - id: ME05
+    name: Graceful degradation and fallback quality
+    question: >-
+      When a preferred capability is unavailable, does the fallback remain
+      explicit, safe, useful, and purpose-consistent?
+    evidenceSources:
+      - fallback scenarios, quality delta, user/operator notification, bounded feature loss
+    failurePatterns:
+      - silent demotion
+      - fallback produces misleading result
+      - failure turns into total shutdown unnecessarily
+    projectionType: signed_score
+    normalizationProfileId: NORM-ME05-v1
+    status: ACTIVE
+
+  - id: ME06
+    name: Reversibility and rollback
+    question: >-
+      Can the change or operation be undone completely, safely, and with
+      verified restoration?
+    evidenceSources:
+      - reverse patch, rollback test, pre/post hash, transactional boundary, state migration path
+    failurePatterns:
+      - irreversible migration without threshold
+      - rollback exists only on paper
+    projectionType: signed_score
+    normalizationProfileId: NORM-ME06-v1
+    status: ACTIVE
+
+  - id: ME07
+    name: Safety and fail-safe behavior
+    question: >-
+      Does the system identify hazards, prevent unsafe states, warn
+      appropriately, and fail in the safest available mode?
+    evidenceSources:
+      - hazard analysis, protected surfaces, fail-safe tests, operational limits, safety warnings
+    failurePatterns:
+      - optimization bypasses a guard
+      - failure defaults to an unsafe action
+    projectionType: signed_score
+    normalizationProfileId: NORM-ME07-v1
+    status: ACTIVE
+
+  # ---------------------------------------------------------------------
+  # Area F — Security, privacy, provenance, and governance (TARGET_QUALITY)
+  # ---------------------------------------------------------------------
+  - id: MF01
+    name: Security
+    question: >-
+      Does the system preserve confidentiality, integrity, availability,
+      authenticity, and resistance to exploitation?
+    evidenceSources:
+      - threat model, attack-surface analysis, vulnerability tests, authorization tests, secure configuration, incident history
+    failurePatterns:
+      - new feature expands attack surface without controls
+      - client trusts unvalidated input
+    projectionType: signed_score
+    normalizationProfileId: NORM-MF01-v1
+    status: ACTIVE
+
+  - id: MF02
+    name: Privacy and data minimization
+    question: >-
+      Are only necessary data collected, processed, exposed, and retained with
+      appropriate purpose, access, and lifecycle controls?
+    evidenceSources:
+      - data inventory, retention, access logs, anonymization, local-processing options, deletion tests
+    failurePatterns:
+      - telemetry retained indefinitely
+      - secrets or personal data enter model context unnecessarily
+    projectionType: signed_score
+    normalizationProfileId: NORM-MF02-v1
+    status: ACTIVE
+
+  - id: MF03
+    name: Supply-chain and provenance integrity
+    question: >-
+      Can source, dependencies, builds, artifacts, models, and deployment
+      inputs be traced and protected from tampering?
+    evidenceSources:
+      - lockfiles, SBOM/provenance, signed or hash-bound artifacts, reproducible builds, dependency policy, SLSA-style attestations
+    failurePatterns:
+      - unpinned dependency
+      - build cannot be traced to source
+      - artifact substituted after verification
+    projectionType: signed_score
+    normalizationProfileId: NORM-MF03-v1
+    status: ACTIVE
+
+  - id: MF04
+    name: Abuse and misuse resistance
+    question: >-
+      Can legitimate features be exploited to cause harm, bypass policy,
+      manipulate evidence, or gain unintended authority?
+    evidenceSources:
+      - misuse cases, prompt-injection tests, rate limits, content boundaries, adversarial scenarios
+    failurePatterns:
+      - source comments authorize tool calls
+      - benchmark is gamed
+      - public endpoint enables destructive action
+    projectionType: signed_score
+    normalizationProfileId: NORM-MF04-v1
+    status: ACTIVE
+
+  - id: MF05
+    name: Autonomy appropriateness and human control
+    question: >-
+      Is autonomous authority proportional, bounded, interruptible,
+      reviewable, and subordinate to the Creator's mission?
+    evidenceSources:
+      - capability tokens, approval gates, stop controls, mode policy, override tests, authority map
+    failurePatterns:
+      - agent can broaden its own permissions
+      - no reliable stop
+      - recommendation silently becomes execution
+    projectionType: signed_score
+    normalizationProfileId: NORM-MF05-v1
+    status: ACTIVE
+
+  - id: MF06
+    name: Auditability, accountability, and policy conformance
+    question: >-
+      Can decisions, commands, changes, evidence, and responsible actors be
+      reconstructed and checked against policy?
+    evidenceSources:
+      - append-only audit, receipts, hashes, decision provenance, policy version, actor identity
+    failurePatterns:
+      - no record of who omitted a finding
+      - landing cannot be reconstructed
+      - policy changed mid-experiment
+    projectionType: signed_score
+    normalizationProfileId: NORM-MF06-v1
+    status: ACTIVE
+
+  # ---------------------------------------------------------------------
+  # Area G — Compatibility, flexibility, delivery, and interaction (TARGET_QUALITY)
+  # ---------------------------------------------------------------------
+  - id: MG01
+    name: Compatibility and interoperability
+    question: >-
+      Does the unit coexist and exchange information correctly with required
+      systems, data, protocols, and environments?
+    evidenceSources:
+      - protocol tests, coexistence tests, schema compatibility, integration matrices
+    failurePatterns:
+      - valid locally but incompatible with another module or platform
+    projectionType: signed_score
+    normalizationProfileId: NORM-MG01-v1
+    status: ACTIVE
+
+  - id: MG02
+    name: Backward and forward compatibility
+    question: >-
+      Are supported saves, APIs, data formats, scripts, worlds, clients, and
+      migrations preserved across versions?
+    evidenceSources:
+      - versioned fixtures, migration tests, old-client/new-server tests, serialization round trips
+    failurePatterns:
+      - optimization invalidates saves
+      - old content loads silently wrong
+    projectionType: signed_score
+    normalizationProfileId: NORM-MG02-v1
+    status: ACTIVE
+
+  - id: MG03
+    name: Portability
+    question: >-
+      What effort and risk are required to run the system on another
+      compatible OS, browser, GPU, device, or infrastructure profile?
+    evidenceSources:
+      - shared-code ratio, platform adapters, compatibility tests, setup effort, environment exceptions
+    failurePatterns:
+      - core logic bound to one platform
+      - hidden driver assumption
+    projectionType: signed_score
+    normalizationProfileId: NORM-MG03-v1
+    status: ACTIVE
+
+  - id: MG04
+    name: Adaptability and plasticity
+    question: >-
+      Can the system adapt quality, capacity, configuration, and behavior to
+      different resources and contexts without architectural fracture?
+    evidenceSources:
+      - configuration profiles, feature detection, adaptive quality, fallback behavior, adapter boundaries
+    failurePatterns:
+      - every new environment adds another special case
+      - quality cannot scale down safely
+    projectionType: signed_score
+    normalizationProfileId: NORM-MG04-v1
+    status: ACTIVE
+
+  - id: MG05
+    name: Deployability and operability
+    question: >-
+      Can the system be installed, configured, started, monitored, upgraded,
+      rolled back, and operated reliably?
+    evidenceSources:
+      - clean install, startup, readiness, health, deployment time, rollback, operator runbook, DORA-style delivery indicators where applicable
+    failurePatterns:
+      - works only on the author's machine
+      - ambiguous readiness
+      - command started but success is unknown
+    projectionType: signed_score
+    normalizationProfileId: NORM-MG05-v1
+    status: ACTIVE
+
+  - id: MG06
+    name: Accessibility, inclusivity, and usability
+    question: >-
+      Can intended users understand, perceive, operate, and recover from
+      errors in the interface, including users with disabilities?
+    evidenceSources:
+      - WCAG-aligned tests where applicable, keyboard access, contrast, reduced motion, error prevention, task success, human evaluation
+    failurePatterns:
+      - essential state encoded only by color
+      - controls inaccessible without pointer
+      - cinematic effects make the tool unusable
+    projectionType: signed_score
+    normalizationProfileId: NORM-MG06-v1
+    status: ACTIVE
+
+  - id: MG07
+    name: Reusability and generalization
+    question: >-
+      Can a component or method be reused in another valid context without
+      hidden assumptions or disproportionate adaptation?
+    evidenceSources:
+      - adapter tests, parameterization, dependency isolation, reuse history, contract clarity
+    failurePatterns:
+      - copied code because original cannot be reused
+      - generic layer that actually encodes one target
+    projectionType: signed_score
+    normalizationProfileId: NORM-MG07-v1
+    status: ACTIVE
+
+  # ---------------------------------------------------------------------
+  # Area H — Transparency and system-wide synthesis (TARGET_QUALITY)
+  # ---------------------------------------------------------------------
+  - id: MG08
+    name: Cross-environment contract integrity and impedance
+    question: >-
+      Do languages, runtimes, data formats, GPU/CPU boundaries, build tools,
+      services, and platforms exchange the same meaning with proportionate
+      transformation and coordination cost?
+    evidenceSources:
+      - Universal Project Representation flows; schema, layout, unit and version contracts
+      - producer-consumer tests; serialization, transfer, copy, marshalling and synchronization measurements
+      - ownership and lifecycle records; change-propagation analysis; cross-platform scenarios
+    failurePatterns:
+      - individually correct components disagree about units, nullability, layout, ordering, timing, ownership or error semantics
+      - hidden padding or repeated conversion
+      - duplicate computation across TypeScript/WGSL/Python/SQL
+      - work placed on the wrong side of a boundary
+      - one contract change requires unsynchronized manual edits
+    verdictImpact: >-
+      Correctness conflicts may trigger REJECTED_CONTRACT_VIOLATION;
+      disproportionate boundary cost or responsibility placement creates a
+      METHODOLOGICAL_OPPORTUNITY requiring cross-environment proof.
+    projectionType: signed_score
+    normalizationProfileId: NORM-MG08-v1
+    status: ACTIVE
+    grid:
+      index: 98
+
+  - id: MH01
+    name: Explainability and transparency
+    question: >-
+      Can CLU-E and relevant stakeholders explain what the system did, why, on
+      what evidence, with what uncertainty, and what would change the
+      conclusion?
+    evidenceSources:
+      - source-grounded responsibility, decision traces, causal narrative, counter-evidence, confidence, limitations
+    failurePatterns:
+      - opaque score
+      - unexplained AI verdict
+      - purpose inferred without provenance
+    projectionType: signed_score
+    normalizationProfileId: NORM-MH01-v1
+    status: ACTIVE
+
+  - id: MH02
+    name: Quality balance and Pareto integrity
+    question: >-
+      Does the change improve the overall quality vector without hiding an
+      unacceptable trade-off?
+    evidenceSources:
+      - before/after measure vector, mandatory gates, Pareto comparison, Creator trade-off policy, Central Benchmark
+    failurePatterns:
+      - faster but less correct
+      - simpler but less secure
+      - lower memory but severe tail latency
+      - local gain with global loss
+    projectionType: signed_score
+    normalizationProfileId: NORM-MH02-v1
+    status: ACTIVE
+
+  # ---------------------------------------------------------------------
+  # Area I — Evidence and Assurance Metrics (EVIDENCE_ASSURANCE)
+  # ---------------------------------------------------------------------
+  - id: MH03
+    name: Method adequacy and applicable-frontier position
+    question: >-
+      Given the protected intent, problem class, workload, constraints, and
+      value horizon, is the current method an adequate way to achieve the
+      outcome, and how far is it from the Applicable Solution Frontier?
+    evidenceSources:
+      - observed implementation; declared, inferred and confirmed intent
+      - problem-class record; current-method record
+      - provenance- and freshness-bound method landscape; applicability exclusions
+      - Pareto vector; controlled candidate experiments
+      - capability and Master Benchmark outcomes
+    failurePatterns:
+      - perfecting a locally efficient implementation of an inferior method
+      - assuming the implementation defines the intent
+      - adopting a fashionable method without applicability evidence
+      - overlooking an established method that better satisfies the same outcome under project constraints
+      - claiming state of the art from stale or untraceable knowledge
+    verdictImpact: >-
+      Creates a METHODOLOGICAL_OPPORTUNITY, not an automatic rewrite.
+      Acceptance requires a frozen comparative experiment proving the candidate
+      method is better for this target and does not violate mandatory gates.
+    projectionType: signed_score
+    normalizationProfileId: NORM-MH03-v1
+    status: ACTIVE
+    grid:
+      index: 97
+
+  - id: MI01
+    name: Purpose-context sufficiency
+    question: >-
+      Is the local, parent, subsystem, and program purpose understood well
+      enough to judge the candidate?
+    projectionType: signed_score
+    normalizationProfileId: NORM-MI01-v1
+    status: ACTIVE
+
+  - id: MI02
+    name: Measurement validity
+    question: >-
+      Does the chosen indicator actually measure the claimed property, with
+      correct units, collection, and interpretation?
+    projectionType: signed_score
+    normalizationProfileId: NORM-MI02-v1
+    status: ACTIVE
+
+  - id: MI03
+    name: Benchmark representativeness
+    question: >-
+      Does the benchmark exercise meaningful, purpose-relevant workloads
+      rather than a convenient but unrepresentative path?
+    projectionType: signed_score
+    normalizationProfileId: NORM-MI03-v1
+    status: ACTIVE
+
+  - id: MI04
+    name: Coverage completeness
+    question: >-
+      How much of the declared source, dependency, runtime, scenario,
+      platform, purpose, and capability surface was actually assessed?
+    projectionType: signed_score
+    normalizationProfileId: NORM-MI04-v1
+    status: ACTIVE
+
+  - id: MI05
+    name: Causal attribution
+    question: >-
+      Is the observed change attributable to the patch rather than noise,
+      unrelated changes, caching, environment drift, or measurement
+      interference?
+    projectionType: signed_score
+    normalizationProfileId: NORM-MI05-v1
+    status: ACTIVE
+
+  - id: MI06
+    name: Confidence and uncertainty calibration
+    question: >-
+      Does stated confidence match historical accuracy, evidence strength,
+      ambiguity, and residual uncertainty?
+    projectionType: signed_score
+    normalizationProfileId: NORM-MI06-v1
+    status: ACTIVE
+
+  - id: MI07
+    name: Knowledge freshness
+    question: >-
+      Are source, documents, dependencies, benchmark, graph, environment, and
+      prior conclusions current for this assessment?
+    projectionType: signed_score
+    normalizationProfileId: NORM-MI07-v1
+    status: ACTIVE
+
+  - id: MI08
+    name: Instrument self-validity and observer effect
+    question: >-
+      Has the parser, probe, benchmark, fixture, browser bridge, or analyzer
+      proven that it works and does not materially distort what it measures?
+    projectionType: signed_score
+    normalizationProfileId: NORM-MI08-v1
+    status: ACTIVE
+
+  - id: MI09
+    name: Reproducibility and replicability
+    question: >-
+      Can the result be repeated in the same environment, and where required
+      reproduced in another compatible environment?
+    projectionType: signed_score
+    normalizationProfileId: NORM-MI09-v1
+    status: ACTIVE
+
+  - id: MI10
+    name: Regression sensitivity
+    question: >-
+      Would the active tests and measures detect meaningful degradation,
+      interaction effects, and cumulative drift?
+    projectionType: signed_score
+    normalizationProfileId: NORM-MI10-v1
+    status: ACTIVE
+
+  - id: MI11
+    name: Scope-of-claim integrity and residual unknowns
+    question: >-
+      Is the conclusion limited to the evidence envelope, with unknowns,
+      exclusions, and deferred surfaces explicitly preserved?
+    projectionType: signed_score
+    normalizationProfileId: NORM-MI11-v1
+    status: ACTIVE
+
+  # ---------------------------------------------------------------------
+  # Area J — Mandatory Preservation and Acceptance Gates (ACCEPTANCE_GATES)
+  # A failed applicable gate blocks ACCEPTED_PROVEN regardless of movement
+  # elsewhere.
+  # ---------------------------------------------------------------------
+  - id: MI12
+    name: Evidence-plan and benchmark-synthesis validity
+    question: >-
+      Is the complete evidence plan appropriate to the improvement claim,
+      independently validated, resistant to work reduction and gaming, and
+      frozen before candidate results are interpreted?
+    evidenceSources:
+      - "instrumented authority: analytic or exact proof, quantitative benchmarks, constraint and conformance checks"
+      - "empirical authority: capability, Master Benchmark and cross-platform outcomes, controlled human-perceptual evaluation"
+      - claim-to-instrument traceability, author identity, calibration, representativeness, sensitivity, repeatability
+      - observer-effect analysis, baseline/candidate symmetry, randomization and blinding where applicable
+      - decision thresholds, freeze hash, invalidation conditions
+    failurePatterns:
+      - an evidence plan interpreted or amended after candidate results are known
+      - an AI-generated benchmark admitted without the validation required of any other instrument
+      - work reduction or metric substitution hidden inside the instrument
+      - baseline and candidate measured asymmetrically
+    verdictImpact: >-
+      An invalid or unfrozen evidence plan makes the claim inadmissible;
+      evidence quality gaps block acceptance until the instrument is validated.
+    projectionType: signed_score
+    normalizationProfileId: NORM-MI12-v1
+    status: ACTIVE
+    grid:
+      index: 99
+
+  - id: MJ01
+    name: Purpose Preservation
+    question: >-
+      The program and modified unit still serve their declared purpose.
+    projectionType: gate_state
+    normalizationProfileId: NORM-MJ01-v1
+    status: ACTIVE
+
+  - id: MJ02
+    name: Capability Preservation
+    question: >-
+      All required capabilities are preserved or improved; none is silently
+      removed, narrowed, or materially degraded.
+    projectionType: gate_state
+    normalizationProfileId: NORM-MJ02-v1
+    status: ACTIVE
+
+  - id: MJ03
+    name: Workload Integrity
+    question: >-
+      The patched benchmark and scenario perform the same required work as the
+      baseline.
+    projectionType: gate_state
+    normalizationProfileId: NORM-MJ03-v1
+    status: ACTIVE
+
+  - id: MJ04
+    name: Correctness and Contract Integrity
+    question: >-
+      Required outputs, state, ordering, APIs, persistence, and safety
+      contracts remain valid.
+    projectionType: gate_state
+    normalizationProfileId: NORM-MJ04-v1
+    status: ACTIVE
+
+  - id: MJ05
+    name: Evidence Admissibility
+    question: >-
+      The proof contract was frozen, instruments were healthy, preconditions
+      were met, environment and source identities were correct, and the result
+      is statistically or logically decisive under the registered policy.
+    projectionType: gate_state
+    normalizationProfileId: NORM-MJ05-v1
+    status: ACTIVE
+
+  - id: MJ06
+    name: Global Regression Guardrail
+    question: >-
+      The Central Benchmark and protective measures show no unacceptable
+      system-wide regression. Target-specific gray areas are reported, never
+      converted into improvement.
+    projectionType: gate_state
+    normalizationProfileId: NORM-MJ06-v1
+    status: ACTIVE
+
+  - id: MJ07
+    name: Reversibility and Recovery
+    question: >-
+      The patch has a verified rollback or restoration path appropriate to its
+      risk and is safe to land under the active custody policy.
+    projectionType: gate_state
+    normalizationProfileId: NORM-MJ07-v1
+    status: ACTIVE
+
+  # ---------------------------------------------------------------------
+  # Area K — CLU-E Self-Metrics (CLUE_SELF)
+  # ---------------------------------------------------------------------
+  - id: MK01
+    name: Cost per proven improvement
+    question: >-
+      Total analysis, AI, benchmark, and human cost divided by accepted proven
+      improvements.
+    projectionType: signed_score
+    normalizationProfileId: NORM-MK01-v1
+    status: ACTIVE
+
+  - id: MK02
+    name: Time to terminal disposition
+    question: >-
+      Elapsed time from finding creation to accepted, rejected, omitted,
+      deferred, inconclusive, or invalid terminal state.
+    projectionType: signed_score
+    normalizationProfileId: NORM-MK02-v1
+    status: ACTIVE
+
+  - id: MK03
+    name: Finding precision
+    question: >-
+      Proportion of investigated findings that survive refutation and become
+      confirmed defects or justified improvements.
+    projectionType: signed_score
+    normalizationProfileId: NORM-MK03-v1
+    status: ACTIVE
+
+  - id: MK04
+    name: Regression escape rate
+    question: >-
+      Meaningful regressions not detected by the active catalogue and
+      protective suite before landing.
+    projectionType: signed_score
+    normalizationProfileId: NORM-MK04-v1
+    status: ACTIVE
+
+  - id: MK05
+    name: Repeated-work rate
+    question: >-
+      Previously resolved or rejected hypotheses repeated without new
+      evidence.
+    projectionType: signed_score
+    normalizationProfileId: NORM-MK05-v1
+    status: ACTIVE
+
+  - id: MK06
+    name: Coverage and uncertainty reduction
+    question: >-
+      Growth of recognized, purpose-understood, dependency-resolved,
+      runtime-enriched, and test-covered scope.
+    projectionType: signed_score
+    normalizationProfileId: NORM-MK06-v1
+    status: ACTIVE
+
+  - id: MK07
+    name: Forecast calibration
+    question: >-
+      Accuracy of P50/P80 estimates for calls, sessions, patches, experiments,
+      and cycle completion.
+    projectionType: signed_score
+    normalizationProfileId: NORM-MK07-v1
+    status: ACTIVE
+
+  - id: MK08
+    name: Instrument validity rate
+    question: >-
+      Proportion of planned experiments that produce admissible evidence
+      rather than INVALID_TEST or avoidable SKIP.
+    projectionType: signed_score
+    normalizationProfileId: NORM-MK08-v1
+    status: ACTIVE
+
+  - id: MK09
+    name: Test-catalogue efficiency
+    question: >-
+      Unique defects protected per unit of test execution cost, adjusted for
+      flakiness and overlap.
+    projectionType: signed_score
+    normalizationProfileId: NORM-MK09-v1
+    status: ACTIVE
+
+  - id: MK10
+    name: Mission continuity
+    question: >-
+      Ability to restart, replay, recover, and resume without unique state
+      existing only in a lost session.
+    projectionType: signed_score
+    normalizationProfileId: NORM-MK10-v1
+    status: ACTIVE
+
+  - id: MK11
+    name: Custody safety
+    question: >-
+      Landing-gate correctness, exact-diff receipt success, post-land
+      verification, and automatic-revert reliability.
+    projectionType: signed_score
+    normalizationProfileId: NORM-MK11-v1
+    status: ACTIVE
+
+  - id: MK12
+    name: Equilibrium credibility
+    question: >-
+      Whether later stronger assessments confirm or expose blind spots in
+      earlier equilibrium certificates.
+    projectionType: signed_score
+    normalizationProfileId: NORM-MK12-v1
+    status: ACTIVE
+
+  - id: MK13
+    name: Measure-session token efficiency
+    question: >-
+      Tokens and calls per terminal measure-session result, segmented by role,
+      model, target and outcome quality.
+    projectionType: signed_score
+    normalizationProfileId: NORM-MK13-v1
+    status: ACTIVE
+
+  - id: MK14
+    name: Model-routing value
+    question: >-
+      Improvement in precision, proof quality or risk detection achieved by
+      frontier-model escalation relative to its additional cost.
+    projectionType: signed_score
+    normalizationProfileId: NORM-MK14-v1
+    status: ACTIVE
+
+  - id: MK15
+    name: Catalogue maintainability
+    question: >-
+      Time and error rate required to add, revise, validate, document and
+      activate a measure without duplicated changes across the system.
+    projectionType: signed_score
+    normalizationProfileId: NORM-MK15-v1
+    status: ACTIVE
+
+  - id: MK16
+    name: Catalogue-review effectiveness
+    question: >-
+      Defects, blind spots, duplicate measures, gaming cases and escaped
+      regressions discovered through AI catalogue review, compared with review
+      cost.
+    projectionType: signed_score
+    normalizationProfileId: NORM-MK16-v1
+    status: ACTIVE
+
+  - id: MK17
+    name: Conversation-orchestration integrity
+    question: >-
+      Proportion of logical measure sessions whose task identity, context
+      hash, model-selection rationale, checkpoints, refutation links,
+      token/call telemetry, validated artifacts and terminal outcome are fully
+      reconstructible without a user manually carrying context between GPT
+      sessions.
+    projectionType: signed_score
+    normalizationProfileId: NORM-MK17-v1
+    status: ACTIVE
+
+  - id: MK18
+    name: Status fidelity
+    question: >-
+      Agreement between durable assessment/runtime state and exported
+      clue-status.json, including replay equivalence, unit and capability
+      coverage, freshness, contradiction rate, State Seal validity and
+      separation of historical assessment from current runtime health.
+    projectionType: signed_score
+    normalizationProfileId: NORM-MK18-v1
+    status: ACTIVE
+
+  - id: MK19
+    name: RPI value yield and horizon realization
+    question: >-
+      What verified persistent project value or assurance did RPI create
+      relative to total search, token, compute, implementation, validation,
+      human and expected-risk cost, measured over the declared value horizon?
+    evidenceSources:
+      - forecast lifetime value and realized value observed to date, kept distinct
+      - non-monetized assurance gain; token efficiency; improvement yield
+      - attribution confidence
+      - search saturation and marginal expected value of the next experiment
+    failurePatterns:
+      - reporting forecast value as if it were realized
+      - counting assurance gain as monetized return
+      - ignoring search saturation and continuing past marginal value
+      - attributing value to RPI without attribution confidence
+    verdictImpact: >-
+      Value yield never overrides a mandatory gate; a negative or unattributable
+      yield over the declared horizon is evidence about the RPI process itself.
+    projectionType: signed_score
+    normalizationProfileId: NORM-MK19-v1
+    status: ACTIVE
+    grid:
+      index: 100

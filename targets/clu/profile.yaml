@@ -1,0 +1,73 @@
+# Target profile — CLU-E itself (D1, accepted 2026-08-11).
+#
+# The active target today is `clu`: CLU-E assessing itself, which the Constitution permits
+# and which every proof this session ran against. Murugan gets `targets/murugan/profile.yaml`
+# when it becomes the target; switching is one line in config/clue.config.yaml.
+#
+# Everything here is the *target-s*. CLU-E-s own governing pack stays in the configuration
+# under constitution.tracked_documents and is never target-selectable.
+#
+# This file is a governed input: editing it moves the world, and a moved world registers a
+# successor mission before producing evidence. `credential_env` names an environment
+# variable, never a credential (D4). Under the explicit P2-04 decision below it remains
+# null because there is no remote subject for a credential reference.
+credential_env: null
+# `id` matches the repository directory (CLU) so `clue doctor` sees no identity↔root drift;
+# `name` carries the product identity shown in graph and status labels.
+id: clu
+name: "CLU-E"
+# The CLU-E repository is both the framework and, under self-assessment, the target. Written by
+# exactly one component (the Custodian), through exactly one gated operation (landing); all else reads.
+root: "F:/CLU/CLU"
+main_branch: main
+source_roots:
+  - src
+  - selftest
+document_roots:
+  - .
+exclude:
+  - node_modules
+  - dist
+  - .git
+  # CLU-E's own data plane and captured evidence must never be recognized as target source.
+  - workspace
+
+# --- Target registration (ADR-0005, DEV-P1-29) ------------------------------
+#
+# P2-04 / D5 closure decision. The nullable `remote` field alone is not sufficient to
+# distinguish an untouched legacy profile from an intentional local-only target, so the
+# Creator decision is recorded separately and both exact values are mission-bound.
+remote: null
+remote_decision:
+  state: NO_REMOTE_YET
+  decision_id: P2-D5-NO-REMOTE-YET
+  recorded_at: "2026-08-14"
+  recorded_by: creator
+  reason: "Remote publication is intentionally deferred beyond P2; CLU-E remains local-only until a later Creator decision registers a remote and the governed Git lifecycle is implemented."
+
+# The two governed target inputs. Each remains `null` until it is explicitly registered;
+# `clue doctor` reports an unregistered input as an honest absence rather than passing over it.
+#
+#   description  declared project intent. Constitution §3.4: authoritative for what the project
+#                SAYS it is for, never for what it observably does. CLU-E compares the two.
+#   benchmark    the Master Benchmark contract — the executable process that starts the target,
+#                reaches representative states, collects telemetry and terminates cleanly.
+#                Execution Model §24 makes a cycle without a closing whole-project benchmark (§18)
+#                run incomplete, so this is what lets a cycle finish rather than merely stop.
+#
+# Paths are relative to project.root; CLUE_AI_Utilization_v9.md §25.2 prefers them inside the
+# target repository so both travel in its Git history. An absolute path outside it stays legal
+# and is reported as `insideRepository: false` — CLU-E must be able to assess a target whose
+# owner will not accept two new files in their tree.
+#
+# Templates for both are in the documentation pack:
+#   templates/target_description.template_v9.md
+#   templates/benchmark.template_v9.txt
+inputs:
+  # description registered 2026-08-10 (DEV-P2-06): the 0.2.0 reconciled draft at the repository
+  # root. Registration binds it into the mission basis and doctor's identity line; the file's own
+  # Status field carries the approval state, which remains the Creator's separate act.
+  description: "target description.md"
+  # Master Benchmark registered 2026-08-13 (DEV-P1-29 / D3). The file remains the
+  # single contract-and-harness authority defined by ADR-0010.
+  benchmark: "targets/clu/benchmark/master-benchmark.md"

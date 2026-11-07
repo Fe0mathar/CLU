@@ -1,0 +1,206 @@
+# CLUE equilibrium policy — how CLUE recognises it has run out of things to find
+#
+# Referenced by: config/clue.config.yaml -> equilibrium.policy_file
+# Consumed by:   the equilibrium engine (Phase 3, spec §90).
+# Authority:     CLUE_Implementation_Strategy.md rev 1.2, Part V Phase 3.
+#
+# THE CLAIM EQUILIBRIUM MAKES, STATED PRECISELY
+#
+# Equilibrium is a statement about CLUE's instruments, not about Murugan. "No further
+# improvements found" always means "none found by the metrics, probes, and thresholds
+# currently in place, over the scope currently examined". It never means the code is
+# optimal, and a system that lets those two sentences blur is a system that stops
+# looking and calls it success.
+#
+# Every rule below follows from that. The response to equilibrium is not to stop; it is
+# to move effort from searching to sharpening — because when a search stops returning,
+# the most likely explanation is that the instrument, not the territory, has run out.
+
+version: 1
+
+# ---------------------------------------------------------------------------
+# Scope
+# ---------------------------------------------------------------------------
+# Equilibrium is per-scope, never global. A subsystem can be exhausted while another has
+# barely been touched, and a single global flag would hide that entirely — the quiet
+# subsystem would suppress work on the noisy one.
+
+scope:
+  granularity: subsystem
+  # Scopes are also tracked per domain pack, because a metric family can be exhausted
+  # for rendering while still productive for economy within the same directories.
+  track_by_domain_pack: true
+  # A scope with too little in it cannot reach equilibrium: three units producing no
+  # findings is not convergence, it is a sample size.
+  minimum_units: 10
+  minimum_examined_candidates: 20
+
+# ---------------------------------------------------------------------------
+# Criteria
+# ---------------------------------------------------------------------------
+# All must hold across the evaluation window for a scope to be declared in equilibrium.
+
+criteria:
+  # Consecutive full cycles over the scope. Matches `equilibrium.evaluation_cycles`.
+  evaluation_cycles: 3
+
+  # Zero. Not "few". One accepted improvement in the window means the search was still
+  # working, and calling that equilibrium would abandon a productive line to save the
+  # cost of continuing it.
+  max_accepted_improvements: 0
+
+  # New candidates may still appear; what matters is whether any were worth proving.
+  max_new_findings_above_priority: 0
+  priority_threshold: 0.6
+
+  # The snapshot must not have moved. Equilibrium over a changing tree is meaningless,
+  # because the thing being searched was not the same thing twice.
+  require_stable_snapshot: true
+
+  # Rising cost per improvement is the earliest honest signal of exhaustion, and it
+  # arrives before the count reaches zero. Measured against the target in budget.yaml.
+  cost_per_improvement_multiple: 2.5
+  cost_signal_cycles: 2
+
+  # A scope whose instruments are broken looks identical to one that is exhausted.
+  # Requiring healthy instruments is what keeps those two apart.
+  require_instrument_self_tests_passing: true
+  require_no_invalid_tests_in_window: true
+
+# ---------------------------------------------------------------------------
+# What happens in equilibrium
+# ---------------------------------------------------------------------------
+# Not a stop. A reallocation, plus an explicit attempt to become able to see more.
+
+on_equilibrium:
+  # Re-scan less often rather than never. The scope is quiet, not gone.
+  rescan_interval_multiplier: 4
+
+  # Budget and worker attention move to scopes still returning findings.
+  reallocate_budget_to_active_scopes: true
+
+  # The substantive response. When a search stops returning, the instrument is the
+  # first suspect — so CLUE proposes new measurements rather than re-running old ones
+  # against the same code and expecting a different answer.
+  shift_to_instrumentation: true
+  instrumentation_actions:
+    - propose_new_probes_for_uninstrumented_units
+    - propose_metrics_for_domains_with_no_measurable_claims
+    - deepen_coverage_where_the_graph_reports_gaps
+    - convert_manual_only_seeds_into_automatable_ones
+
+  # Verification never pauses. An improvement that stops being verified stops being
+  # known to be an improvement.
+  continue_regression_verification: true
+  continue_guardrail_verification: true
+  continue_certificate_invalidation_checks: true
+
+  # Recorded as a first-class result. "Nothing further found here, with these
+  # instruments, at this snapshot" is a finding about CLUE and belongs in the ledger.
+  record_in_great_book: true
+
+# ---------------------------------------------------------------------------
+# Breaking equilibrium
+# ---------------------------------------------------------------------------
+# Each trigger is recorded with its cause, so a scope's history reads as a sequence of
+# reasons rather than a series of unexplained state flips.
+
+breaking:
+  triggers:
+    - source_changed_in_scope
+    - mission_version_changed
+    - patching_policy_changed
+    - new_instrument_available
+    - new_metric_family_available
+    - new_domain_pack_enabled
+    - proof_thresholds_changed
+    - certificate_invalidated_in_scope
+    - creator_requested
+
+  # A change of one file does not necessarily reopen an entire subsystem. The reopened
+  # scope is the impacted set from the graph, not the whole directory that contains it.
+  reopen_scope: impacted_units_only
+
+  # A cleared scope starts its window again rather than resuming mid-count. A partial
+  # window carried across a material change would be measuring two different systems.
+  reset_evaluation_window: true
+
+# ---------------------------------------------------------------------------
+# Novelty
+# ---------------------------------------------------------------------------
+# Negative-result memory (spec §84). A hypothesis already tested and rejected must not
+# be silently retried — that is how an autonomous system spends indefinitely while
+# appearing busy.
+
+novelty:
+  # What makes two hypotheses the same. Deliberately does not include wording: a
+  # rephrased identical hypothesis is still the same hypothesis.
+  hypothesis_signature:
+    - target_logical_id
+    - metric_family
+    - proposed_change_kind
+    - falsifier_shape
+
+  # A repeat is refused unless something material has changed since the rejection.
+  repeated_hypothesis_action: refuse_and_cite_prior
+  material_change_permitting_retry:
+    - target_version_hash_changed
+    - new_instrument_measures_it_differently
+    - prior_verdict_was_invalid_test
+    - prior_verdict_was_inconclusive_and_baseline_improved
+    - proof_thresholds_changed
+
+  # An INCONCLUSIVE result is not a rejection; it is a measurement that did not resolve.
+  # It may be retried, but only with something changed about the measurement, never by
+  # simply running the same experiment again and hoping for a quieter machine.
+  inconclusive_retry_requires_changed_conditions: true
+  max_retries_per_hypothesis: 2
+
+  # If most candidates a cycle produces have been seen before, the generator is looping
+  # rather than exploring, and more spend will not fix it.
+  min_novel_candidate_fraction: 0.30
+  low_novelty_action: shift_to_instrumentation
+
+# ---------------------------------------------------------------------------
+# Oscillation
+# ---------------------------------------------------------------------------
+# A specific failure mode of autonomous optimisers: patch A improves a metric, patch B
+# later improves a different metric by undoing A, and the system cycles forever while
+# every individual verdict is valid.
+
+oscillation:
+  detect_reversals: true
+  # A patch that substantially reverses an accepted landing is refused automatically and
+  # routed to the Creator with both experiments attached. Two valid verdicts in
+  # opposition is not a patching decision; it is a design question.
+  reversal_action: route_to_creator
+  reversal_similarity_threshold: 0.8
+  # How far back to look for the patch being reversed.
+  history_window_landings: 50
+
+  # The same unit changing repeatedly in a short window is suspicious even without a
+  # detected reversal.
+  max_landings_per_unit_per_window: 2
+  unit_window_days: 30
+
+# ---------------------------------------------------------------------------
+# Reporting
+# ---------------------------------------------------------------------------
+
+reporting:
+  # Per scope: state, cycles in that state, cost trend, novelty fraction, and the
+  # instrument gaps that would most likely change the answer.
+  status_document: true
+  include_instrument_gap_list: true
+
+  # The sentence that must appear whenever equilibrium is reported, so the claim is
+  # never quietly upgraded into a claim about the code itself.
+  qualifier: >
+    Equilibrium means no further improvements were found by the instruments and metrics
+    currently in place, over this scope, at this snapshot. It is not a statement that
+    the code is optimal.
+
+  # Global equilibrium is reportable but carries no operational meaning beyond the sum
+  # of its scopes, and is never treated as completion.
+  report_global_equilibrium: true
+  global_equilibrium_is_terminal: false

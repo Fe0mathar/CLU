@@ -1,0 +1,97 @@
+# CLU-E provider-budget policy — Creator decision P2-D4-OPENAI-GPT-5.6
+#
+# OpenAI Platform is the sole authority for money, credit, project/key budgets and billing.
+# CLU-E does not enforce a second local monetary ceiling and never converts an unknown
+# provider balance into an invented token allowance. It records exact provider token usage
+# and enters a controlled pause only after an explicit provider billing/credit refusal.
+
+version: 2
+currency: USD
+spend_authority: openai_platform
+provider_exhaustion_action: controlled_pause
+remaining_token_authority: provider_only
+
+# Retained as non-authoritative compatibility fields. They are deliberately zero and MUST
+# NOT be consulted while spend_authority=openai_platform.
+caps:
+  monthly_hard: 0.00
+  daily_soft: 0.00
+  daily_hard: 0.00
+  per_task_default: 0.00
+  per_task_max: 0.00
+  reserve_fraction: 0.00
+require_explicit_caps: false
+
+degradation:
+  - at_fraction: 1.00
+    action: pause_submissions
+    detail: Provider-confirmed billing or credit exhaustion pauses new AI submissions.
+monthly_exhausted_action: pause_submissions
+monthly_rollover: false
+
+lane_allocation:
+  extraction: 0.20
+  analysis: 0.30
+  patch_design: 0.28
+  refutation: 0.15
+  synthesis: 0.07
+soft_allocation: true
+
+# Non-authoritative placeholders retained only for schema/backward compatibility.
+per_task_budgets:
+  DOC_EXTRACT: 0.00
+  UNIT_SUMMARIZE: 0.00
+  SOURCE_PARSE_FOLLOWUP: 0.00
+  EDGE_RESOLVE: 0.00
+  METRIC_ANALYZE: 0.00
+  CANDIDATE_REVIEW: 0.00
+  PROOF_CONTRACT_DESIGN: 0.00
+  PATCH_DESIGN: 0.00
+  PATCH_REVIEW: 0.00
+  REFUTATION: 0.00
+  EXPERIMENT_ANALYSIS: 0.00
+  GLOBAL_SYNTHESIS: 0.00
+on_task_budget_exceeded: fail_and_record
+
+call_modes:
+  default: interactive
+  interactive_allowed_tasks:
+    - DOC_EXTRACT
+    - UNIT_SUMMARIZE
+    - SOURCE_PARSE_FOLLOWUP
+    - EDGE_RESOLVE
+    - METRIC_ANALYZE
+    - CANDIDATE_REVIEW
+    - PROOF_CONTRACT_DESIGN
+    - PATCH_DESIGN
+    - PATCH_REVIEW
+    - REFUTATION
+    - EXPERIMENT_ANALYSIS
+    - GLOBAL_SYNTHESIS
+  interactive_disabled_above_fraction: 1.00
+  batch_poll_interval_seconds: 300
+  batch_timeout_hours: 26
+
+accounting:
+  record_model_id: true
+  record_price_schedule_version: true
+  record_cached_input_separately: true
+  record_batch_discount_separately: true
+  attribute_to: [task, lane, experiment, finding]
+  attribute_on: reconciliation
+
+efficiency:
+  target_cost_per_confirmed_finding: 0.00
+  target_cost_per_issued_verdict: 0.00
+  target_cost_per_proven_improvement: 0.00
+  review_after_experiments: 10
+  report_rejected_experiment_share: true
+
+alarms:
+  on_degradation_step: true
+  on_daily_hard_cap: false
+  on_monthly_hard_cap: false
+  on_task_budget_exceeded: false
+  on_batch_timeout: true
+  on_daily_spend_above_median_multiple: 3.0
+  channels: [status_document, windows_toast]

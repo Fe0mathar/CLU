@@ -1,0 +1,293 @@
+{
+  "manifestVersion": "3.0.0",
+  "release": "CLU-E RPI Documentation Pack v10 Project Profiles Release Candidate",
+  "releaseVersion": "10.0-rc1",
+  "releaseDate": "2026-08-15",
+  "status": "release-candidate-not-ratified",
+  "language": "English",
+  "methodology": "Recursive Project Improvement (RPI)",
+  "referenceEngine": "CLU-E",
+  "authorityBoundary": {
+    "activeP2Pack": "v9",
+    "candidatePack": "v10.0-rc1",
+    "candidateActive": false,
+    "candidateRatified": false,
+    "promotionRequires": [
+      "immutable P2 closure receipt",
+      "authoritative Windows acceptance",
+      "coordinated pack-selector and tracked-document cutover",
+      "Creator ratification",
+      "POST-P2-PROJECT-PROFILES epoch"
+    ]
+  },
+  "files": [
+    {
+      "path": "README_v10.md",
+      "role": "Release guide and promotion boundary",
+      "version": "10.0-rc1",
+      "status": "release-candidate",
+      "bytes": 2012,
+      "lines": 42,
+      "words": 255,
+      "sha256": "dc4ae0e0a1bfab8574cf5a4ad43df839a6f014607704193fea1f5957c86727ab"
+    },
+    {
+      "path": "RPI_Core_Methodology_v9.md",
+      "role": "Carried-forward project-independent RPI methodology",
+      "version": "9.0",
+      "status": "carried-forward-unchanged",
+      "bytes": 38379,
+      "lines": 931,
+      "words": 5252,
+      "sha256": "2a00cc7eadeb0cae118f4c20ca217697ce5f34f8473a7e6773b891b702a3de5c"
+    },
+    {
+      "path": "CLUE_Constitution_v9.md",
+      "role": "Carried-forward CLU-E Constitution",
+      "version": "9.0",
+      "status": "carried-forward-unchanged",
+      "bytes": 14253,
+      "lines": 175,
+      "words": 1921,
+      "sha256": "51a9e8ac1206c44422fd8a05267f92a4268de6a350f9af434906bf43f1d2dcad"
+    },
+    {
+      "path": "CLUE_Architecture_v10.md",
+      "role": "Project Profiles architecture and runtime isolation",
+      "version": "10.0-rc1",
+      "status": "release-candidate",
+      "bytes": 37467,
+      "lines": 1075,
+      "words": 4791,
+      "sha256": "b5c21ed9be9266f0de03d1fe095b339bac019349ea03ca96ea2f6f07c54c2e3b"
+    },
+    {
+      "path": "CLUE_Execution_Model_v10.md",
+      "role": "Project lifecycle and governed operation identity",
+      "version": "10.0-rc1",
+      "status": "release-candidate",
+      "bytes": 26655,
+      "lines": 738,
+      "words": 3606,
+      "sha256": "db9d68681c35fde815f712ead72ffb6a224d27884103234d5abf99959466358d"
+    },
+    {
+      "path": "CLUE_AI_Utilization_v10.md",
+      "role": "Project authority AI context and exact-model gateway",
+      "version": "10.0-rc1",
+      "status": "release-candidate",
+      "bytes": 92644,
+      "lines": 2362,
+      "words": 12549,
+      "sha256": "bee2eaba25e7c1379cdd71bd2cf15ab21ae6f6ddea6d4f2812c9011d48cbbbf6"
+    },
+    {
+      "path": "CLUE_Git_Integration_v10.md",
+      "role": "Project-scoped Git and local-only publication semantics",
+      "version": "10.0-rc1",
+      "status": "release-candidate",
+      "bytes": 57533,
+      "lines": 1699,
+      "words": 7366,
+      "sha256": "9e75273981bc977257a2c1c649f39ab43744385022106aea842c9f2431109c66"
+    },
+    {
+      "path": "CLUE_Canonical_Measurement_Catalogue_v9.md",
+      "role": "Carried-forward global measurement authority",
+      "version": "9.0",
+      "status": "carried-forward-unchanged",
+      "bytes": 131438,
+      "lines": 3028,
+      "words": 17797,
+      "sha256": "28df5fe259ea6b4e39beada09db2f277acde16b475369e5cd21fd98b82388118"
+    },
+    {
+      "path": "CLUE_Status_Contract_v10.md",
+      "role": "Status 5.8.0 active project identity and readiness",
+      "version": "10.0-rc1",
+      "status": "release-candidate",
+      "bytes": 49395,
+      "lines": 1238,
+      "words": 6119,
+      "sha256": "288b2566c00ca4a89bd909a244d15061ade73f89b0116215a8383abf62d7f8c9"
+    },
+    {
+      "path": "CLUE_Interface_Design_v10.md",
+      "role": "Project Profiles Configuration control plane",
+      "version": "10.0-rc1",
+      "status": "release-candidate",
+      "bytes": 82274,
+      "lines": 2431,
+      "words": 11197,
+      "sha256": "c19f900949a817e3c979fea1709cc63eb8b8179d62959ce57798ba5e23ddd447"
+    },
+    {
+      "path": "CLUE_Q1_System_Navigator_v10.md",
+      "role": "SURF/DIVE project generation switching",
+      "version": "10.0-rc1",
+      "status": "release-candidate",
+      "bytes": 49324,
+      "lines": 1478,
+      "words": 7121,
+      "sha256": "fb4f07d2d33593e8bd42de2aa802eb026d13b264d77eb91f9a20f70afe5901b4"
+    },
+    {
+      "path": "CLUE_Project_Directory_v10.md",
+      "role": "Project Profile implementation ownership map",
+      "version": "10.0-rc1",
+      "status": "release-candidate",
+      "bytes": 54132,
+      "lines": 1309,
+      "words": 6645,
+      "sha256": "8b39b933181431d0f7dbbb70f921e26804a984d15c91d17ad79876e31c1d0047"
+    },
+    {
+      "path": "DOCUMENTATION_GOVERNANCE_v10.md",
+      "role": "v10 promotion, drift and historical P2 rules",
+      "version": "10.0-rc1",
+      "status": "release-candidate",
+      "bytes": 24267,
+      "lines": 465,
+      "words": 3343,
+      "sha256": "493b7d719037fd2650d4e407c5f4555f8dcc8bd97ed949cc7d7a6aed6f2525c1"
+    },
+    {
+      "path": "templates/target_description.template_v9.md",
+      "role": "Carried-forward target-description template",
+      "version": "9.0",
+      "status": "carried-forward-unchanged",
+      "bytes": 4158,
+      "lines": 128,
+      "words": 609,
+      "sha256": "3b2c054c3e61e0ed4eac0f0d3b383dd8abcd7933f8c4075dd885054dbceb76c5"
+    },
+    {
+      "path": "templates/benchmark.template_v9.txt",
+      "role": "Carried-forward benchmark template",
+      "version": "9.0",
+      "status": "carried-forward-unchanged",
+      "bytes": 4965,
+      "lines": 124,
+      "words": 568,
+      "sha256": "6db204aef266517f6ee97413641a8edf345639d11119f3f61b57709336ef6869"
+    },
+    {
+      "path": "VALIDATION_REPORT_v10.md",
+      "role": "Release-candidate validation and non-claims",
+      "version": "10.0-rc1",
+      "status": "release-evidence",
+      "bytes": 2686,
+      "lines": 53,
+      "words": 386,
+      "sha256": "a50e1973cc4ec8b4da42d087fa734a08b3d6e54df2b821968eb91f27a12704c1"
+    },
+    {
+      "path": "PROJECT_PROFILES_ACCEPTANCE_REPORT.json",
+      "role": "Truthful packaged acceptance baseline",
+      "version": "1",
+      "status": "release-evidence",
+      "bytes": 7438,
+      "lines": 227,
+      "words": 690,
+      "sha256": "fd125288c037871201cb6f348aded82e288abf202cc8bffdbb915872e8668cf8"
+    },
+    {
+      "path": "PROJECT_PROFILES_MIGRATION_REPORT.json",
+      "role": "Truthful unexecuted migration baseline",
+      "version": "1",
+      "status": "release-evidence",
+      "bytes": 2120,
+      "lines": 49,
+      "words": 166,
+      "sha256": "f1a469acf4cc00eb63d8928e38cfc9ffa4447f00dbb11424d7b6f99e9423b54b"
+    },
+    {
+      "path": "config/project-profiles-acceptance.matrix.json",
+      "role": "PP-36 Definition-of-Done acceptance matrix",
+      "version": "1",
+      "status": "release-evidence",
+      "bytes": 11435,
+      "lines": 304,
+      "words": 816,
+      "sha256": "20a0607f3898385d504306e7653998603fc17d9560a534981e8ac1d12641d9ab"
+    },
+    {
+      "path": "docs/source-authority/CLUE_CONFIGURATION_PROJECT_PROFILES_SUPPLEMENT_2026-08-14.md",
+      "role": "Exact source Configuration supplement",
+      "version": "source",
+      "status": "source-authority",
+      "bytes": 42712,
+      "lines": 2240,
+      "words": 5425,
+      "sha256": "a5348059d3775a9cecc4d418c3dd9ccd4ba94cc3a5059021595efd5ade234c7c"
+    },
+    {
+      "path": "docs/source-authority/CLUE_P2_FORMAL_CLOSURE_HANDOFF_2026-08-14.md",
+      "role": "Exact source P2 formal-closure handoff",
+      "version": "source",
+      "status": "source-authority",
+      "bytes": 10079,
+      "lines": 495,
+      "words": 1473,
+      "sha256": "dac5e24d7246316449d624de72514e346c618f8b70239f7f0b89e0d6801d8c17"
+    },
+    {
+      "path": "docs/source-authority/CLUE_P2_AND_PROJECT_PROFILES_FILE_BY_FILE_COMPLETION_STRATEGY_2026-08-14.md",
+      "role": "Exact source file-by-file completion strategy",
+      "version": "source",
+      "status": "source-authority",
+      "bytes": 88491,
+      "lines": 2401,
+      "words": 10924,
+      "sha256": "eb33c044fe4b1d5927ff96917720b719a8947fb4959b3a596878e2ae35365aa7"
+    },
+    {
+      "path": "docs/project-profiles/PROJECT_PROFILES_FINAL_ACCEPTANCE.md",
+      "role": "Final acceptance contract",
+      "version": "10.0-rc1",
+      "status": "release-evidence",
+      "bytes": 2753,
+      "lines": 69,
+      "words": 371,
+      "sha256": "1111395ce09cb6306dc1a7c5317f9e3f769bc43cb19cd6726de3f6444ecf83aa"
+    },
+    {
+      "path": "docs/project-profiles/PROJECT_PROFILES_V10_RELEASE_CANDIDATE.md",
+      "role": "Promotion and authority boundary",
+      "version": "10.0-rc1",
+      "status": "release-evidence",
+      "bytes": 1335,
+      "lines": 32,
+      "words": 167,
+      "sha256": "5e5c38430ffe95ea791d26130829a02c075f7a3f02a2abd0c65a55b919383381"
+    }
+  ],
+  "fileCount": 24,
+  "notes": [
+    "The v9 pack remains the active authority for P2 closure.",
+    "The v10 candidate is sealed for verification but is not activated or ratified by Batch 8.",
+    "Migration, live connection evidence, epoch sealing and Creator acceptance remain explicit live acts."
+  ],
+  "carriedForwardUnchanged": [
+    {
+      "path": "RPI_Core_Methodology_v9.md",
+      "sha256": "2a00cc7eadeb0cae118f4c20ca217697ce5f34f8473a7e6773b891b702a3de5c"
+    },
+    {
+      "path": "CLUE_Constitution_v9.md",
+      "sha256": "51a9e8ac1206c44422fd8a05267f92a4268de6a350f9af434906bf43f1d2dcad"
+    },
+    {
+      "path": "CLUE_Canonical_Measurement_Catalogue_v9.md",
+      "sha256": "28df5fe259ea6b4e39beada09db2f277acde16b475369e5cd21fd98b82388118"
+    },
+    {
+      "path": "templates/target_description.template_v9.md",
+      "sha256": "3b2c054c3e61e0ed4eac0f0d3b383dd8abcd7933f8c4075dd885054dbceb76c5"
+    },
+    {
+      "path": "templates/benchmark.template_v9.txt",
+      "sha256": "6db204aef266517f6ee97413641a8edf345639d11119f3f61b57709336ef6869"
+    }
+  ]
+}

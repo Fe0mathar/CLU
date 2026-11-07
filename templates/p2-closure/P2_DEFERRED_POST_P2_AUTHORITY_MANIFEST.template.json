@@ -1,0 +1,21 @@
+{
+  "schemaVersion": "clue-p2-deferred-authority-manifest/1",
+  "generatedAt": "<ISO-8601>",
+  "scope": "post-P2",
+  "activeForP2Proof": false,
+  "implementationRequiredForP2Closure": false,
+  "documents": [
+    {
+      "path": "docs/source-authority/CLUE_CONFIGURATION_PROJECT_PROFILES_SUPPLEMENT_2026-08-14.md",
+      "sha256": "<64-hex>",
+      "originalStatus": "proposed normative implementation supplement",
+      "role": "deferred-post-P2-authority"
+    },
+    {
+      "path": "DOCUMENTATION_MANIFEST_v10.json",
+      "sha256": "<64-hex>",
+      "originalStatus": "release-candidate-not-ratified",
+      "role": "deferred-post-P2-documentation-candidate"
+    }
+  ]
+}

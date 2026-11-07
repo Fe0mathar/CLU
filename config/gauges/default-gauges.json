@@ -1,0 +1,33 @@
+{
+  "schemaVersion": "1.0.0",
+  "gauges": [
+    {
+      "slot": 1,
+      "definitionId": "GAUGE-1",
+      "selection": { "kind": "metric", "id": "MC04" },
+      "scope": { "kind": "program", "id": "TGT-CLUE" },
+      "aggregationMode": "CURRENT_CERTIFIED"
+    },
+    {
+      "slot": 2,
+      "definitionId": "GAUGE-2",
+      "selection": { "kind": "metric", "id": "MI05" },
+      "scope": { "kind": "program", "id": "TGT-CLUE" },
+      "aggregationMode": "CURRENT_CERTIFIED"
+    },
+    {
+      "slot": 3,
+      "definitionId": "GAUGE-3",
+      "selection": { "kind": "gate_summary", "id": "MANDATORY-GATES" },
+      "scope": { "kind": "program", "id": "TGT-CLUE" },
+      "aggregationMode": "CURRENT_CERTIFIED"
+    },
+    {
+      "slot": 4,
+      "definitionId": "GAUGE-4",
+      "selection": { "kind": "metric", "id": "MK17" },
+      "scope": { "kind": "program", "id": "TGT-CLUE" },
+      "aggregationMode": "CURRENT_CERTIFIED"
+    }
+  ]
+}

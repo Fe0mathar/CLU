@@ -1,0 +1,484 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://clue.local/schemas/great-book-field-projection.schema.json",
+  "title": "CLU-E Great Book Improvement Field",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "capturedAt",
+    "targetId",
+    "cycleId",
+    "catalogueVersion",
+    "catalogueHash",
+    "normalizationVersion",
+    "normalizationHash",
+    "aggregationMode",
+    "selectedMeasurementId",
+    "grid",
+    "families",
+    "cells",
+    "warnings"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "1.0.0"
+    },
+    "capturedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "targetId": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "cycleId": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "catalogueVersion": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "catalogueHash": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "normalizationVersion": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "normalizationHash": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "aggregationMode": {
+      "type": "string",
+      "enum": [
+        "CURRENT_CERTIFIED",
+        "SELECTED_CYCLE",
+        "HISTORICAL_NET",
+        "CONFIDENCE_ADJUSTED",
+        "AVERAGE_PER_EXPERIMENT",
+        "EXPERIMENT_COUNT",
+        "COVERAGE",
+        "EQUILIBRIUM"
+      ]
+    },
+    "selectedMeasurementId": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "grid": {
+      "type": "object",
+      "required": [
+        "rows",
+        "columns",
+        "activeCells",
+        "reservedCells"
+      ],
+      "properties": {
+        "rows": {
+          "const": 10
+        },
+        "columns": {
+          "const": 10
+        },
+        "activeCells": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "reservedCells": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        }
+      },
+      "additionalProperties": false
+    },
+    "families": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/familySummary"
+      }
+    },
+    "cells": {
+      "type": "array",
+      "minItems": 100,
+      "maxItems": 100,
+      "items": {
+        "$ref": "#/$defs/cell"
+      }
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "$defs": {
+    "family": {
+      "type": "string",
+      "enum": [
+        "TARGET_QUALITY",
+        "EVIDENCE_ASSURANCE",
+        "ACCEPTANCE_GATES",
+        "CLUE_SELF",
+        "RESERVED"
+      ]
+    },
+    "numberOrStringOrNull": {
+      "type": [
+        "number",
+        "string",
+        "null"
+      ]
+    },
+    "nativeMetricEvidence": {
+      "type": "object",
+      "required": [
+        "baseline",
+        "result",
+        "delta",
+        "unit",
+        "display"
+      ],
+      "properties": {
+        "baseline": {
+          "$ref": "#/$defs/numberOrStringOrNull"
+        },
+        "result": {
+          "$ref": "#/$defs/numberOrStringOrNull"
+        },
+        "delta": {
+          "$ref": "#/$defs/numberOrStringOrNull"
+        },
+        "unit": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "display": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "segment": {
+      "type": "object",
+      "required": [
+        "contributionId",
+        "greatBookEntryId",
+        "measurementId",
+        "scopeId",
+        "cycleId",
+        "normalizedContribution",
+        "native",
+        "confidence",
+        "freshness",
+        "certified",
+        "invalidated",
+        "verdict",
+        "proofContractId",
+        "benchmarkRunId",
+        "recordedAt"
+      ],
+      "properties": {
+        "contributionId": {
+          "type": "string"
+        },
+        "greatBookEntryId": {
+          "type": "string"
+        },
+        "measurementId": {
+          "type": "string"
+        },
+        "scopeId": {
+          "type": "string"
+        },
+        "cycleId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "normalizedContribution": {
+          "type": "number",
+          "minimum": -100,
+          "maximum": 100
+        },
+        "native": {
+          "$ref": "#/$defs/nativeMetricEvidence"
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "freshness": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "certified": {
+          "type": "boolean"
+        },
+        "invalidated": {
+          "type": "boolean"
+        },
+        "verdict": {
+          "type": "string"
+        },
+        "proofContractId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "benchmarkRunId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "recordedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "additionalProperties": false
+    },
+    "cell": {
+      "type": "object",
+      "required": [
+        "gridIndex",
+        "x",
+        "y",
+        "measurementId",
+        "legacyId",
+        "name",
+        "family",
+        "familyColor",
+        "state",
+        "positiveHeight",
+        "negativeDepth",
+        "netContribution",
+        "confidence",
+        "coverage",
+        "freshness",
+        "contributionCount",
+        "segments"
+      ],
+      "properties": {
+        "gridIndex": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "x": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10
+        },
+        "y": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10
+        },
+        "measurementId": {
+          "type": "string"
+        },
+        "legacyId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "family": {
+          "$ref": "#/$defs/family"
+        },
+        "familyColor": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "available",
+            "unknown",
+            "stale",
+            "not_applicable",
+            "reserved"
+          ]
+        },
+        "positiveHeight": {
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 100
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "negativeDepth": {
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": -100,
+              "maximum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "netContribution": {
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": -100,
+              "maximum": 100
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "confidence": {
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "coverage": {
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "freshness": {
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "contributionCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "segments": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/segment"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "familySummary": {
+      "type": "object",
+      "required": [
+        "family",
+        "familyColor",
+        "positiveContribution",
+        "negativeContribution",
+        "netContribution",
+        "certifiedEvidencePercent",
+        "activeMetricCount"
+      ],
+      "properties": {
+        "family": {
+          "$ref": "#/$defs/family"
+        },
+        "familyColor": {
+          "type": "string"
+        },
+        "positiveContribution": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "negativeContribution": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "netContribution": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "certifiedEvidencePercent": {
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 100
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "activeMetricCount": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,21 @@
+{
+  "projectionId": "demo-improvement-field",
+  "capturedAt": "2026-07-27T12:00:00.000Z",
+  "aggregationMode": "currentCertifiedState",
+  "grid": { "rows": 10, "columns": 10, "filledCells": 8, "reservedCells": 92 },
+  "families": [
+    { "family": "targetQuality", "color": "#00a3e0", "positiveContribution": 127.0, "negativeContribution": 0, "netContribution": 127.0, "certifiedEvidencePercent": 87.5 },
+    { "family": "evidenceAssurance", "color": "#f4af2d", "positiveContribution": 49.0, "negativeContribution": 0, "netContribution": 49.0, "certifiedEvidencePercent": 100 },
+    { "family": "acceptanceGates", "color": "#ff5500", "positiveContribution": 74.0, "negativeContribution": 0, "netContribution": 74.0, "certifiedEvidencePercent": 100 },
+    { "family": "clueSelfMetrics", "color": "#39ff88", "positiveContribution": 39.0, "negativeContribution": 0, "netContribution": 39.0, "certifiedEvidencePercent": 100 }
+  ],
+  "cells": [
+    { "coordinateId": "MA01:0:0", "measurementId": "MA01", "row": 0, "column": 0, "family": "targetQuality", "displayName": "MA01", "value": 42, "positiveValue": 42, "negativeValue": 0, "contributionCount": 1, "confidence": 0.91, "contributions": [ { "entryId": "GBI-0001", "measurementId": "MA01", "family": "targetQuality", "scopeId": "clue-core", "native": { "baseline": 0.81, "result": 0.91, "delta": 0.10, "unit": "score" }, "normalizedContribution": 42, "confidence": 0.91, "certified": true } ] },
+    { "coordinateId": "MC04:2:3", "measurementId": "MC04", "row": 2, "column": 3, "family": "targetQuality", "displayName": "MC04", "value": 47, "positiveValue": 47, "negativeValue": 0, "contributionCount": 1, "confidence": 0.91, "contributions": [ { "entryId": "GBI-0002", "measurementId": "MC04", "family": "targetQuality", "scopeId": "navigator", "native": { "baseline": 142, "result": 95, "delta": -47, "unit": "dependencies" }, "normalizedContribution": 47, "confidence": 0.91, "certified": true } ] },
+    { "coordinateId": "MI05:8:4", "measurementId": "MI05", "row": 8, "column": 4, "family": "evidenceAssurance", "displayName": "MI05", "value": 49, "positiveValue": 49, "negativeValue": 0, "contributionCount": 1, "confidence": 0.88, "contributions": [ { "entryId": "GBI-0003", "measurementId": "MI05", "family": "evidenceAssurance", "scopeId": "proof", "native": { "baseline": 0.68, "result": 0.86, "delta": 0.18, "unit": "score" }, "normalizedContribution": 49, "confidence": 0.88, "certified": true } ] },
+    { "coordinateId": "MJ03:9:2", "measurementId": "MJ03", "row": 9, "column": 2, "family": "acceptanceGates", "displayName": "MJ03", "value": 74, "positiveValue": 74, "negativeValue": 0, "contributionCount": 1, "confidence": 0.95, "contributions": [ { "entryId": "GBI-0004", "measurementId": "MJ03", "family": "acceptanceGates", "scopeId": "global", "native": { "baseline": 6, "result": 7, "delta": 1, "unit": "gates-passed" }, "normalizedContribution": 74, "confidence": 0.95, "certified": true } ] },
+    { "coordinateId": "MK06:9:5", "measurementId": "MK06", "row": 9, "column": 5, "family": "clueSelfMetrics", "displayName": "MK06", "value": 39, "positiveValue": 39, "negativeValue": 0, "contributionCount": 1, "confidence": 0.86, "contributions": [ { "entryId": "GBI-0005", "measurementId": "MK06", "family": "clueSelfMetrics", "scopeId": "orchestrator", "native": { "baseline": 1320, "result": 890, "delta": -430, "unit": "tokens-per-verdict" }, "normalizedContribution": 39, "confidence": 0.86, "certified": true } ] }
+  ],
+  "selectedCell": { "coordinateId": "MC04:2:3", "measurementId": "MC04", "row": 2, "column": 3, "family": "targetQuality", "displayName": "MC04", "value": 47, "positiveValue": 47, "negativeValue": 0, "contributionCount": 1, "confidence": 0.91, "contributions": [ { "entryId": "GBI-0002", "measurementId": "MC04", "family": "targetQuality", "scopeId": "navigator", "native": { "baseline": 142, "result": 95, "delta": -47, "unit": "dependencies" }, "normalizedContribution": 47, "confidence": 0.91, "certified": true } ] },
+  "summary": { "positiveContribution": 289, "negativeContribution": 0, "netContribution": 289, "certifiedEvidencePercent": 87.5, "totalContributions": 8 }
+}

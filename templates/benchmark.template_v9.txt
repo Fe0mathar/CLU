@@ -1,0 +1,124 @@
+# CLU-E MASTER BENCHMARK
+#
+# Purpose:
+# Define or reference the deterministic process that exercises and observes the
+# complete accepted project. This is not a candidate-specific A/B benchmark and
+# it is not a results file.
+#
+# CLU-E snapshots and cycle-locks this file. The configured adapter normalizes
+# it into a versioned Master Benchmark Specification before execution.
+
+benchmark_id = <stable-benchmark-id>
+benchmark_version = <semantic-or-monotonic-version>
+parent_version = <previous-version-or-none>
+runner_adapter = <registered-runner-adapter-id>
+project_compatibility = <project-version/snapshot-policy>
+
+[environment]
+required_os = <value-or-any>
+required_runtime = <runtime-and-version-policy>
+required_browser = <browser-and-version-policy-or-none>
+required_hardware = <hardware-class-or-any>
+required_dependencies = <dependency/tool versions or manifest reference>
+environment_fingerprint_policy = <exact/compatible/record-only>
+
+[commands]
+build = <approved command ID or referenced script>
+launch = <approved command ID or referenced script>
+readiness = <deterministic readiness condition>
+cleanup = <approved cleanup command ID or procedure>
+
+[execution]
+default_timeout_seconds = <number>
+default_warmup_runs = <number>
+default_repetitions = <number>
+maximum_total_runtime_seconds = <number>
+parallelism_policy = <serial/controlled>
+random_seed_policy = <fixed/recorded-set/controlled-random>
+freshness_policy = <when an opening result may be reused>
+
+# Repeat one [scenario.<id>] block for every stable whole-project scenario.
+# Scenario IDs must remain stable when scenario meaning remains comparable.
+
+[scenario.<SCN-001>]
+name = <human-readable name>
+objective_ids = <OBJ-001,OBJ-002>
+capability_ids = <CAP-001>
+environment_ids = <ENV-001>
+setup = <approved step or referenced script>
+input = <controlled input/dataset/state>
+action = <deterministic action sequence>
+completion = <deterministic completion condition>
+warmup_runs = <number-or-default>
+repetitions = <number-or-default>
+timeout_seconds = <number-or-default>
+artifacts = <logs,traces,screenshots,profiles,recordings,outputs>
+invalid_run_conditions = <conditions>
+
+# Repeat one [telemetry.<id>] block for each native signal.
+# Preserve native units. Normalization is a separate catalogue/UI concern.
+
+[telemetry.<SIG-001>]
+name = <signal name>
+scenario_ids = <SCN-001>
+collector = <registered instrument/collector>
+native_unit = <ms,fps,bytes,count,percent,boolean,...>
+aggregation = <median,p95,p99,max,min,rate,boolean,...>
+required = <true/false>
+quality_checks = <variance/completeness/calibration rules>
+
+# Deterministic gates protect the accepted project. A gate must not be inferred
+# solely from an AI judgment.
+
+[gate.<GATE-001>]
+name = <gate name>
+scenario_ids = <SCN-001>
+signal_ids = <SIG-001>
+rule = <machine-evaluable rule or referenced validator>
+severity = <mandatory/advisory>
+failure_action = <invalidate-run/block-equilibrium/create-candidate-seed>
+
+# The harness is part of this document, not a sibling file (ADR-0010). A change to how
+# something is measured is a comparability event, so it must move the version that governs
+# comparability; a separate harness file could change while this version stood still.
+#
+# Repeat one [harness.<id>] block per runner adapter. The runner extracts the fenced body,
+# verifies 'integrity' against it, syntax-checks it, and refuses rather than scoring on a
+# body that does not parse. The body must return the contract's result shape:
+#   { benchmarkVersion, unifiedScore, measures[], protective[], environment, incomplete[] }
+# and 'benchmarkVersion' must equal this document's benchmark_version or the run is void.
+#
+# Native units are preserved in 'measures[]'. The unified score is carried alongside them,
+# never instead of them, and a signal that could not be collected belongs in 'incomplete[]'
+# rather than depressing the score.
+
+[harness.<HRN-001>]
+runner_adapter = <cli-node/browser-injection/registered-adapter-id>
+scenario_ids = <SCN-001,SCN-002>
+language = <javascript>
+integrity = <sha256 of the fenced body, recorded when this version is approved>
+--- begin harness ---
+<executable body>
+--- end harness ---
+
+[comparability]
+compatibility_class = <fully-comparable/partially-comparable/bridge-required>
+bridge_from_version = <version-or-none>
+stable_scenario_ids = <list>
+stable_signal_ids = <list>
+notes = <meaning changes and trend limitations>
+
+[coverage]
+critical_objective_ids = <list expected to have an evidence path>
+required_capability_ids = <list>
+required_environment_ids = <list>
+required_metric_families = <list>
+holdout_or_adversarial_scenarios = <list>
+known_blind_spots = <explicit list; never omit uncertainty>
+
+[governance]
+change_rationale = <why this version adds information>
+contribution_record_ids = <accepted/rejected/anomaly lessons used>
+critic_review_required = <true/false>
+information_gain_validation = <required method>
+execution_cost_budget = <duration/resource budget>

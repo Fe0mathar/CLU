@@ -1,0 +1,288 @@
+# CLUE patching policy — the rules governing every write to the canonical tree
+#
+# Referenced by: config/clue.config.yaml -> patching.policy_file
+# Consumed by:   the Custodian (Stage J). Nothing reads this file yet.
+# Authority:     CLUE_Implementation_Strategy.md rev 1.2, Part VIII (amendment A2).
+#
+# Written before the machinery exists, on purpose. These are the conditions under which
+# CLUE may modify F:/Murugan/Murugan without a human present, and they are much easier
+# to set honestly now — with nothing waiting to be shipped — than later, with a proven
+# improvement sitting in the outbox and every gate looking like an obstacle.
+#
+# Two structural facts bound everything below, and neither is configurable here:
+#   1. No capability grants a filesystem write inside the canonical tree. Not the
+#      Custodian's. The only authority is `git.land.canonical`, an authority over a Git
+#      operation, so the tree can change only through a commit that is recorded and
+#      revertible.
+#   2. Shadow apply is always automatic in every mode. This file controls landing only —
+#      whether a *proven* improvement moves into the canonical tree by itself. The proof
+#      loop never waits for a human regardless of what is set here.
+#
+# Schema validation arrives with Stage J. Until then this file is documentation of
+# intent, which is still worth having exactly right.
+
+version: 1
+
+# ---------------------------------------------------------------------------
+# Mode
+# ---------------------------------------------------------------------------
+# The global default lives in clue.config.yaml (`patching.mode`). Lanes below override
+# it per domain. An unlisted domain uses the global default.
+#
+#   AUTO    land automatically when every gate passes; ineligible degrades to NOTIFY
+#   NOTIFY  prove, commit to a ready branch, announce; the Creator lands with one command
+#   OUTBOX  bundle only, no announcement, no canonical write
+#
+# "Most of the time AUTO" stays true without AUTO ever meaning "everywhere".
+
+lanes:
+  # Bounded, well-instrumented, and cheap to revert.
+  general: AUTO
+  diagnostics: AUTO
+  scripting: AUTO
+
+  # Correct-looking and wrong is expensive to notice here: a rendering regression can
+  # pass a typecheck, pass a guardrail, and only show up as something looking subtly
+  # off on screen weeks later.
+  rendering: NOTIFY
+  gaussian: NOTIFY
+
+  # Behavioural surfaces where "improved" is a judgement, not a measurement.
+  npcAi: NOTIFY
+  interaction: NOTIFY
+  voice: NOTIFY
+  worldAuthority: NOTIFY
+
+  # Value-bearing. A wrong patch here is not a bug, it is a loss.
+  economy: OUTBOX
+  settlement: OUTBOX
+
+# ---------------------------------------------------------------------------
+# Eligibility gates G1-G10
+# ---------------------------------------------------------------------------
+# All must hold for an automatic landing. Any failure degrades the patch to NOTIFY with
+# the failing gate named. A patch is never dropped, never silently retried, and never
+# partially applied.
+
+gates:
+  g1_verdict:
+    enabled: true
+    # Only an accepted verdict under a frozen, hash-matched proof contract qualifies.
+    # INCONCLUSIVE is not a weak accept; it is a not-accept.
+    require_accepted: true
+    require_frozen_contract_hash_match: true
+
+  g2_guardrails:
+    enabled: true
+    require_all_green: true
+    # A patch with no guardrails defined is not "unconstrained", it is unmeasured.
+    require_at_least_one: true
+
+  g3_build:
+    enabled: true
+    # Run in the shadow clone at the exact commit that would be landed.
+    commands: [typecheck, build]
+
+  g4_clean_tree:
+    enabled: true
+    # A dirty canonical tree defers the landing; it never forces one. CLUE must not
+    # write over uncommitted work, and cannot tell finished work from work in progress.
+    require_clean_working_tree: true
+    require_expected_branch: true
+
+  g5_merge:
+    enabled: true
+    # Fast-forward only. Conflict resolution is a design act and the Custodian is
+    # forbidden to design.
+    strategy: fast_forward_only
+    allow_trivial_three_way: false
+
+  g6_protected_surfaces:
+    enabled: true
+    # See `protected_surfaces` below. Absolute: no confidence score overrides it.
+    action_on_match: NOTIFY
+
+  g7_blast_radius:
+    enabled: true
+    allowed_classes: [monodependency, local]
+    max_impact_size: 25
+    max_impact_modules: 3
+    max_impact_subsystems: 1
+    # A class CLUE is unsure of is not a class it may act on. Low confidence means the
+    # graph itself is reporting that it might be wrong about the blast radius.
+    min_classification_confidence: 0.85
+    # A truncated impact traversal reports a lower bound, and a lower bound must never
+    # be treated as a total when deciding whether something is safe.
+    reject_truncated_impact: true
+
+  g8_reverse_patch:
+    enabled: true
+    require_stored: true
+    # The undo is verified to apply cleanly before the do is performed.
+    require_verified_applicable: true
+
+  g9_quota:
+    enabled: true
+    # See `quotas` below.
+
+  g10_mission:
+    enabled: true
+    # A contract frozen under one set of rules must not be cashed in under another.
+    require_unchanged_mission_version: true
+    require_unchanged_patching_policy: true
+
+# ---------------------------------------------------------------------------
+# Protected surfaces
+# ---------------------------------------------------------------------------
+# Deliberate decisions in Murugan that look like defects to an analyzer: duplicated
+# implementations, an unusual spelling, a placeholder, a path that could obviously be
+# merged with its sibling. Every one of them is load-bearing, and every one of them is
+# exactly the kind of thing an optimiser would "clean up".
+#
+# Findings on these surfaces are still produced — they may be genuinely interesting —
+# but they route to NOTIFY. CLUE may argue for the change; it may not make it.
+#
+# IMPORTANT: the matchers below are provisional. They were written before CLUE had ever
+# recognised Murugan, so none of them has been checked against a real unit list. A
+# matcher that matches nothing protects nothing while looking like it does, which is a
+# worse failure than having no rule at all. `clue doctor` must report the match count
+# for each surface, and AUTO must not be enabled while any of them is zero.
+
+protected_surfaces_verified: false
+require_nonzero_match: true
+
+protected_surfaces:
+  - id: wather-spelling
+    reason: >
+      The `wather` identifier spelling is intentional and load-bearing. It reads as a
+      typo, which is precisely why an automated cleanup would target it.
+    match:
+      identifiers: ['wather']
+
+  - id: vendored-ts-nocheck
+    reason: >
+      Vendored files carrying @ts-nocheck are third-party code held deliberately outside
+      the type system. Fixing their types is not an improvement; it is a fork.
+    match:
+      file_contains: ['@ts-nocheck']
+
+  - id: dual-ocean
+    reason: >
+      Two ocean implementations exist on purpose. Their similarity is the trap: a
+      redundancy metric will rank them highly and be wrong.
+    match:
+      identifiers: ['ocean']
+      path_globs: ['**/ocean*/**', '**/*ocean*']
+
+  - id: dual-kodama
+    reason: Two Kodama implementations exist on purpose, for the same reason as the oceans.
+    match:
+      identifiers: ['kodama']
+      path_globs: ['**/*kodama*']
+
+  - id: ice-placeholders
+    reason: >
+      Intentional placeholders. Dead-code suspicion metrics will flag them as unused,
+      and removing them would silently delete a planned surface.
+    match:
+      identifiers: ['ice']
+      path_globs: ['**/*ice*']
+
+  - id: gaussian-paths
+    reason: >
+      The raw .ply/CPU-worker path and the SOGS/GPU path are separate by design and must
+      not be merged. They will look like duplication to every structural metric.
+    match:
+      path_globs: ['**/gaussian/**', '**/*splat*', '**/*sogs*']
+
+  - id: tilepack-routing
+    reason: TilePack routing is deliberate and its structure is not incidental.
+    match:
+      identifiers: ['TilePack', 'tilePack', 'tilepack']
+      path_globs: ['**/*tilepack*']
+
+  - id: game-view-frame-model
+    reason: >
+      The Game View frame and buffer-ring model — visible-tile budget, hidden buffer
+      ring, frame overlay rendered inside the render layer — is a designed constraint,
+      not an implementation accident.
+    match:
+      identifiers: ['bufferRing', 'visibleTileBudget', 'frameOverlay']
+      path_globs: ['**/gameview/**', '**/game-view/**']
+
+  - id: device-loss-recovery
+    reason: >
+      The WebGPU device-loss recovery path exists for a failure that is rare in testing
+      and routine in the field. It will look like unreachable code to coverage analysis.
+    match:
+      identifiers: ['deviceLost', 'onDeviceLost', 'recoverDevice']
+
+# ---------------------------------------------------------------------------
+# Quotas and suspension
+# ---------------------------------------------------------------------------
+# The point is not to limit throughput. It is to bound how much can go wrong before a
+# human sees it. Unattended operation is safe in proportion to how quickly a bad run
+# stops itself.
+
+quotas:
+  max_landings_per_day: 5
+  max_landings_per_hour: 2
+  # A larger batch is not more efficient if reviewing it becomes archaeology.
+  max_unacknowledged_landings: 10
+
+suspension:
+  # One automatic revert suspends AUTO until the Creator clears it. A revert means a
+  # patch passed every gate and was still wrong, which is precisely the situation where
+  # continuing on the same policy is least justified.
+  on_auto_revert: true
+  on_guardrail_regression: true
+  on_post_land_verification_failure: true
+  on_quota_exhausted: false
+  # Resumed with an explicit command, never on a timer. A suspension that expires by
+  # itself teaches nothing and protects nothing.
+  auto_resume: false
+
+# ---------------------------------------------------------------------------
+# Landing mechanics
+# ---------------------------------------------------------------------------
+
+landing:
+  branch_prefix: 'clue/accepted/'
+  # `git log` alone should be a readable audit trail, so every identity that makes the
+  # landing reconstructible goes in the message.
+  commit_message_template: |
+    {summary}
+
+    CLUE-Experiment: {experiment_id}
+    CLUE-Finding: {finding_id}
+    CLUE-Contract: {contract_hash}
+    CLUE-Verdict: {verdict_hash}
+    CLUE-Bundle: {bundle_hash}
+    CLUE-Snapshot-Before: {snapshot_before}
+    CLUE-Snapshot-After: {snapshot_after}
+  sign_commits: false
+  push_landing_branch: true
+
+post_land_verification:
+  commands: [typecheck, regression_suite]
+  timeout_seconds: 900
+  # Non-negotiable, and matched by a literal type in the config schema.
+  auto_revert_on_failure: true
+  revert_strategy: git_revert
+
+# ---------------------------------------------------------------------------
+# Notification
+# ---------------------------------------------------------------------------
+
+notify:
+  # NOTIFY mode: a proven patch waiting on one command.
+  on_ready: true
+  # AUTO mode: what landed while nobody was watching.
+  on_landed: true
+  on_reverted: true
+  on_suspended: true
+  on_gate_failure: true
+  # A digest exists so that reviewing a night of activity is a five-minute act rather
+  # than an investigation.
+  daily_digest: true
+  digest_hour_local: 9

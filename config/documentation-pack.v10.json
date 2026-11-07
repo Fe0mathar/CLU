@@ -1,0 +1,8 @@
+{
+  "schemaVersion": "clue-documentation-pack-selector/1",
+  "releaseName": "CLU-E RPI Documentation Pack v10",
+  "releaseVersion": "10.0-rc1",
+  "sealFile": "SHA256SUMS_v10.txt",
+  "manifestFile": "DOCUMENTATION_MANIFEST_v10.json",
+  "installHint": "apply CLU-E Batch 8 and verify the v10 documentation candidate"
+}

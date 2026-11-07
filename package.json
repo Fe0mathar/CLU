@@ -1,0 +1,74 @@
+{
+  "name": "clue",
+  "version": "0.1.0",
+  "private": true,
+  "description": "CLU-E — a durable, multi-session, evidence-based improvement system that drives a registered target program toward proven efficiency. The governing constitution is named by config/clue.config.yaml (constitution.file).",
+  "type": "module",
+  "engines": {
+    "node": ">=22.11"
+  },
+  "bin": {
+    "clue": "dist/src/cli/index.js"
+  },
+  "files": [
+    "dist/",
+    "src/",
+    "selftest/",
+    "ui/",
+    "schemas/",
+    "scripts/",
+    "config/",
+    "docs/",
+    "tools/",
+    "tsconfig.json",
+    "CONFIG-EDIT.md",
+    "CLUE-Dashboard.bat"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "tsc",
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
+    "release:package": "node tools/release.mjs",
+    "selftest": "npm run build && node --test --test-concurrency=1 \"dist/selftest/**/*.test.js\"",
+    "selftest:one": "node --test",
+    "verify": "npm run typecheck && npm run selftest",
+    "p0:acceptance": "npm run build && node tools/p0-acceptance.mjs",
+    "clue": "node dist/src/cli/index.js",
+    "dev": "tsx src/cli/index.ts",
+    "navigator": "node ui/system-navigator/demo/serve.mjs",
+    "navigator:verify": "node ui/system-navigator/tools/verify.mjs && node --test ui/system-navigator/test/*.test.mjs",
+    "recognize:navigator": "node dist/src/cli/index.js recognize --navigator",
+    "console:build": "tsc -p ui/operational-console/tsconfig.json",
+    "console:demo": "npm run console:build && node ui/operational-console/demo/serve.mjs",
+    "console:serve": "npm run build && npm run console:build && node dist/src/cli/index.js console ui",
+    "console:verify": "npm run build && npm run console:build && node ui/operational-console/tools/verify.mjs && node --test dist/selftest/operationalConsole.test.js",
+    "great-book-field:build": "node ui/great-book-field/tools/build.mjs",
+    "great-book-field:verify": "node ui/great-book-field/tools/build.mjs && node ui/great-book-field/tools/verify.mjs",
+    "great-book-field:demo": "node ui/great-book-field/tools/build.mjs && node ui/great-book-field/demo/serve.mjs",
+    "gauges:build": "node ui/four-neon-gauges/tools/build.mjs",
+    "gauges:verify": "node ui/four-neon-gauges/tools/build.mjs && node ui/four-neon-gauges/tools/verify.mjs",
+    "gauges:demo": "node ui/four-neon-gauges/tools/build.mjs && node ui/four-neon-gauges/demo/serve.mjs",
+    "dashboard:verify": "node --test ui/clue-dashboard/test/*.test.mjs",
+    "dashboard-metrics:verify": "npm run great-book-field:verify && npm run gauges:verify",
+    "project-profiles:acceptance": "node tools/project-profiles-acceptance.mjs",
+    "project-profiles:acceptance:portable": "node tools/project-profiles-acceptance.mjs --portable",
+    "project-profiles:docs-verify": "node tools/project-profiles-docs-verify.mjs",
+    "p2:closure-preflight": "node tools/p2-closure-preflight.mjs",
+    "p2:closure-inventory": "node tools/p2-closure-inventory.mjs",
+    "project-profiles:migration-report": "node tools/project-profiles-migration-report.mjs",
+    "project-profiles:promote-v10": "node tools/promote-v10-documentation.mjs",
+    "documentation:v10:verify": "node tools/verify-v10-documentation.mjs"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.0.0",
+    "commander": "^12.1.0",
+    "typescript": "^5.6.0",
+    "yaml": "^2.5.0",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.11",
+    "@types/node": "^22.9.0",
+    "tsx": "^4.19.0"
+  }
+}

@@ -1,0 +1,153 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://clue.local/schemas/great-book-field-contribution.schema.json",
+  "title": "CLU-E Great Book Improvement Field Contribution",
+  "type": "object",
+  "required": [
+    "contributionId",
+    "greatBookEntryId",
+    "measurementId",
+    "scopeId",
+    "cycleId",
+    "family",
+    "native",
+    "normalizedContribution",
+    "confidence",
+    "freshness",
+    "coverage",
+    "certified",
+    "invalidated",
+    "verdict",
+    "proofContractId",
+    "benchmarkRunId",
+    "recordedAt"
+  ],
+  "properties": {
+    "contributionId": {
+      "type": "string",
+      "pattern": "^GBIC-[0-9a-f]{24}$"
+    },
+    "greatBookEntryId": {
+      "type": "string",
+      "pattern": "^GBI-[0-9a-f]{32}$"
+    },
+    "measurementId": {
+      "type": "string",
+      "pattern": "^M[A-K][0-9]{2}$"
+    },
+    "scopeId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "cycleId": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "family": {
+      "type": "string",
+      "enum": [
+        "TARGET_QUALITY",
+        "EVIDENCE_ASSURANCE",
+        "ACCEPTANCE_GATES",
+        "CLUE_SELF"
+      ]
+    },
+    "native": {
+      "$ref": "#/$defs/nativeMetricEvidence"
+    },
+    "normalizedContribution": {
+      "type": "number",
+      "minimum": -100,
+      "maximum": 100
+    },
+    "confidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "freshness": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "coverage": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "certified": {
+      "type": "boolean"
+    },
+    "invalidated": {
+      "type": "boolean"
+    },
+    "verdict": {
+      "type": "string",
+      "minLength": 1
+    },
+    "proofContractId": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "benchmarkRunId": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "recordedAt": {
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "$defs": {
+    "numberOrStringOrNull": {
+      "type": [
+        "number",
+        "string",
+        "null"
+      ]
+    },
+    "nativeMetricEvidence": {
+      "type": "object",
+      "required": [
+        "baseline",
+        "result",
+        "delta",
+        "unit",
+        "display"
+      ],
+      "properties": {
+        "baseline": {
+          "$ref": "#/$defs/numberOrStringOrNull"
+        },
+        "result": {
+          "$ref": "#/$defs/numberOrStringOrNull"
+        },
+        "delta": {
+          "$ref": "#/$defs/numberOrStringOrNull"
+        },
+        "unit": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "display": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

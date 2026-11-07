@@ -1,0 +1,9 @@
+{
+  "schemaVersion": "1.0.0",
+  "slots": [
+    { "slot": 1, "metricId": "MC04", "label": "Coupling Surface", "familyColor": "#00a3e0" },
+    { "slot": 2, "metricId": "MI05", "label": "Causal Attribution", "familyColor": "#f4af2d" },
+    { "slot": 3, "metricId": "MJ06", "label": "Global Regression Guardrail", "familyColor": "#ff5500" },
+    { "slot": 4, "metricId": "MK17", "label": "Conversation Integrity", "familyColor": "#39ff88" }
+  ]
+}

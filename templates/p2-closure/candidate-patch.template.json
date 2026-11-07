@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "operations": [
+    {
+      "op": "write",
+      "path": "src/analysis/source/recognizer.ts",
+      "source": "recognizer.candidate.ts"
+    }
+  ]
+}

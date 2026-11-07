@@ -1,0 +1,21 @@
+{
+  "schemaVersion": "clue-p2-active-authority-manifest/1",
+  "generatedAt": "<ISO-8601>",
+  "seal": {
+    "path": "SHA256SUMS_v9.txt",
+    "sha256": "<64-hex>"
+  },
+  "manifest": {
+    "path": "DOCUMENTATION_MANIFEST_v9.json",
+    "sha256": "<64-hex>"
+  },
+  "documents": [
+    {
+      "path": "<active governed document>",
+      "role": "<constitution|methodology|architecture|execution|benchmark|other>",
+      "sha256": "<64-hex>",
+      "activeForP2Proof": true
+    }
+  ],
+  "complete": false
+}

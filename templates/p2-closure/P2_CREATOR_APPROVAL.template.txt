@@ -1,0 +1,5 @@
+Creator approval: P2 closure accepted.
+
+Approved at: <ISO-8601>
+Closure receipt SHA-256: <64-hex>
+Creator: <name/identity>

@@ -1,0 +1,109 @@
+CLU-E REPOSITORY MANIFEST
+CURRENT HUMAN-READABLE RELEASE AND EVIDENCE INDEX
+
+Manifest date: 2026-08-13
+Repository root: F:\CLU\CLU
+Product: CLU-E
+Package version: 0.1.0
+
+PURPOSE
+This file identifies the current verified CLU-E baseline and the evidence that supports it.
+It is a human-readable repository index. Machine-readable release reports and SHA-256
+manifests remain the exact authority for individual bytes.
+
+P0 STATUS
+Engineering authority:          CLOSED
+Adversarial acceptance:         PASS
+Acceptance items:               16 / 16 PASS
+Delivery fingerprints:          25 / 25 PRESENT
+Full self-test suite:           556 total
+Passed:                         546
+Failed:                         0
+Skipped:                        10
+Suite baseline:                 HELD
+Archive/tree comparison:        MATCH
+
+EXACT P0 BASELINE
+Archive:                        clue-0.1.0-2026-08-13T07-02-26-238Z.zip
+Archive SHA-256:                e563c5e3a2013314a903cef920a9544de3b43f120354c23223b1dce44b2b6b3f
+Archive files:                  380
+Archive bytes:                  5614108
+Deterministic generation:       PASS — second build byte-identical
+Release-tool verdict:           RELEASE_CANDIDATE
+
+RELEASE QUALIFICATION
+Portable gates:                 PASS
+Native Windows gates:           PASS
+Clean Git commit/tree identity: NOT PROVED
+Current identity fallback:      Complete 380-file SHA-256 manifest
+
+AUTHORITY SET
+Documentation seal:             PASS
+Governed documents:             17 / 17 sealed
+Active target:                  clu
+Target profile:                 targets/clu/profile.yaml
+Target description:             target description.md
+Master Benchmark registration:  NOT REGISTERED
+Remote publication:             RECORDED ABSENCE
+Model Gateway:                  DISABLED
+
+RELEASE GATES
+Source-clean:                   PASS
+Source TypeScript typecheck:    PASS
+Source production build:        PASS
+Structural extraction:          PASS
+Extracted npm ci:               PASS
+Extracted TypeScript typecheck: PASS
+Extracted production build:     PASS
+Production config/profile load: PASS
+Isolated self-tests:            PASS
+P0 adversarial probes:          PASS
+Exact archive binding:          PASS
+
+AUTHORITATIVE RELEASE EVIDENCE
+Release directory:              release\
+File manifest:                  clue-0.1.0-2026-08-13T07-02-26-238Z.SHA256SUMS
+Archive checksum:               clue-0.1.0-2026-08-13T07-02-26-238Z.zip.sha256
+Machine report:                 clue-0.1.0-2026-08-13T07-02-26-238Z.report.json
+Smoke report:                   clue-0.1.0-2026-08-13T07-02-26-238Z.smoke.json
+Gate log:                       clue-0.1.0-2026-08-13T07-02-26-238Z.gates.log
+P0 acceptance report:           clue-0.1.0-2026-08-13T07-02-26-238Z.p0-acceptance-report.json
+Generated release manifest:     clue-0.1.0-2026-08-13T07-02-26-238Z.MANIFEST.txt
+Current status report:          clue-status.md
+
+P1 STATUS
+State:                          CLOSURE RECONCILIATION IN PROGRESS
+DEV-P1-25 clue-status.md:       INSTALLED / GENERATED FROM LIVE STATUS
+DEV-P1-26 MANIFEST.txt:         THIS FILE
+DEV-P1-27 CONFIG-EDIT.md:       UPDATE REQUIRED
+DEV-P1-29 target benchmark:     REGISTRATION REQUIRED
+DEV-P1-30 release authority:    IMPLEMENTED; PERMANENT REGRESSION TEST PENDING
+Formal P1 closure ledger:       PENDING
+
+P2 STATUS
+P2 remains open.
+Strict P2-07 benchmark lock cannot close until the active target profile registers:
+
+  inputs:
+    benchmark: benchmark/master-benchmark.md
+
+The Project Intent Model compiler and environment adapters remain planned P3 work and
+are not to be misclassified as P2 implementation failures.
+
+KNOWN QUALIFICATIONS
+1. No real Git commit/tree identity currently binds the exact source bytes.
+2. Ten self-tests were skipped because their platform preconditions were unavailable.
+3. The Master Benchmark file is shipped but is not yet registered by the target profile.
+4. The remote is intentionally absent, so publication provenance is not part of this baseline.
+5. Any change to source, tests, configuration, documentation, tools, UI, or target files
+   invalidates this archive as the current tree identity and requires a new exact release.
+
+INTEGRITY RULE
+Do not edit release evidence after generation. After any governed tree change:
+
+  1. run typecheck, build, and the full self-test suite;
+  2. run tools/release.mjs;
+  3. run tools/p0-acceptance.mjs against the new archive;
+  4. update this repository manifest to the new exact archive identity.
+
+END OF MANIFEST

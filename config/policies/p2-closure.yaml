@@ -1,0 +1,27 @@
+# P2 closure policy — mission-bound Creator decisions only.
+#
+# P2-D4: real OpenAI GPT-5.6 activation. OpenAI Platform/project/key controls spending.
+# CLU-E records token/cost observations and enters controlled provider-budget pause only after
+# an explicit provider billing/funding refusal. Local monetary caps are not authority.
+#
+# Git remains local-first. The dashboard exposes a manual SYNC GIT control, but current
+# P2-D5-NO-REMOTE-YET means it refuses without contacting a remote.
+
+version: 1
+phase: P2
+
+gateway:
+  decision: OPERATIONAL
+  decision_id: P2-D4-OPENAI-GPT-5.6
+  recorded_at: "2026-08-14"
+  recorded_by: creator
+  reason: "OpenAI GPT-5.6 is the approved production gateway; OpenAI Platform owns budget enforcement and an explicit provider billing/funding refusal causes a controlled CLU-E cycle pause."
+  model: "gpt-5.6"
+  budget_authority: OPENAI_PLATFORM
+  local_budget_enforced: false
+  provider_exhaustion_action: CONTROLLED_PAUSE
+  remaining_token_authority: PROVIDER_ONLY
+
+p3_deferrals:
+  project_intent_model: true
+  environment_adapters: true

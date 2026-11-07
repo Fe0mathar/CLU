@@ -1,0 +1,8 @@
+{
+  "schemaVersion": "clue-documentation-pack-selector/1",
+  "releaseName": "CLU-E RPI Documentation Pack v9",
+  "releaseVersion": "9.0",
+  "sealFile": "SHA256SUMS_v9.txt",
+  "manifestFile": "DOCUMENTATION_MANIFEST_v9.json",
+  "installHint": "apply the configured documentation pack"
+}

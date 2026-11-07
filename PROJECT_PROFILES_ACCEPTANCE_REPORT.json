@@ -1,0 +1,227 @@
+{
+  "schemaVersion": "clue-project-profiles-acceptance-report/1",
+  "release": "Project Profiles v10 release candidate",
+  "generatedAt": "2026-08-15T11:05:00.000Z",
+  "status": "PACKAGE_STATIC_ACCEPTANCE_PASS_WINDOWS_AND_LIVE_GATES_PENDING",
+  "authorityState": {
+    "v9RemainsSelectedForP2": true,
+    "v10CandidateRatified": false,
+    "v10CandidateActivated": false,
+    "creatorAcceptanceRecorded": false
+  },
+  "matrix": {
+    "path": "config/project-profiles-acceptance.matrix.json",
+    "sha256": "20a0607f3898385d504306e7653998603fc17d9560a534981e8ac1d12641d9ab",
+    "requirementCount": 28,
+    "uniqueTestCount": 57,
+    "selectedSelftests": 50,
+    "selectedUiTests": 7
+  },
+  "packageHostValidation": {
+    "state": "PASS",
+    "platform": {
+      "platform": "linux",
+      "arch": "x64",
+      "node": "v22.16.0"
+    },
+    "nativeSqliteNote": "The installed better-sqlite3 source was rebuilt locally only for Linux validation. node_modules is excluded from the patch; authoritative Windows validation must use the installation's native Windows module.",
+    "typecheck": "PASS",
+    "productionBuild": "PASS",
+    "matrixAcceptanceRunner": {
+      "state": "PASS",
+      "steps": [
+        {
+          "label": "TypeScript typecheck",
+          "state": "PASS",
+          "durationMs": 1592
+        },
+        {
+          "label": "Production build",
+          "state": "PASS",
+          "durationMs": 1541
+        },
+        {
+          "label": "Acceptance selftests 1",
+          "state": "PASS",
+          "durationMs": 5223
+        },
+        {
+          "label": "Acceptance selftests 2",
+          "state": "PASS",
+          "durationMs": 2283
+        },
+        {
+          "label": "Acceptance selftests 3",
+          "state": "PASS",
+          "durationMs": 10872
+        },
+        {
+          "label": "Acceptance dashboard tests",
+          "state": "PASS",
+          "durationMs": 343
+        },
+        {
+          "label": "npm run dashboard:verify",
+          "state": "PASS",
+          "durationMs": 1010
+        },
+        {
+          "label": "npm run navigator:verify",
+          "state": "PASS",
+          "durationMs": 1413
+        },
+        {
+          "label": "npm run console:verify",
+          "state": "PASS",
+          "durationMs": 5426
+        },
+        {
+          "label": "npm run dashboard-metrics:verify",
+          "state": "PASS",
+          "durationMs": 4835
+        },
+        {
+          "label": "v10 documentation candidate",
+          "state": "PASS",
+          "durationMs": 139
+        }
+      ]
+    },
+    "completeRepositorySelftest": {
+      "executionMode": "134 compiled test files in deterministic serial chunks",
+      "files": 134,
+      "tests": 846,
+      "passed": 839,
+      "skipped": 7,
+      "failed": 0,
+      "cancelled": 0,
+      "skips": [
+        {
+          "test": "P1-CLOSURE-DIAG-01: Windows drive-letter/case variation does not create a false outside warning",
+          "reason": "Windows-only path-case behavior"
+        },
+        {
+          "test": "the host rejects unknown and extra nested git params, and accepts valid ones",
+          "reason": "PowerShell runtime unavailable on packaging host"
+        },
+        {
+          "test": "DEV-P0-12: the outer request envelope refuses unknown keys, and git operand VALUES are strictly validated",
+          "reason": "PowerShell runtime unavailable on packaging host"
+        },
+        {
+          "test": "DEV-P0-12: the landing ref prefix is enforced independently in the host",
+          "reason": "PowerShell runtime unavailable on packaging host"
+        },
+        {
+          "test": "DEV-P0-12: browser launch requires a startup-pinned executable and an allowed origin",
+          "reason": "PowerShell runtime unavailable on packaging host"
+        },
+        {
+          "test": "DEV-P0-12: real-path resolution is component-wise — a link in the middle of a path cannot dodge the zone",
+          "reason": "PowerShell runtime unavailable on packaging host"
+        },
+        {
+          "test": "PP-23: PowerShell parses the managed-browser launcher where pwsh is available",
+          "reason": "PowerShell runtime unavailable; live Windows parser validation remains required"
+        }
+      ]
+    },
+    "dashboard": {
+      "tests": 169,
+      "passed": 169,
+      "failed": 0
+    },
+    "systemNavigator": {
+      "syntaxModules": 28,
+      "importEdges": 59,
+      "tests": 12,
+      "passed": 12,
+      "failed": 0
+    },
+    "operationalConsole": {
+      "tests": 11,
+      "passed": 11,
+      "failed": 0
+    },
+    "dashboardMetrics": {
+      "greatBookImprovementField": "PASS",
+      "fourNeonGauges": "PASS"
+    },
+    "documentationCandidate": "PASS",
+    "credentialSafety": {
+      "scannedRoots": [
+        "config",
+        "targets"
+      ],
+      "rawCredentialFindings": [],
+      "state": "PASS"
+    }
+  },
+  "authoritativeWindowsGates": [
+    {
+      "gate": "Complete npm run selftest with the installed Windows better-sqlite3 module.",
+      "state": "NOT_RECORDED"
+    },
+    {
+      "gate": "PowerShell host starts, handshakes and proves Project/Target/Workspace/Shadow root parity.",
+      "state": "NOT_RECORDED"
+    },
+    {
+      "gate": "Windows case, slash, relative, junction and reparse aliases cannot bypass Target Root uniqueness.",
+      "state": "NOT_RECORDED"
+    },
+    {
+      "gate": "Dedicated Chrome endpoint resolves one exact permitted page and persists bound request/response evidence.",
+      "state": "NOT_RECORDED"
+    },
+    {
+      "gate": "OPENAI_API_KEY resolves and the live provider reports requestedModel = effectiveModel = gpt-5.6 with no fallback.",
+      "state": "NOT_RECORDED"
+    },
+    {
+      "gate": "The legacy workspace is preserved through explicit adoption and Configuration-v3 cutover.",
+      "state": "NOT_RECORDED"
+    },
+    {
+      "gate": "NO_REMOTE_YET remains a valid local-only posture and START CLU-E performs no Git synchronization.",
+      "state": "NOT_RECORDED"
+    },
+    {
+      "gate": "Creator explicitly accepts the Project Profiles implementation after all live evidence is complete.",
+      "state": "NOT_RECORDED"
+    }
+  ],
+  "liveConnections": {
+    "powershell": "NOT_EXECUTED",
+    "chrome": "NOT_EXECUTED",
+    "openai": "NOT_EXECUTED"
+  },
+  "migrationAndActivation": {
+    "migration": "NOT_EXECUTED",
+    "legacyWorkspaceAdoption": "NOT_EXECUTED",
+    "configurationV3Cutover": false,
+    "profileActivated": false
+  },
+  "p2Ceremony": {
+    "ratification": "NOT_EXECUTED",
+    "authoritativeEpoch": "NOT_EXECUTED",
+    "proofAttempt": "NOT_EXECUTED",
+    "accept": "NOT_EXECUTED",
+    "greatBookWrite": "NOT_EXECUTED",
+    "machineClosure": "NOT_EXECUTED",
+    "creatorApproval": "NOT_RECORDED"
+  },
+  "claims": {
+    "projectProfilesImplementationPresent": true,
+    "portableStaticAcceptancePassed": true,
+    "fullDefinitionOfDoneAccepted": false,
+    "reason": "Authoritative Windows, live connection, migration/cutover and Creator acceptance evidence remain separate governed acts."
+  },
+  "nonClaims": [
+    "v10 is not selected, ratified or active",
+    "no migration, workspace adoption or Project Profile activation was performed",
+    "no live PowerShell, Chrome or OpenAI connection was tested",
+    "no Git synchronization was performed",
+    "no P2 ratification, epoch, proof, ACCEPT, Great Book write, machine closure or Creator approval was performed"
+  ]
+}

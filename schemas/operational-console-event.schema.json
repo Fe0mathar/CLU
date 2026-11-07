@@ -1,0 +1,99 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://clu-e.local/schemas/operational-console-event.schema.json",
+  "title": "CLU-E Operational Console Event",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion", "eventId", "sequence", "occurredAt", "channel", "direction",
+    "kind", "title", "what", "why", "status", "nextAction", "payload", "sourceIds",
+    "taskId", "logicalSessionId", "physicalCallId", "runId", "benchmarkId",
+    "proofContractId", "patchId", "landingId", "requestId", "exchangeId", "durationMs",
+    "validationState", "redactionApplied", "cinematicCue", "currentWork", "previousHash",
+    "eventHash"
+  ],
+  "properties": {
+    "schemaVersion": { "const": "1.0.0" },
+    "eventId": { "type": "string", "pattern": "^OCE-[0-9]{8,}$" },
+    "sequence": { "type": "integer", "minimum": 0 },
+    "occurredAt": { "type": "string", "format": "date-time" },
+    "channel": {
+      "enum": ["CLUE_CORE", "RECOGNITION", "GPT", "BENCHMARK", "POWERSHELL", "CHROME_CDP", "PROOF", "CUSTODIAN", "GREAT_BOOK", "STATUS"]
+    },
+    "direction": { "enum": ["OUTBOUND", "INBOUND", "INTERNAL"] },
+    "kind": { "enum": ["command", "request", "response", "code", "result", "state", "warning", "error", "checkpoint", "artifact", "summary"] },
+    "title": { "type": "string", "minLength": 1 },
+    "what": { "type": "string", "minLength": 1 },
+    "why": { "type": "string", "minLength": 1 },
+    "status": { "type": "string", "minLength": 1 },
+    "nextAction": { "type": ["string", "null"] },
+    "payload": { "$ref": "#/$defs/payloadOrNull" },
+    "sourceIds": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+    "taskId": { "$ref": "#/$defs/idOrNull" },
+    "logicalSessionId": { "$ref": "#/$defs/idOrNull" },
+    "physicalCallId": { "$ref": "#/$defs/idOrNull" },
+    "runId": { "$ref": "#/$defs/idOrNull" },
+    "benchmarkId": { "$ref": "#/$defs/idOrNull" },
+    "proofContractId": { "$ref": "#/$defs/idOrNull" },
+    "patchId": { "$ref": "#/$defs/idOrNull" },
+    "landingId": { "$ref": "#/$defs/idOrNull" },
+    "requestId": { "$ref": "#/$defs/idOrNull" },
+    "exchangeId": { "$ref": "#/$defs/idOrNull" },
+    "durationMs": { "type": ["number", "null"], "minimum": 0 },
+    "validationState": { "enum": ["pending", "received", "schema_validated", "policy_accepted", "evidence_admissible", "evidence_rejected", "not_applicable"] },
+    "redactionApplied": { "type": "boolean" },
+    "cinematicCue": { "type": ["string", "null"], "enum": ["transmit", "receive", "benchmark_start", "benchmark_lock", "checkpoint", "proof_accept", "warning_fracture", "error_fracture", "great_book_transfer", "status_seal", "idle", null] },
+    "currentWork": { "$ref": "#/$defs/currentWorkOrNull" },
+    "previousHash": { "$ref": "#/$defs/hashOrNull" },
+    "eventHash": { "$ref": "#/$defs/hash" }
+  },
+  "$defs": {
+    "hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "hashOrNull": { "anyOf": [{ "$ref": "#/$defs/hash" }, { "type": "null" }] },
+    "idOrNull": { "type": ["string", "null"], "minLength": 1 },
+    "payloadOrNull": {
+      "anyOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["preview", "format", "complete", "byteLength", "artifactHash", "redactionCount"],
+          "properties": {
+            "preview": { "type": "string" },
+            "format": { "enum": ["text", "json", "typescript", "javascript", "powershell", "shell", "wgsl", "markdown", "http"] },
+            "complete": { "type": "boolean" },
+            "byteLength": { "type": "integer", "minimum": 0 },
+            "artifactHash": { "$ref": "#/$defs/hash" },
+            "redactionCount": { "type": "integer", "minimum": 0 }
+          }
+        }
+      ]
+    },
+    "currentWorkOrNull": {
+      "anyOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["targetId", "targetLabel", "metricId", "metricLabel", "what", "why", "howProven", "whoOrModel", "currentStatus", "next", "proofContractHash", "taskId", "logicalSessionId", "updatedAt"],
+          "properties": {
+            "targetId": { "$ref": "#/$defs/idOrNull" },
+            "targetLabel": { "type": "string", "minLength": 1 },
+            "metricId": { "$ref": "#/$defs/idOrNull" },
+            "metricLabel": { "type": ["string", "null"] },
+            "what": { "type": "string", "minLength": 1 },
+            "why": { "type": "string", "minLength": 1 },
+            "howProven": { "type": "string", "minLength": 1 },
+            "whoOrModel": { "type": "string", "minLength": 1 },
+            "currentStatus": { "type": "string", "minLength": 1 },
+            "next": { "type": "string", "minLength": 1 },
+            "proofContractHash": { "$ref": "#/$defs/hashOrNull" },
+            "taskId": { "$ref": "#/$defs/idOrNull" },
+            "logicalSessionId": { "$ref": "#/$defs/idOrNull" },
+            "updatedAt": { "type": "string", "format": "date-time" }
+          }
+        }
+      ]
+    }
+  }
+}

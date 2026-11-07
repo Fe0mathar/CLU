@@ -1,0 +1,36 @@
+{
+  "schemaVersion": "1.0.0",
+  "retention": {
+    "visibleEvents": 500,
+    "projectionEvents": 300,
+    "payloadPreviewBytes": 32768
+  },
+  "palette": {
+    "background": "#000000",
+    "system": "#00a3e0",
+    "proof": "#f4af2d",
+    "warning": "#ff5500",
+    "shadowApplyOnly": "#39ff88"
+  },
+  "channels": [
+    {"id":"CLUE_CORE","label":"CLU-E CORE","cue":"checkpoint"},
+    {"id":"RECOGNITION","label":"RECOGNITION / GRAPH","cue":"transmit"},
+    {"id":"GPT","label":"GPT / BATCH","cue":"transmit"},
+    {"id":"BENCHMARK","label":"BENCHMARK / PROOF","cue":"benchmark_start"},
+    {"id":"POWERSHELL","label":"POWERSHELL","cue":"transmit"},
+    {"id":"CHROME_CDP","label":"CHROME / CDP","cue":"transmit"},
+    {"id":"PROOF","label":"PROOF","cue":"proof_accept"},
+    {"id":"CUSTODIAN","label":"CUSTODIAN","cue":"checkpoint"},
+    {"id":"GREAT_BOOK","label":"GREAT BOOK","cue":"great_book_transfer"},
+    {"id":"STATUS","label":"CLU-E STATUS","cue":"status_seal"}
+  ],
+  "rules": {
+    "showExactOutboundPayload": true,
+    "showExactInboundPayload": true,
+    "showInterpretationAfterResponse": true,
+    "inventProgress": false,
+    "inventTyping": false,
+    "reorderEvents": false,
+    "redactBeforePersistence": true
+  }
+}

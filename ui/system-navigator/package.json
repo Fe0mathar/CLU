@@ -1,0 +1,15 @@
+{
+  "name": "@clue/system-navigator",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "WebGPU-first semantic architecture navigator for CLUE.",
+  "scripts": {
+    "verify": "node ./tools/verify.mjs && node --test ./test/*.test.mjs",
+    "test": "node --test ./test/*.test.mjs",
+    "demo": "node ./demo/serve.mjs"
+  },
+  "engines": {
+    "node": ">=22.11"
+  }
+}

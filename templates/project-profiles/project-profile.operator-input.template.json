@@ -1,0 +1,9 @@
+{
+  "templateProjectId": "clu",
+  "projectId": "new-project-id",
+  "displayName": "New Project",
+  "targetRoot": "F:/Path/To/Target",
+  "workspaceRoot": "F:/CLU/workspace/new-project-id",
+  "shadowRoot": "F:/CLU/shadow/new-project-id",
+  "browserProfileDirectory": "F:/CLU/browser-profiles/new-project-id"
+}
