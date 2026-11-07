@@ -77,27 +77,103 @@ function Invoke-ExactExecutable([string] $File, [string[]] $Arguments, [string] 
     } finally { $process.Dispose() }
 }
 
-function Get-MxcExecutable([string] $Arch, [string] $Stage, [string] $Destination) {
+function Receive-MxcArchive([uri] $Uri, [string] $Archive, [long] $ExpectedBytes) {
+    $handler = [Net.Http.HttpClientHandler]::new()
+    $handler.AllowAutoRedirect = $false
+    $client = [Net.Http.HttpClient]::new($handler)
+    $client.Timeout = [Threading.Timeout]::InfiniteTimeSpan
+    $deadline = [Threading.CancellationTokenSource]::new([TimeSpan]::FromMinutes(15))
+    $response = $null
+    try {
+        for ($hop = 0; $hop -lt 5; $hop++) {
+            if ($Uri.Scheme -cne 'https' -or !$Uri.IsDefaultPort -or $Uri.UserInfo -or
+                $Uri.Host -notin @('github.com', 'release-assets.githubusercontent.com', 'objects.githubusercontent.com')) {
+                throw 'The MXC download attempted an unexpected redirect.'
+            }
+            $response = $client.GetAsync($Uri, [Net.Http.HttpCompletionOption]::ResponseHeadersRead,
+                $deadline.Token).GetAwaiter().GetResult()
+            if ([int] $response.StatusCode -notin @(301, 302, 303, 307, 308)) { break }
+            $location = $response.Headers.Location
+            if ($null -eq $location) { throw 'The MXC download redirect had no destination.' }
+            $Uri = [uri]::new($Uri, $location)
+            $response.Dispose()
+            $response = $null
+        }
+        if ($null -eq $response) { throw 'The MXC download exceeded its redirect limit.' }
+        if (!$response.IsSuccessStatusCode) { throw "MXC download returned HTTP $([int] $response.StatusCode)." }
+        $advertised = $response.Content.Headers.ContentLength
+        if ($null -ne $advertised -and $advertised -ne $ExpectedBytes) {
+            throw 'The MXC download Content-Length differs from GitHub release metadata.'
+        }
+        $inputStream = $response.Content.ReadAsStreamAsync().GetAwaiter().GetResult()
+        try {
+            $outputStream = [IO.File]::Open($Archive, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+            try {
+                $buffer = [byte[]]::new(262144)
+                [long] $total = 0
+                while (($count = $inputStream.ReadAsync($buffer, 0, $buffer.Length,
+                    $deadline.Token).GetAwaiter().GetResult()) -gt 0) {
+                    $total += $count
+                    if ($total -gt $ExpectedBytes) { throw 'The MXC download exceeded the published asset size.' }
+                    $outputStream.Write($buffer, 0, $count)
+                }
+                if ($total -ne $ExpectedBytes) { throw 'The MXC download ended before the published asset size.' }
+            } finally { $outputStream.Dispose() }
+        } finally { $inputStream.Dispose() }
+    } finally {
+        if ($null -ne $response) { $response.Dispose() }
+        $deadline.Dispose()
+        $client.Dispose()
+    }
+}
+
+function Get-MxcExecutable([string] $Arch, [string] $Stage, [string] $Destination, [System.Collections.IDictionary] $Evidence) {
     $version = 'v1.0.1'
     $name = 'mxc-release-binaries.zip'
     $download = "https://github.com/microsoft/mxc/releases/download/$version/$name"
     $headers = @{ Accept = 'application/vnd.github+json'; 'X-GitHub-Api-Version' = '2022-11-28' }
+    $Evidence.state = 'RELEASE_METADATA_FETCH'
     $release = Invoke-RestMethod -Uri "https://api.github.com/repos/microsoft/mxc/releases/tags/$version" -Headers $headers -TimeoutSec 30
     $matchingAssets = @($release.assets | Where-Object { $_.name -ceq $name })
     if ($release.tag_name -cne $version -or $release.draft -or $release.prerelease -or $matchingAssets.Count -ne 1) {
+        $Evidence.state = 'RELEASE_IDENTITY_INVALID'
         throw "GitHub did not return the official Microsoft MXC $version release asset."
     }
     $asset = $matchingAssets[0]
-    if ($asset.state -cne 'uploaded' -or $asset.browser_download_url -cne $download -or
-        $asset.digest -cnotmatch '^sha256:([a-f0-9]{64})$' -or $asset.size -le 0 -or $asset.size -gt 536870912) {
-        throw 'GitHub release metadata did not provide an admissible asset URL, size and SHA-256.'
+    if ($asset.state -cne 'uploaded') {
+        $Evidence.state = 'ASSET_NOT_UPLOADED'
+        throw 'GitHub release metadata did not report the MXC asset as uploaded.'
+    }
+    if ($asset.browser_download_url -cne $download) {
+        $Evidence.state = 'ASSET_URL_MISMATCH'
+        throw 'GitHub release metadata returned a different MXC asset URL.'
+    }
+    $sizeProperty = $asset.PSObject.Properties['size']
+    $size = if ($null -ne $sizeProperty) { $sizeProperty.Value } else { $null }
+    if (($size -isnot [int] -and $size -isnot [long]) -or $size -le 0) {
+        $Evidence.state = 'ASSET_SIZE_INVALID'
+        throw 'GitHub release metadata did not report a positive MXC asset size.'
+    }
+    $Evidence.assetBytes = [long] $size
+    if ($size -gt 1073741824) {
+        $Evidence.state = 'ASSET_SIZE_LIMIT'
+        throw "GitHub reports an MXC asset of $size bytes, above the 1 GiB download limit."
+    }
+    $digest = $asset.PSObject.Properties['digest']
+    if ($null -eq $digest -or $digest.Value -cnotmatch '^sha256:[a-f0-9]{64}$') {
+        $Evidence.state = 'ASSET_SHA256_UNAVAILABLE'
+        throw 'GitHub release metadata did not provide a valid MXC asset SHA-256.'
     }
     $archive = Join-Path $Stage $name
-    Invoke-WebRequest -Uri $download -OutFile $archive -TimeoutSec 180
-    $assetHash = $asset.digest.Substring(7)
-    if ((Get-Item -LiteralPath $archive).Length -ne $asset.size -or (Get-Sha256 $archive) -cne $assetHash) {
-        throw 'The downloaded MXC ZIP did not match its release size and SHA-256.'
+    $Evidence.state = 'ASSET_DOWNLOAD'
+    Write-Host ("Downloading the {0:N1} MB Microsoft MXC archive. Allow up to 15 minutes." -f ($size / 1000000))
+    Receive-MxcArchive $download $archive $size
+    $Evidence.state = 'ASSET_SHA256_CHECK'
+    $assetHash = $digest.Value.Substring(7)
+    if ((Get-Sha256 $archive) -cne $assetHash) {
+        throw 'The downloaded MXC ZIP did not match the SHA-256 in GitHub release metadata.'
     }
+    $Evidence.state = 'ASSET_EXECUTABLE_EXTRACTION'
     $zip = [IO.Compression.ZipFile]::OpenRead($archive)
     try {
         $entries = @($zip.Entries | Where-Object { $_.FullName.Replace('\', '/') -ceq "$Arch/wxc-exec.exe" })
@@ -106,7 +182,9 @@ function Get-MxcExecutable([string] $Arch, [string] $Stage, [string] $Destinatio
         }
         [IO.Compression.ZipFileExtensions]::ExtractToFile($entries[0], $Destination, $false)
     } finally { $zip.Dispose() }
+    $Evidence.state = 'ASSET_SIGNATURE_CHECK'
     Assert-MicrosoftSignature $Destination
+    $Evidence.state = 'VERIFIED'
     Write-Host "Verified Microsoft MXC $version archive SHA-256 $assetHash"
 }
 
@@ -122,6 +200,7 @@ function Write-DiagnosticFile([string] $Path, [System.Collections.IDictionary] $
 $stage = $null
 $report = $null
 $mxcHash = $null
+$mxcDownload = [ordered]@{ state = 'NOT_STARTED'; assetBytes = $null }
 $windowsHost = $null
 $setupStage = 'HOST_PREREQUISITES'
 try {
@@ -193,7 +272,7 @@ try {
     $bin = Join-Path $stage 'bin'
     Assert-NoReparsePath $bin -CreateDirectory
     $mxc = Join-Path $bin 'wxc-exec.exe'
-    Get-MxcExecutable $arch $stage $mxc
+    Get-MxcExecutable $arch $stage $mxc $mxcDownload
     if ((Invoke-ExactExecutable $mxc @('--help') $bin 15) -ne 0) {
         throw 'The signed MXC executor could not start standalone on this Windows installation.'
     }
@@ -249,6 +328,7 @@ internal static class MxcPin {
         windowsHost = $windowsHost
         engineVersion = 'v1.0.1'
         engineSha256 = $mxcHash
+        mxcDownload = $mxcDownload
         canaryExitCode = $code
         canaryReport = (Get-Content -LiteralPath $stagedReport -Raw | ConvertFrom-Json -AsHashtable)
     }
@@ -270,6 +350,7 @@ internal static class MxcPin {
                 windowsHost = $windowsHost
                 engineVersion = 'v1.0.1'
                 engineSha256 = $mxcHash
+                mxcDownload = $mxcDownload
                 canaryExitCode = $null
                 canaryReport = $null
             })
