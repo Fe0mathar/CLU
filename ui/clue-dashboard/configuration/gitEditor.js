@@ -15,6 +15,8 @@ export function renderGitEditor(snapshot) {
   const directory = snapshot.connectionChecks?.githubDirectory;
   const connection = snapshot.dirty ? null : snapshot.connectionChecks?.githubConnection;
   const repositories = Array.isArray(directory?.repositories) ? directory.repositories : [];
+  const attemptedRepository = connection?.repository?.nameWithOwner;
+  const attemptedBranch = connection?.branch ?? '';
   const state = connection?.state ?? check?.state ?? git?.publicationMode ?? 'UNVALIDATED';
   const disabled = !snapshot.selectedRecord || snapshot.dirty || !['idle', 'ready'].includes(snapshot.phase);
   const account = connection?.account ?? directory?.account;
@@ -33,11 +35,11 @@ export function renderGitEditor(snapshot) {
       <button type="button" data-cfg-action="list-github-repositories"${disabled ? ' disabled' : ''}>LIST REPOSITORIES</button>
     </div>
     ${repositories.length > 0 ? `<div class="cfg-form-grid">
-      ${fieldShell({ label: 'GitHub repository', wide: true, control: `<select id="cfgGitHubRepository"${disabled ? ' disabled' : ''}><option value="">Select a repository</option>${repositories.map((entry) => `<option value="${escapeHtml(entry.nameWithOwner)}" data-default-branch="${escapeHtml(entry.defaultBranch ?? '')}">${escapeHtml(entry.nameWithOwner)}${entry.private ? ' · private' : ''}</option>`).join('')}</select>` })}
-      ${fieldShell({ label: 'Branch to connect', control: `<input id="cfgGitHubBranch" placeholder="Select a repository first"${disabled ? ' disabled' : ''} />` })}
+      ${fieldShell({ label: 'GitHub repository', wide: true, control: `<select id="cfgGitHubRepository"${disabled ? ' disabled' : ''}><option value="">Select a repository</option>${repositories.map((entry) => `<option value="${escapeHtml(entry.nameWithOwner)}" data-default-branch="${escapeHtml(entry.defaultBranch ?? '')}"${entry.nameWithOwner === attemptedRepository ? ' selected' : ''}>${escapeHtml(entry.nameWithOwner)}${entry.private ? ' · private' : ''}</option>`).join('')}</select>` })}
+      ${fieldShell({ label: 'Branch to connect', control: `<input id="cfgGitHubBranch" value="${escapeHtml(attemptedBranch)}" placeholder="Select a repository first"${disabled ? ' disabled' : ''} />` })}
     </div>
     <div class="cfg-action-row"><button type="button" data-cfg-action="connect-github"${disabled ? ' disabled' : ''}>TEST &amp; CONNECT REPOSITORY</button></div>` : ''}
-    <p class="cfg-note">Complete sign-in on the Windows host, then list repositories. Connecting verifies access and saves the profile. Use the separate Sync Git action to synchronize the active checkout.</p>
+    <p class="cfg-note">Complete sign-in on the Windows host, then list repositories. Connecting saves the repository and branch for this Project Profile. Use the separate Sync Git action to synchronize the active checkout.</p>
     <details><summary>Advanced Git settings</summary><div class="cfg-form-grid">
       ${fieldShell({ label: 'Publication Mode', control: select('integrations.git.publicationMode', git?.publicationMode, ['NO_REMOTE_YET', 'LOCAL_ONLY', 'REMOTE_REGISTERED']) })}
       ${fieldShell({ label: 'Provider', control: select('integrations.git.provider', git?.provider ?? '', [{ value: '', label: 'NONE' }, 'github', 'gitlab', 'azure-devops', 'other'], { kind: 'nullable' }) })}

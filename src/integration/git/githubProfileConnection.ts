@@ -276,23 +276,49 @@ export async function verifyGitHubProfileRepository(
   if (worktree === null || canonicalCheckout(worktree) !== root) {
     return { ...result, repository, state: 'CHECKOUT_MISMATCH', detail: 'Target Root must be the top-level folder of a local Git checkout. For existing source and an empty GitHub repository, initialize Git in the source folder and make a reviewed local commit first.' };
   }
-  const [branch, baseCommit, remotes, validRef] = await Promise.all([
+  const [branch, baseCommit, remoteList, validRef] = await Promise.all([
     readGit(['symbolic-ref', '--quiet', '--short', 'HEAD']),
     readGit(['rev-parse', '--verify', 'HEAD^{commit}']),
-    readGit(['config', '--local', '--no-includes', '--null', '--get-regexp', '^remote\\..*\\.url$']),
+    readGit(['remote']),
     readGit(['check-ref-format', `refs/heads/${selection.branch}`]),
   ]);
   if (branch !== selection.branch || baseCommit === null || !OBJECT_ID.test(baseCommit) || validRef === null) {
     return { ...result, repository, state: 'CHECKOUT_MISMATCH', detail: 'Check out the selected branch with a local commit before connecting it.' };
   }
-  const matching = (remotes ?? '').split('\0')
-    .map((record) => {
-      const separator = record.indexOf('\n');
-      return separator === -1 ? null : parseCheckoutRemote(record.slice(separator + 1));
-    })
-    .find((remote) => remote?.name.toLowerCase() === repository.nameWithOwner.toLowerCase());
-  if (matching === undefined || matching === null) {
-    return { ...result, repository, state: 'CHECKOUT_MISMATCH', detail: 'The local checkout has no credential-free GitHub remote matching the selected repository.' };
+  const checkedOut = { ...result, repository, branch, baseCommit };
+  if (remoteList === null) {
+    return { ...checkedOut, state: 'CHECKOUT_MISMATCH', detail: 'Git could not list remote names in the selected profile checkout.' };
+  }
+  const remoteNames = remoteList.split(/\r?\n/u).map((name) => name.trim()).filter(Boolean);
+  if (remoteNames.length === 0) {
+    return { ...checkedOut, state: 'CHECKOUT_MISMATCH', detail: 'This profile checkout has no named Git remotes. Add the selected GitHub repository as a local remote.' };
+  }
+
+  const githubNames = new Set<string>();
+  let matching: ReturnType<typeof parseCheckoutRemote> = null;
+  for (const name of remoteNames) {
+    // Read only the checkout's literal URL values. Git remote get-url expands
+    // rewrites, while a regexp query also mixes config keys into its output.
+    const urls = await readGit(['config', '--local', '--no-includes', '--null', '--get-all', `remote.${name}.url`]);
+    for (const value of urls?.split('\0') ?? []) {
+      const remote = parseCheckoutRemote(value.trim());
+      if (remote === null) continue;
+      githubNames.add(remote.name);
+      if (remote.name.toLowerCase() === repository.nameWithOwner.toLowerCase()) {
+        matching = remote;
+        break;
+      }
+    }
+    if (matching !== null) break;
+  }
+  if (matching === null) {
+    const known = [...githubNames].slice(0, 5).join(', ');
+    return {
+      ...checkedOut, state: 'CHECKOUT_MISMATCH',
+      detail: known === ''
+        ? `Git listed remote names, but no credential-free GitHub URL was found in the checkout's local Git config for ${repository.nameWithOwner}.`
+        : `Selected ${repository.nameWithOwner}. The checkout's local GitHub remotes point to ${known}.`,
+    };
   }
 
   // Network Git runs outside the repository so repo-local helpers or URL rewrites

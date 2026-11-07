@@ -4,7 +4,30 @@ import test from 'node:test';
 
 import { createActionClient } from '../configuration/actionContracts.js';
 import { mountConfigurationPanel } from '../configuration/configurationPanel.js';
+import { renderGitEditor } from '../configuration/gitEditor.js';
 import { metadata, record } from './projectProfileUiFixture.mjs';
+
+test('GitHub mismatch retains only the attempted repository and branch for the selected profile', () => {
+  const saved = record('alpha');
+  const repositories = [
+    { nameWithOwner: 'owner/alpha', defaultBranch: 'main' },
+    { nameWithOwner: 'owner/beta', defaultBranch: 'main' },
+  ];
+  const snapshot = {
+    draft: saved.profile, selectedRecord: saved, phase: 'ready',
+    connectionChecks: {
+      githubDirectory: { repositories },
+      githubConnection: { state: 'CHECKOUT_MISMATCH', repository: repositories[0], branch: 'work' },
+    },
+  };
+  const html = renderGitEditor(snapshot);
+  assert.match(html, /value="owner\/alpha" data-default-branch="main" selected/);
+  assert.match(html, /value="owner\/beta" data-default-branch="main">/);
+  assert.match(html, /id="cfgGitHubBranch" value="work"/);
+  const beta = record('beta');
+  const other = renderGitEditor({ ...snapshot, draft: beta.profile, selectedRecord: beta, connectionChecks: {} });
+  assert.doesNotMatch(other, /owner\/alpha|value="work"/);
+});
 
 test('profile connection controls register a verified GitHub checkout and ask Windows to store the OpenAI key', async () => {
   let saved = record('alpha');
