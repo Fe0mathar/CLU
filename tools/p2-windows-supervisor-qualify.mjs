@@ -19,6 +19,151 @@ const NORMAL_TIMEOUT = 12_000;
 const PROCESS_DEADLINE = 5_000;
 const DESCENDANT_DELAY = 8_000;
 
+async function loopbackMatrix(net, dgram) {
+  const socketState = (error, phase) => {
+    if (['EAFNOSUPPORT', 'EADDRNOTAVAIL', 'EPROTONOSUPPORT'].includes(error?.code)) return 'UNAVAILABLE';
+    if (['EACCES', 'EPERM'].includes(error?.code)) return phase + '_DENIED';
+    return phase + '_ERROR';
+  };
+
+  function tcp(host) {
+    return new Promise((resolve) => {
+      let client;
+      let finished = false;
+      let phase = 'BIND';
+      const server = net.createServer((peer) => peer.destroy());
+      const timer = setTimeout(() => finish(phase + '_TIMEOUT'), 800);
+      function finish(state) {
+        if (finished) return;
+        finished = true;
+        clearTimeout(timer);
+        client?.destroy();
+        server.close();
+        resolve(state);
+      }
+      server.on('error', (error) => finish(socketState(error, 'BIND')));
+      server.listen(0, host, () => {
+        if (finished) return;
+        phase = 'CONNECT';
+        client = net.createConnection({ host, port: server.address().port });
+        client.on('error', (error) => finish(socketState(error, 'CONNECT')));
+        client.once('connect', () => finish('DELIVERED'));
+      });
+    });
+  }
+
+  function udp(host, type) {
+    return new Promise((resolve) => {
+      const receiver = dgram.createSocket(type);
+      let sender;
+      let finished = false;
+      let phase = 'BIND';
+      const timer = setTimeout(() => finish(phase + '_TIMEOUT'), 800);
+      function close(socket) {
+        if (socket) try { socket.close(); } catch { /* never bound or already closed */ }
+      }
+      function finish(state) {
+        if (finished) return;
+        finished = true;
+        clearTimeout(timer);
+        close(sender);
+        close(receiver);
+        resolve(state);
+      }
+      receiver.on('error', (error) => finish(socketState(error, 'BIND')));
+      receiver.on('message', (bytes) => { if (bytes.equals(Buffer.from('CLU-E'))) finish('DELIVERED'); });
+      receiver.bind(0, host, () => {
+        if (finished) return;
+        phase = 'SEND';
+        sender = dgram.createSocket(type);
+        sender.on('error', (error) => finish(socketState(error, 'SEND')));
+        sender.send('CLU-E', receiver.address().port, host, (error) => {
+          if (error) finish(socketState(error, 'SEND'));
+        });
+      });
+    });
+  }
+
+  return Object.fromEntries(await Promise.all([
+    ['ipv4Tcp', tcp('127.0.0.1')], ['ipv6Tcp', tcp('::1')],
+    ['ipv4Udp', udp('127.0.0.1', 'udp4')], ['ipv6Udp', udp('::1', 'udp6')],
+  ].map(async ([name, result]) => [name, await result])));
+}
+
+const WFP_BOOTSTRAP = [
+  "const fs = require('node:fs');",
+  "const [mode, pidFile, gate] = process.argv.slice(1);",
+  "const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));",
+  "fs.writeFileSync(pidFile, String(process.pid), {flag:'wx'});",
+  "(async () => {",
+  "for (let i = 0; !fs.existsSync(gate); i++) { if (i >= 280) throw Error('gate'); await sleep(20); }",
+  "if (fs.readFileSync(gate, 'utf8') !== 'GO') throw Error('gate');",
+  "if (mode === 'deadline') { await sleep(20000); return; }",
+  "const result = await (" + loopbackMatrix.toString() + ")(require('node:net'), require('node:dgram'));",
+  "process.stdout.write(JSON.stringify(result));",
+  "})().catch(() => { process.exitCode = 2; });",
+].join('\n');
+
+function wfpLeaseEvidence(run) {
+  const pattern = /^\[CLU-E WFP\] (control|filtered|deadline) (0|1) ([0-6]) (0|1) (0|1) (0|1) (0|1)\r?$/gmu;
+  const rows = [...run.stderr.matchAll(pattern)];
+  if (rows.length !== 1) return null;
+  const [, mode, token, filters, gate, jobEmpty, filtersRemoved, uniqueSid] = rows[0];
+  return {
+    mode, observedInJobPackageSid: token === '1', filterCount: Number(filters),
+    gateReleased: gate === '1', jobEmpty: jobEmpty === '1', filtersRemoved: filtersRemoved === '1',
+    uniqueSid: uniqueSid === '1',
+  };
+}
+
+function matrixEvidence(value) {
+  const keys = ['ipv4Tcp', 'ipv6Tcp', 'ipv4Udp', 'ipv6Udp'];
+  const states = /^(DELIVERED|UNAVAILABLE|(?:BIND|CONNECT|SEND)_(?:DENIED|ERROR|TIMEOUT))$/u;
+  if (value === null || typeof value !== 'object' ||
+      !keys.every((key) => typeof value[key] === 'string' && states.test(value[key]))) return null;
+  return Object.fromEntries(keys.map((key) => [key, value[key]]));
+}
+
+async function exerciseWfp(report, run, workspace) {
+  const dgram = await import('node:dgram');
+  const net = await import('node:net');
+  const hostBefore = await loopbackMatrix(net, dgram);
+  const collect = async (mode, timeoutMs = NORMAL_TIMEOUT) => {
+    const result = await run({ timeoutMs, args: [
+      '-e', WFP_BOOTSTRAP, mode, join(workspace, 'wfp-' + mode + '-pid.txt'), join(workspace, 'wfp-' + mode + '-gate.txt'),
+    ] });
+    return {
+      exitCode: result.code, timedOut: result.timedOut, lease: wfpLeaseEvidence(result),
+      matrix: matrixEvidence(parsedOutput(result)), diagnostic: supervisorDiagnostic(result),
+      wfpError: result.stderr.match(/^\[CLU-E WFP ERROR\] (WFP_[A-Z0-9_]{1,70}(?:_0x[A-F0-9]{8})?)\r?$/mu)?.[1] ?? null,
+    };
+  };
+  const control = await collect('control');
+  const filtered = await collect('filtered');
+  const deadline = filtered.lease?.filterCount === 6 ? await collect('deadline', 5000) : null;
+  const hostAfter = await loopbackMatrix(net, dgram);
+  const validLease = (item, mode) => item?.lease?.mode === mode &&
+    item.lease.observedInJobPackageSid === true &&
+    item.lease.filterCount === 6 && item.lease.gateReleased && item.lease.jobEmpty &&
+    item.lease.filtersRemoved && item.lease.uniqueSid;
+  const hostControl = Object.values(hostBefore).every((value) => value === 'DELIVERED') &&
+    Object.values(hostAfter).every((value) => value === 'DELIVERED');
+  const containedBlocked = filtered.matrix !== null &&
+    Object.values(filtered.matrix).every((value) => value.endsWith('_DENIED'));
+  const controlCompleted = control.matrix !== null && control.lease?.mode === 'control' &&
+    control.lease.observedInJobPackageSid && control.lease.filterCount === 0 &&
+    control.lease.gateReleased && control.lease.jobEmpty;
+  const controlledDifference = containedBlocked && control.matrix !== null &&
+    Object.values(control.matrix).every((value) => value === 'DELIVERED');
+  const leaseLifecycle = validLease(filtered, 'filtered') && validLease(deadline, 'deadline') &&
+    deadline.exitCode === 124 && !deadline.timedOut;
+  report.wfp = { hostBefore, hostAfter, hostControl, control, filtered, deadline, containedBlocked,
+    controlCompleted, controlledDifference, leaseLifecycle };
+  report.wfpStatus = !leaseLifecycle || !hostControl || !controlCompleted || !containedBlocked ? 'FAIL' :
+    controlledDifference ? 'FILTER_DIFFERENTIAL_OBSERVED' : 'FILTER_BOUND_ATTRIBUTION_UNPROVEN';
+  console.info('[CLU-E WFP diagnostic]', report.wfpStatus);
+}
+
 function sameText(path, expected) {
   try { return readFileSync(path, 'utf8') === expected; }
   catch { return false; }
@@ -185,7 +330,7 @@ function fixturePaths(output, name) {
   return { pids: join(output, name + '-pids.json'), started: join(output, name + '-started.txt'), lateMarker: join(output, name + '-survived.txt') };
 }
 
-async function exercise({ report, root, supervisor, resolveWindowsSupervisor, runBoundedProcess }) {
+async function exercise({ report, root, supervisor, resolveWindowsSupervisor, runBoundedProcess, wfpDiagnostic }) {
   const write = join(root, 'workspace');
   const candidate = join(root, 'candidate');
   const readonly = join(root, 'canonical-fixture');
@@ -229,6 +374,10 @@ async function exercise({ report, root, supervisor, resolveWindowsSupervisor, ru
     return await runBoundedProcess(supervisor.command, [...supervisor.argsPrefix, staged.file], {
       cwd: staged.dir, env: outerEnv, timeoutMs: (overrides.timeoutMs ?? NORMAL_TIMEOUT) + 2_000,
     });
+  }
+  if (wfpDiagnostic) {
+    await exerciseWfp(report, run, write);
+    return;
   }
   function set(id, state, evidence = {}) {
     report.cases[id] = state;
@@ -374,13 +523,17 @@ async function exercise({ report, root, supervisor, resolveWindowsSupervisor, ru
     { missingPinRefused, wrongPinRefused, malformedRequestsRefused: refusals.filter(Boolean).length, malformedRequestsTested: refusals.length });
 }
 
-async function qualify() {
+async function qualify(wfpDiagnostic) {
   const report = {
     schemaVersion: 'clue-console-probe-native-supervisor/1', checkedAt: new Date().toISOString(),
     status: 'PENDING', canaryStatus: 'PENDING', blocker: null, supervisorSha256: null, supervisorPathSha256: null, host: null,
     cases: Object.fromEntries([...REQUIRED, 'measurement-parity'].map((id) => [id, 'NOT_EXECUTED'])),
     caseEvidence: {}, fixtureRemoved: null,
   };
+  if (wfpDiagnostic) {
+    report.wfpStatus = 'NOT_EXECUTED';
+    report.wfp = null;
+  }
   if (process.platform !== 'win32') {
     report.blocker = 'NATIVE_WINDOWS_REQUIRED';
     return report;
@@ -409,7 +562,7 @@ async function qualify() {
     report.supervisorPathSha256 = windowsSupervisorPathSha256(supervisor.command);
     report.host = captureWindowsQualificationHost();
     root = realpathSync.native(mkdtempSync(join(tmpdir(), 'clue-supervisor-qualify-')));
-    await exercise({ report, root, supervisor, resolveWindowsSupervisor, runBoundedProcess });
+    await exercise({ report, root, supervisor, resolveWindowsSupervisor, runBoundedProcess, wfpDiagnostic });
   } catch {
     report.blocker = 'CANARY_RUNNER_ERROR';
   } finally {
@@ -420,7 +573,13 @@ async function qualify() {
       } catch { report.fixtureRemoved = false; }
     }
   }
-  if (report.blocker !== null || report.fixtureRemoved === false || REQUIRED.some((id) => report.cases[id] === 'FAIL')) {
+  if (wfpDiagnostic) {
+    report.canaryStatus = 'NOT_EXECUTED';
+    report.status = report.blocker === null && report.fixtureRemoved === true &&
+      ['FILTER_DIFFERENTIAL_OBSERVED', 'FILTER_BOUND_ATTRIBUTION_UNPROVEN'].includes(report.wfpStatus)
+      ? 'WFP_DIAGNOSTIC_COMPLETE' : 'WFP_DIAGNOSTIC_FAILED';
+    if (report.status === 'WFP_DIAGNOSTIC_FAILED') report.blocker ??= 'WFP_PROBE_EVIDENCE_INCOMPLETE';
+  } else if (report.blocker !== null || report.fixtureRemoved === false || REQUIRED.some((id) => report.cases[id] === 'FAIL')) {
     report.canaryStatus = 'FAIL';
     report.status = 'FAIL';
     report.blocker ??= 'REQUIRED_CANARY_FAILED';
@@ -434,7 +593,9 @@ async function qualify() {
 }
 
 const args = process.argv.slice(2);
-const usage = 'Usage: node tools/p2-windows-supervisor-qualify.mjs --output <external .json>';
+const wfpDiagnostic = args.at(-1) === '--wfp-diagnostic';
+if (wfpDiagnostic) args.pop();
+const usage = 'Usage: node tools/p2-windows-supervisor-qualify.mjs --output <external .json> [--wfp-diagnostic]';
 if (args.length === 1 && args[0] === '--help') {
   console.log(usage);
 } else if (args.length !== 2 || args[0] !== '--output' || !/\.json$/iu.test(args[1])) {
@@ -443,10 +604,10 @@ if (args.length === 1 && args[0] === '--help') {
 } else {
   try {
     externalReportPath(ROOT, args[1]);
-    const report = await qualify();
+    const report = await qualify(wfpDiagnostic);
     writeExternalReport(ROOT, args[1], report);
-    console.info('[CLU-E native qualification]', report.canaryStatus, report.blocker ?? report.status);
-    if (report.canaryStatus !== 'PASS') process.exitCode = 1;
+    console.info('[CLU-E native qualification]', report.wfpStatus ?? report.canaryStatus, report.blocker ?? report.status);
+    if (wfpDiagnostic ? report.status !== 'WFP_DIAGNOSTIC_COMPLETE' : report.canaryStatus !== 'PASS') process.exitCode = 1;
   } catch {
     console.error('[CLU-E native qualification] REPORT_OUTPUT_UNAVAILABLE');
     process.exitCode = 2;

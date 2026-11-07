@@ -46,7 +46,23 @@ internal static class Supervisor
                     if (remaining < 1) return 124;
                     bool deadlineExpired;
                     phase = "ENGINE_RUN";
-                    int exit = NativeJob.Run(engine, log, config, request.systemRoot, remaining, out deadlineExpired);
+                    int exit;
+                    if (request.wfpMode == null)
+                        exit = NativeJob.Run(engine, log, config, request.systemRoot, remaining, out deadlineExpired);
+                    else
+                    {
+                        var wfp = new WfpBootstrapRun(request);
+                        bool jobEmpty = false;
+                        bool lifecycleComplete;
+                        try
+                        {
+                            exit = NativeJob.Run(engine, log, config, request.systemRoot, remaining,
+                                out deadlineExpired, wfp.Observe);
+                            jobEmpty = true;
+                        }
+                        finally { lifecycleComplete = wfp.Finish(jobEmpty); }
+                        if (!lifecycleComplete) return Refuse("WFP_BOOTSTRAP_LIFECYCLE_INCOMPLETE");
+                    }
                     if (deadlineExpired) return 124;
                     if (exit == 0) return 0;
                     // A protected backend record distinguishes a workload failure from an MXC

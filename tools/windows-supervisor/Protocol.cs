@@ -24,6 +24,8 @@ public sealed class Request
     public int timeoutMs;
     public string systemRoot;
     public string fixtureRoot;
+    public string wfpMode;
+    public string wfpContainerId;
 }
 
 public static class Protocol
@@ -111,7 +113,7 @@ public static class Protocol
         foreach (var pair in r.env)
             entries.Add(pair.Key + "=" + pair.Value);
 
-        return Serializer().Serialize(Object(
+        var config = Object(
             "version", "1.0.0",
             "containment", "processcontainer",
             "lifecycle", Object("destroyOnExit", true, "preservePolicy", false),
@@ -124,7 +126,10 @@ public static class Protocol
             // The pinned Node fixture needs Win32k initialization. Keep UI scoped to its job.
             "ui", Object("disable", false, "clipboard", "none", "injection", false),
             "processContainer", Object("ui", Object("isolation", "container",
-                "desktopSystemControl", false, "ime", false, "systemSettings", "none"))));
+                "desktopSystemControl", false, "ime", false, "systemSettings", "none")));
+        if (r.wfpContainerId != null)
+            config.Add("containerId", r.wfpContainerId);
+        return Serializer().Serialize(config);
     }
 
     public static string Quote(string value)
@@ -235,6 +240,18 @@ public static class Protocol
                 string name = r.timeoutMs == 5000 ? "deadline" : "cancelled";
                 valid = isBaseline && ArgumentsMatch(r.args, Path.Combine(workspace, name + "-pids.json"),
                     Path.Combine(workspace, name + "-started.txt"), Path.Combine(workspace, name + "-survived.txt"), "8000");
+                break;
+            case "e8dccf1936d54894feef203f93aeb8b0e85808890415b2f775074ed9766de980": // WFP bootstrap
+                var mode = r.args[2];
+                valid = isBaseline && (mode == "control" || mode == "filtered" || mode == "deadline") &&
+                    r.timeoutMs == (mode == "deadline" ? 5000 : 12000) &&
+                    ArgumentsMatch(r.args, mode, Path.Combine(workspace, "wfp-" + mode + "-pid.txt"),
+                        Path.Combine(workspace, "wfp-" + mode + "-gate.txt"));
+                if (valid)
+                {
+                    r.wfpMode = mode;
+                    r.wfpContainerId = "sandbox-" + Guid.NewGuid().ToString("N").Substring(0, 16);
+                }
                 break;
             default:
                 valid = false;

@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [string] $InstallRoot,
-    [string] $EvidenceRoot
+    [string] $EvidenceRoot,
+    [switch] $WfpDiagnostic
 )
 
 Set-StrictMode -Version Latest
@@ -263,6 +264,15 @@ try {
     if ($sessionId -eq 0 -or !$windowsHost.userInteractive) {
         throw 'Run CLUE-Windows-Supervisor.bat from your signed-in Windows desktop for this canary.'
     }
+    if ($WfpDiagnostic) {
+        $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+        try {
+            $principal = [Security.Principal.WindowsPrincipal]::new($identity)
+            if (!$principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+                throw 'Right-click CLUE-Windows-WFP-Diagnostic.bat and choose Run as administrator.'
+            }
+        } finally { $identity.Dispose() }
+    }
     if ($arch -notin @('x64', 'arm64')) { throw 'Microsoft MXC requires a supported x64 or ARM64 Windows installation.' }
     $node = (Get-Command node.exe -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
     $nodeResult = @(& $node -p "require('node:fs').realpathSync.native(process.execPath)")
@@ -280,7 +290,8 @@ try {
     if (!(Test-Path -LiteralPath $csc -PathType Leaf) -or !(Test-Path -LiteralPath $web -PathType Leaf)) {
         throw 'The Windows .NET Framework 4.x C# compiler and System.Web.Extensions are required.'
     }
-    $sourceNames = @('Supervisor.cs', 'Protocol.cs', 'NativeJob.cs')
+    $sourceNames = @('Supervisor.cs', 'Protocol.cs', 'NativeJob.cs',
+        'WfpBootstrapRun.cs', 'WfpContainerIdentity.cs', 'WfpLoopbackLease.cs')
     $sources = foreach ($sourceName in $sourceNames) {
         $source = Join-Path $PSScriptRoot $sourceName
         Assert-NoReparsePath $source
@@ -309,6 +320,10 @@ try {
     Assert-NoReparsePath $bin -CreateDirectory
     $mxc = Join-Path $bin 'wxc-exec.exe'
     if (!(Copy-PinnedInstalledMxc $arch $install $mxc $mxcDownload)) {
+        if ($WfpDiagnostic) {
+            $mxcDownload.state = 'VERIFIED_X64_CACHE_REQUIRED'
+            throw 'The WFP diagnostic requires the previously verified x64 MXC engine under the current Windows account.'
+        }
         Get-MxcExecutable $arch $stage $mxc $mxcDownload
     }
     if ((Invoke-ExactExecutable $mxc @('--help') $bin 15) -ne 0) {
@@ -351,7 +366,9 @@ internal static class MxcPin {
     $env:CLU_WINDOWS_SUPERVISOR_SHA256 = $wrapperHash
     $stagedReport = Join-Path $stage 'canaries.json'
     try {
-        $code = Invoke-ExactExecutable $node @('tools/p2-windows-supervisor-qualify.mjs', '--output', $stagedReport) $repo 180
+        $canaryArguments = @('tools/p2-windows-supervisor-qualify.mjs', '--output', $stagedReport)
+        if ($WfpDiagnostic) { $canaryArguments += '--wfp-diagnostic' }
+        $code = Invoke-ExactExecutable $node $canaryArguments $repo 180
     } finally {
         Remove-Item Env:CLU_WINDOWS_SUPERVISOR_PATH, Env:CLU_WINDOWS_SUPERVISOR_SHA256 -ErrorAction SilentlyContinue
     }
@@ -368,6 +385,7 @@ internal static class MxcPin {
         engineSha256 = $mxcHash
         mxcDownload = $mxcDownload
         canaryUiMode = 'CONTAINER_SCOPED_WIN32K'
+        wfpDiagnostic = [bool] $WfpDiagnostic
         canaryExitCode = $code
         canaryReport = (Get-Content -LiteralPath $stagedReport -Raw | ConvertFrom-Json -AsHashtable)
     }
@@ -391,6 +409,7 @@ internal static class MxcPin {
                 engineSha256 = $mxcHash
                 mxcDownload = $mxcDownload
                 canaryUiMode = 'CONTAINER_SCOPED_WIN32K'
+                wfpDiagnostic = [bool] $WfpDiagnostic
                 canaryExitCode = $null
                 canaryReport = $null
             })

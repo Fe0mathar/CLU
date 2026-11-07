@@ -18,7 +18,8 @@ internal static class NativeJob
     private const int HandleList = 0x00020002;
     private const int JobList = 0x0002000D;
 
-    internal static int Run(string engine, string log, string config, string systemRoot, int timeout, out bool deadlineExpired)
+    internal static int Run(string engine, string log, string config, string systemRoot, int timeout,
+        out bool deadlineExpired, Action<IntPtr> observe = null)
     {
         deadlineExpired = false;
         var clock = Stopwatch.StartNew();
@@ -91,9 +92,25 @@ internal static class NativeJob
                 pinned.Free();
             }
 
-            remaining = Math.Max(0, timeout - (int)Math.Min(clock.ElapsedMilliseconds, Int32.MaxValue));
-            uint wait = WaitForSingleObject(process.Process, (uint)remaining);
-            if (wait != WaitObject && wait != WaitTimeout) throw Error();
+            uint wait;
+            try
+            {
+                do
+                {
+                    remaining = Math.Max(0, timeout - (int)Math.Min(clock.ElapsedMilliseconds, Int32.MaxValue));
+                    uint budget = (uint)(observe == null ? remaining : Math.Min(remaining, 30));
+                    wait = WaitForSingleObject(process.Process, budget);
+                    if (wait != WaitObject && wait != WaitTimeout) throw Error();
+                    if (wait == WaitObject || clock.ElapsedMilliseconds >= timeout) break;
+                    if (observe != null) observe(job);
+                } while (observe != null);
+            }
+            catch
+            {
+                Check(TerminateJobObject(job, 125));
+                WaitForEmptyJob(job);
+                throw;
+            }
 
             uint exit = 124;
             if (wait == WaitObject) Check(GetExitCodeProcess(process.Process, out exit));
