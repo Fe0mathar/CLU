@@ -75,6 +75,42 @@ test('PP-26: missing secret bytes remain CREDENTIAL MISSING while the safe refer
   assert.equal(result.credentialPresent, false);
 });
 
+test('Project Profile checks the saved model against effective OpenAI routing', async (t) => {
+  const state = setup();
+  t.after(() => state.fixture.dispose());
+  const registry = new ProjectProfileRegistry(state.fixture.profiles);
+  const model = 'gpt-5-mini';
+  const profile = cloneProfile(state.record.profile, (draft) => {
+    const integrations = draft['integrations'] as Record<string, unknown>;
+    const gpt = integrations['gpt'] as Record<string, unknown>;
+    gpt['modelId'] = model;
+  });
+  const record = registry.update(profile, state.record.generation, { actor: 'creator', reason: 'test model selection' });
+  const result = await testProjectGatewayReadiness(record, state.config, state.policies, {
+    globalCredentialReference: 'env:OPENAI_API_KEY',
+    environment: { OPENAI_API_KEY: SECRET },
+    probeModel: async (input) => {
+      assert.equal(input.model, model);
+      return { id: model };
+    },
+  });
+  assert.equal(result.ready, true);
+  assert.equal(result.profileGeneration, record.generation);
+  assert.equal(result.requestedModel, model);
+  assert.equal(result.effectiveModel, model);
+
+  const incompatible = await testProjectGatewayReadiness(record, state.config, {
+    ...state.policies,
+    routing: { ...state.policies.routing, local_pricing_authoritative: true },
+  }, {
+    globalCredentialReference: 'env:OPENAI_API_KEY',
+    environment: { OPENAI_API_KEY: SECRET },
+    probeModel: async () => assert.fail('model with no governed local price must not reach the provider'),
+  });
+  assert.equal(incompatible.code, 'GATEWAY_POLICY_MISMATCH');
+  assert.equal(incompatible.ready, false);
+});
+
 test('PP-26: provider model substitution fails closed instead of becoming a silent fallback', async (t) => {
   const state = setup();
   t.after(() => state.fixture.dispose());

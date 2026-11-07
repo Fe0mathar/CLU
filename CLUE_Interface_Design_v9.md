@@ -2,7 +2,7 @@
 ## Two-Tab, Four-Quadrant WebGPU Mission-Control Console for Recursive Project Improvement
 
 **Document status:** permanent normative operator-interface contract  
-**Revision:** 9.1 (pack release 9.0) — standalone revision 10.0 content preserved at the v9 re-baseline; amended 2026-08-14 under ADR-0017 for the separate manual `SYNC GIT` control and provider-authoritative Q3 funding/token presentation.  
+**Revision:** 9.2 (pack release 9.0). ADR-0017 introduced separate manual `SYNC GIT` and provider-authoritative funding and token presentation. The sample reflects the ADR-0020 model proposal.  
 **Language:** English  
 **Normative methodology:** `RPI_Core_Methodology_v9.md`  
 **Constitutional companion:** `CLUE_Constitution_v9.md`  
@@ -2308,7 +2308,7 @@ Policy               typed gateway only
 
 AI ORCHESTRATION
 Provider             OpenAI · reachable
-Critical Model       gpt-5.6 · exact ID validated
+Critical Model       gpt-5.6-sol · exact ID validated
 Concurrency          6
 Spend Authority      OpenAI Platform · provider-controlled
 

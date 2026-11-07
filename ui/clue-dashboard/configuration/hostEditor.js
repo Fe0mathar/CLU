@@ -30,6 +30,7 @@ export function renderHostEditor(snapshot) {
     ${check ? `<p class="cfg-connection-detail">${escapeHtml(check.code ?? state)} · ${escapeHtml(check.detail ?? '')}</p>` : '<p class="cfg-note">A live test proves executable availability, handshake and exact root parity.</p>'}
     ${check?.binding ? `<details><summary>Host handshake details</summary><dl class="cfg-binding-facts"><div><dt>Executable</dt><dd>${escapeHtml(check.binding.executable)}</dd></div><div><dt>Host script</dt><dd>${escapeHtml(check.binding.scriptPath)}</dd></div><div><dt>Checked at</dt><dd>${escapeHtml(check.checkedAt ?? '')}</dd></div></dl></details>` : ''}
     <p class="cfg-note">The host exchanges structured requests and replies with CLU-E. This connection test shows the verified executable, script and root parity.</p>
+    <p class="cfg-note">The managed Windows launcher opens a separate PowerShell activity window for host requests and validated replies. The window stays open for review after the test.</p>
     <footer class="cfg-card-actions"><span></span><button type="button" data-cfg-action="test-host"${!snapshot.selectedRecord || snapshot.dirty || snapshot.pending ? ' disabled' : ''}>TEST CONNECTION</button></footer>
   </section>`;
 }

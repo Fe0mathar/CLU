@@ -135,10 +135,11 @@ Documentation validation establishes internal coherence of this knowledge base. 
 
 ---
 
-## 8. Current executable-alignment amendments through ADR-0017
+## 8. Executable-alignment amendments
 
 The permanent v9 pack has additive executable-alignment amendments through Status wire 5.7.0.
 ADR-0017 records the operational OpenAI gateway boundary, provider-side monetary authority,
 controlled billing-exhaustion pause, exact token-use telemetry and manual local-first Git Sync.
-These amendments do not by themselves certify P2 closure; the closure controller still requires
-current ratification, a current epoch and a real proof-authoritative ACCEPT cycle.
+ADR-0020 proposes `gpt-5.6-sol` as the exact legacy P2 model. The governance record in §19 explains
+the model check, Creator ratification and evidence epoch. P2 closure also requires a real
+proof-authoritative ACCEPT cycle.

@@ -250,8 +250,13 @@ export const defaultGitRunner: GitCommandRunner = (
   args,
   timeoutMs = 30_000,
 ): GitCommandResult => {
+  const env = { ...process.env };
+  for (const name of Object.keys(env)) {
+    if (name.toUpperCase() === 'OPENAI_API_KEY') delete env[name];
+  }
   const child = spawnSync('git', [...args], {
     cwd: root,
+    env,
     shell: false,
     encoding: 'utf8',
     windowsHide: true,

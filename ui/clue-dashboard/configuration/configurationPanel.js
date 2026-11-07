@@ -21,7 +21,7 @@ import { renderRecognitionEditor } from './recognitionEditor.js';
 import { renderHostEditor } from './hostEditor.js';
 import { renderGitEditor } from './gitEditor.js';
 import { renderBrowserEditor } from './browserEditor.js';
-import { CREDENTIAL_REFERENCE_PATTERN, renderGatewayEditor } from './gatewayEditor.js';
+import { availableGatewayModels, CREDENTIAL_REFERENCE_PATTERN, renderGatewayEditor } from './gatewayEditor.js';
 import { renderBenchmarkRuntimeEditor } from './benchmarkRuntimeEditor.js';
 import { renderProjectReadinessPanel } from './projectReadinessPanel.js';
 import {
@@ -247,6 +247,15 @@ export function mountConfigurationPanel(options) {
   function updateProfileControl(control, notify = true) {
     const path = control.dataset.profilePath;
     if (!path) return;
+    if (path === 'integrations.gpt.modelId') {
+      const snapshot = state.snapshot();
+      // A select can fire input and change. Apply it once and only when the chosen ID
+      // came from the model list for this saved profile and credential.
+      if (!notify || control.value === snapshot.draft?.integrations?.gpt?.modelId) return;
+      if (!snapshot.pending && availableGatewayModels(snapshot).includes(control.value)) state.updateDraft(path, control.value);
+      else render(snapshot);
+      return;
+    }
     if (path === 'benchmarkRuntime.resolution.width' || path === 'benchmarkRuntime.resolution.height') {
       if (notify) updateResolution(path, control.value);
       return;
@@ -394,6 +403,20 @@ export function mountConfigurationPanel(options) {
     return invoke(action, { params: { projectId: record.profile.projectId } }, token, (value) => state.applyConnectionCheck(token, kind, value));
   }
 
+  async function loadGatewayModels() {
+    const record = savedConnectionRecord();
+    if (!record) return;
+    const token = state.beginGatewayModels();
+    const result = await actionClient.invoke('listProjectGptModels', {
+      params: { projectId: record.profile.projectId },
+      query: { expectedGeneration: record.generation, expectedProfileHash: record.projectProfileHash },
+    });
+    if (!result.ok) {
+      return state.applyFailure(token, 'MODEL_LIST_REQUEST_FAILED', 'Reload the saved profile and try loading its models again.');
+    }
+    return state.applyGatewayModels(token, result.result);
+  }
+
   async function saveProfileConnection(kind, action, phase, record, fields = {}) {
     const token = state.begin(phase);
     return invoke(action, {
@@ -429,9 +452,9 @@ export function mountConfigurationPanel(options) {
 
   async function saveProfile() {
     const snapshot = state.snapshot();
-    if (!snapshot.draft || projectDraftProblems(snapshot.draft).length) return;
-    const token = state.beginSave();
     const creating = snapshot.draftMode === 'create';
+    if (!snapshot.draft || snapshot.pending || (!creating && !snapshot.dirty) || projectDraftProblems(snapshot.draft).length) return;
+    const token = state.beginSave();
     const action = creating ? 'createProject' : 'updateProject';
     const input = creating
       ? { profile: snapshot.draft }
@@ -573,6 +596,7 @@ export function mountConfigurationPanel(options) {
         break;
       }
       case 'test-gateway': void testConnection('gateway', 'testProjectGpt'); break;
+      case 'load-gateway-models': void loadGatewayModels(); break;
       case 'check-openai-key': void testConnection('openaiKey', 'readProjectOpenAiKey', 'checking-windows-key'); break;
       case 'set-openai-key': void setOpenAiKey(); break;
       case 'use-host-global': setInheritedPath('integrations.powershell.executable', 'powershell.executable', 'global', ''); break;

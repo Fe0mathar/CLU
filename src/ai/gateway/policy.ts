@@ -17,7 +17,7 @@ import { isAbsolute, resolve } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import { z } from 'zod';
 
-import { hashBytes, type Sha256 } from '../../shared/ids.js';
+import { hashBytes, hashCanonicalJson, type Sha256 } from '../../shared/ids.js';
 import { absolutePathForm, type ClueConfig } from '../../shared/schemas.js';
 
 export const GATEWAY_TASK_TYPES = [
@@ -393,6 +393,30 @@ export function loadGatewayPolicies(repoRoot: string, config: ClueConfig): Loade
     routingPath,
     budgetHash: budget.hash,
     routingHash: routing.hash,
+  };
+}
+
+export function isProjectGatewayModelId(value: string): boolean {
+  return /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u.test(value);
+}
+
+/** Preserve governed task routing and bind every enabled route to the saved exact model. */
+export function bindProjectGatewayModel(
+  policies: LoadedGatewayPolicies,
+  model: string,
+): LoadedGatewayPolicies {
+  if (!isProjectGatewayModelId(model)) throw new Error('The Project Profile needs one valid exact model ID.');
+  const routes = { ...policies.routing.routes };
+  const changes = GATEWAY_TASK_TYPES.filter((task) => routes[task].enabled && routes[task].model !== model);
+  if (changes.length === 0) return policies;
+  if (policies.budget.spend_authority !== 'openai_platform' || policies.routing.local_pricing_authoritative) {
+    throw new Error('Changing the Project Profile model requires OpenAI Platform budget and pricing authority.');
+  }
+  for (const task of changes) routes[task] = { ...routes[task], model, pricing: null };
+  return {
+    ...policies,
+    routing: { ...policies.routing, routes },
+    routingHash: hashCanonicalJson({ schema: 'clue.gateway.profile-routing/1', baseRoutingHash: policies.routingHash, model }),
   };
 }
 

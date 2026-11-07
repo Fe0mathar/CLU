@@ -8,7 +8,7 @@
 
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parse as parseYaml } from 'yaml';
@@ -175,13 +175,18 @@ const routingPath = join(repoRoot, config.gateway.routing_file);
 const budgetPath = join(repoRoot, config.gateway.budget_policy_file);
 const routing = existsSync(routingPath) ? parseYaml(readFileSync(routingPath, 'utf8')) : null;
 const budget = existsSync(budgetPath) ? parseYaml(readFileSync(budgetPath, 'utf8')) : null;
+const closurePolicyPath = join(repoRoot, 'config', 'policies', 'p2-closure.yaml');
+const gatewayDecision = existsSync(closurePolicyPath) ? parseYaml(readFileSync(closurePolicyPath, 'utf8'))?.gateway : null;
+const approvedModel = 'gpt-5.6-sol';
 const enabledModels = routing === null
   ? []
   : [...new Set(Object.values(routing.routes ?? {}).filter((route) => route?.enabled).map((route) => route.model).filter(Boolean))];
 const apiKeyEnv = config.gateway.api_key_env;
 const apiKeyPresent = typeof apiKeyEnv === 'string' && Boolean(process.env[apiKeyEnv]);
 if (config.gateway.provider !== 'openai') problems.push('gateway provider is not openai');
-if (enabledModels.length !== 1 || enabledModels[0] !== 'gpt-5.6') problems.push(`enabled gateway routes do not resolve exactly to gpt-5.6 (${enabledModels.join(', ') || 'none'})`);
+const exactGatewayPolicy = gatewayDecision?.decision === 'OPERATIONAL' && gatewayDecision.model === approvedModel &&
+  enabledModels.length === 1 && enabledModels[0] === approvedModel;
+if (!exactGatewayPolicy) problems.push(`D4 and enabled gateway routes must resolve exactly to ${approvedModel} (${enabledModels.join(', ') || 'none'})`);
 if (budget?.spend_authority !== 'openai_platform') problems.push('OpenAI Platform is not the configured spend authority');
 if (!apiKeyPresent) problems.push(`${apiKeyEnv ?? 'OPENAI_API_KEY'} is not present in this process environment`);
 
@@ -220,8 +225,18 @@ if (windowsHost) {
     problems.push('Build CLU-E before checking the Windows proof supervisor (npm.cmd run build).');
   } else {
     try {
-      const { requireProofExecutionBoundary } = await import(new URL('../dist/src/benchmark/restrictedExecution.js', import.meta.url));
-      proofExecutionBoundary = { ...requireProofExecutionBoundary(), nativeQualification: 'REQUIRED' };
+      const { resolveWindowsSupervisor } = await import(new URL('../dist/src/benchmark/windowsExecutionSupervisor.js', import.meta.url));
+      const supervisor = resolveWindowsSupervisor();
+      proofExecutionBoundary = { kind: 'windows-supervisor', sha256: supervisor.sha256, nativeQualification: 'REQUIRED' };
+      try {
+        const { requireWindowsSupervisorQualification } = await import(new URL('../dist/src/benchmark/windowsSupervisorQualification.js', import.meta.url));
+        const externalTo = [repoRoot, ...roots.filter((root) => root.state === 'PASS' && root.label !== 'Chrome executable')
+          .map((root) => resolve(repoRoot, root.configured))].map((root) => realpathSync.native(root));
+        const qualificationSha256 = requireWindowsSupervisorQualification(supervisor, process.env, externalTo);
+        proofExecutionBoundary = { ...proofExecutionBoundary, nativeQualification: 'VERIFIED', qualificationSha256 };
+      } catch (error) {
+        notes.push(`Proof qualification: ${error.message}`);
+      }
     } catch (error) {
       problems.push(`Proof isolation: ${error.message}`);
     }
@@ -257,6 +272,8 @@ const result = {
   gateway: {
     provider: config.gateway.provider,
     requestedModels: enabledModels,
+    approvedModel,
+    exactModelPolicy: exactGatewayPolicy,
     apiKeyReference: typeof apiKeyEnv === 'string' ? `env:${apiKeyEnv}` : null,
     apiKeyPresent,
     secretValueIncluded: false,
@@ -273,7 +290,7 @@ const result = {
     'Qualify the pinned Windows proof supervisor on this host and preserve the native qualification evidence.',
     'Run npm.cmd run release:package -- --out <external-evidence-directory> from the clean local Git tree.',
     'Run the Project Profile Host, Git, Chrome and GPT connection tests against the active profile.',
-    'Confirm requestedModel = effectiveModel = gpt-5.6 and fallbackUsed = false.',
+    `Confirm requestedModel = effectiveModel = ${approvedModel} and fallbackUsed = false.`,
     'Generate closure inventory and authority manifests in the external closure evidence directory.',
     'Only then perform interactive docs ratify and epoch seal P2-authoritative.',
   ],
@@ -297,6 +314,7 @@ else {
   process.stdout.write(`  deferred v10 pack: ${docsCandidateResult?.status ?? 'FAIL'}\n`);
   process.stdout.write(`  exact model: ${enabledModels.join(', ') || 'none'}\n`);
   process.stdout.write(`  ${apiKeyEnv ?? 'OPENAI_API_KEY'} present: ${String(apiKeyPresent)}\n`);
+  if (proofExecutionBoundary !== null) process.stdout.write(`  Windows supervisor qualification: ${proofExecutionBoundary.nativeQualification}\n`);
   for (const blocker of problems) process.stdout.write(`  BLOCKER: ${blocker}\n`);
   if (reportPath !== null) process.stdout.write(`  report: ${reportPath}\n`);
 }

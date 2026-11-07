@@ -109,8 +109,8 @@ Chrome, only when required by the selected proof:
 
 GPT:
   provider = openai
-  requestedModel = gpt-5.6
-  effectiveModel = gpt-5.6
+  requestedModel = gpt-5.6-sol
+  effectiveModel = gpt-5.6-sol
   fallbackUsed = false
   apiKeyPresent = true
   operationallyReady = true

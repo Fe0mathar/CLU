@@ -64,10 +64,11 @@ import {
 import { decide } from '../src/proof/verdict.js';
 import { executeProofPlan } from '../src/experiment/proof/executionCoordinator.js';
 import { captureExactRunInputs } from '../src/control/exactRunInputs.js';
-import { withRuntime, withRuntimeAsync } from '../src/control/runtime.js';
+import { withRuntime, withRuntimeAsync, type Runtime } from '../src/control/runtime.js';
 import { CycleOrchestrator } from '../src/cycle/cycleOrchestrator.js';
 import { prepareBenchmarkRunSubject, recordBenchmarkRun } from '../src/control/benchmarkRun.js';
 import { readGreatBookEntries, readGreatBookFacts } from '../src/greatBook/greatBookProjection.js';
+import type { CycleInputLock, CycleRecord } from '../src/shared/schemas.js';
 
 const POLICY = {
   require_frozen_contract: true,
@@ -670,6 +671,51 @@ function writeArmFixture(withBenchmark: boolean): string {
   }
   return root;
 }
+
+test('proof arm: checks the pinned absolute benchmark outside the project before execution', async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'clue-proof-benchmark-lock-'));
+  t.after(() => rmSync(root, { recursive: true, force: true, maxRetries: 3 }));
+  const projectRoot = join(root, 'project');
+  const benchmarkPath = join(root, 'master-benchmark.md');
+  mkdirSync(projectRoot);
+  writeFileSync(benchmarkPath, 'changed benchmark');
+  const now = '2026-11-07T12:00:00.000Z';
+  const lock: CycleInputLock = {
+    digest: hashText('lock'),
+    grade: 'diagnostic',
+    computed_at: now,
+    target_description: null,
+    master_benchmark: { path: benchmarkPath, sha256: hashText('locked benchmark') },
+    tracked_documents: [{ path: 'CLUE.md', sha256: hashText('constitution') }],
+    catalogue_version: null,
+    policy_files: [],
+    environment_fingerprint: FINGERPRINT,
+    ratification_event_id: null,
+    epoch_name: null,
+    absent: ['target_description'],
+  };
+  const cycle: CycleRecord = {
+    id: 'CYCLE-000001',
+    mission_version: 'MISSION-000001',
+    stage: 'SCREENED',
+    suspended_from: null,
+    grade: lock.grade,
+    lock_digest: lock.digest,
+    opened_at: now,
+    updated_at: now,
+    closed_at: null,
+    criteria_met: null,
+    unmet_count: null,
+  };
+  const runtime = {
+    config: { project: { root: projectRoot } },
+    projections: { db: { prepare: () => ({ get: () => cycle }) } },
+    log: { replay: () => [{ type: 'cycle.inputs_locked', payload: { cycle_id: cycle.id, lock } }] },
+  } as unknown as Runtime;
+  const result = await new CycleOrchestrator(runtime).candidate({ contract: {}, capabilities: [], patch: [] });
+  assert.ok(!result.ok && result.stage === 'instrument');
+  assert.match(result.reasons[0] ?? '', /Master Benchmark on disk .* differs from the one this cycle locked/);
+});
 
 test('proof arm: misuse throws — no cycle, and no locked stick', async () => {
   const root = writeArmFixture(false);

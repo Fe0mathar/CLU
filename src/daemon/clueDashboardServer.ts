@@ -336,7 +336,12 @@ export async function startClueDashboard(
     const startedMs = Date.now();
     const args =
       phase === 'snapshot' ? [cliEntry, 'snapshot'] : [cliEntry, 'recognize', '--navigator'];
-    const spawned = spawn(process.execPath, args, { cwd: runtime.repoRoot });
+    const env = { ...process.env };
+    const gatewayCredential = runtime.config.gateway.api_key_env.toUpperCase();
+    for (const name of Object.keys(env)) {
+      if (name.toUpperCase() === gatewayCredential || name.toUpperCase() === 'OPENAI_API_KEY') delete env[name];
+    }
+    const spawned = spawn(process.execPath, args, { cwd: runtime.repoRoot, env });
     child = spawned;
 
     let timedOut = false;

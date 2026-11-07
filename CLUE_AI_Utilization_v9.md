@@ -1,7 +1,7 @@
 # CLU-E AI Utilization and Reasoning Architecture
 
 **Document status:** permanent normative AI architecture and governance contract  
-**Revision:** 9.1 (pack release 9.0) — revision 2.0 content preserved at the v9 re-baseline; amended 2026-08-14 under ADR-0017 for the operational OpenAI provider boundary, provider-side monetary authority and controlled funding-exhaustion pause.  
+**Revision:** 9.2 (pack release 9.0). Revision 2.0 content was preserved at the v9 re-baseline. ADR-0017 established the operational OpenAI provider boundary. ADR-0020 proposes its successor model identity for Creator ratification.  
 **Language:** English  
 **Document purpose:** Define where artificial intelligence belongs in CLU-E, where it does not belong, and how CLU-E uses approved reasoning models throughout RPI without wasting tokens, weakening evidence quality, or turning model output into an unauditable source of truth.  
 **Normative companions:** `CLUE_Constitution_v9.md`, `CLUE_Architecture_v9.md`, `CLUE_Execution_Model_v9.md`, `CLUE_Canonical_Measurement_Catalogue_v9.md`, and `CLUE_Status_Contract_v9.md`
@@ -2286,10 +2286,14 @@ With this architecture, token efficiency does not weaken CLU-E. It is what allow
 
 ## 27.1 Operational provider and model identity
 
-For the P2 reference installation, OpenAI is the active provider and `gpt-5.6` is the exact
-Creator-selected model identity for enabled routes. The identity is a configuration requirement,
-not a claim that every provider project or key has access. Before submission, the adapter validates
-the exact model against the provider and refuses rather than silently substituting another model.
+For the P2 reference installation, OpenAI is the active provider. ADR-0017 originally recorded
+`gpt-5.6`. Its proposed ADR-0020 successor selects `gpt-5.6-sol` as the exact model identity for
+enabled P2 routes. This revision requires Creator ratification before it governs P2 closure.
+
+The adapter verifies access to the selected ID for the configured provider project and key before
+submission. The provider's effective model must also match the request on completion. A missing
+or different model causes refusal. Project Profiles record their selected model independently and
+the runtime checks that selection against the applicable routing policy.
 
 ## 27.2 Money, usage and remaining allowance
 

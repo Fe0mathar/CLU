@@ -88,6 +88,7 @@ import {
   type OperationalConsoleExchange,
   OperationalConsoleRecorder,
 } from '../../observability/operationalConsole/recorder.js';
+import { openWindowsHostObserver, type WindowsHostObserver } from './windowsHostObserver.js';
 
 /* ------------------------------------------------------------------------- */
 /* Wire protocol                                                              */
@@ -475,7 +476,11 @@ export type HostSpawn = (executable: string, args: readonly string[]) => HostPro
 async function defaultSpawn(executable: string, args: readonly string[]): Promise<HostSpawn> {
   const { spawn } = await import('node:child_process');
   return (exe, spawnArgs) => {
-    const child = spawn(exe, [...spawnArgs], { stdio: ['pipe', 'pipe', 'pipe'] });
+    const env = { ...process.env };
+    for (const name of Object.keys(env)) {
+      if (name.toUpperCase() === 'OPENAI_API_KEY') delete env[name];
+    }
+    const child = spawn(exe, [...spawnArgs], { env, stdio: ['pipe', 'pipe', 'pipe'] });
     let buffer = '';
     const lineListeners: Array<(line: string) => void> = [];
     const exitListeners: Array<(code: number | null) => void> = [];
@@ -495,7 +500,11 @@ async function defaultSpawn(executable: string, args: readonly string[]): Promis
         newlineIndex = buffer.indexOf('\n');
       }
     });
-    child.on('exit', (code) => {
+    // Consume diagnostics without exposing a host script's unrestricted stderr.
+    child.stderr.resume();
+    child.on('error', () => { /* close reports the failed process to the client */ });
+    child.stdin.on('error', () => { /* close also handles a pipe failure when the host exits */ });
+    child.on('close', (code) => {
       for (const listener of exitListeners) {
         listener(code);
       }
@@ -983,6 +992,7 @@ export class HostClient {
   private readonly config: HostClientConfig;
   private readonly env: Readonly<Record<string, string | undefined>>;
   private process: HostProcess | null = null;
+  private observer: WindowsHostObserver | null = null;
   private banner: HostBanner | null = null;
   private readonly pending = new Map<string, Pending>();
   private sequence = 0;
@@ -1065,9 +1075,15 @@ export class HostClient {
     }
     this.process = proc;
     this.crashed = false;
+    if (this.config.spawn === undefined) {
+      this.observer = openWindowsHostObserver();
+      this.observer?.show('PowerShell host launched. Verifying the protocol and root bindings.');
+    }
 
     proc.onLine((line) => this.handleLine(line));
-    proc.onExit((code) => this.handleExit(code));
+    proc.onExit((code) => {
+      if (this.process === proc) this.handleExit(code);
+    });
 
     const helloArgs: HelloArgs = {
       kind: 'host.hello',
@@ -1087,8 +1103,11 @@ export class HostClient {
     this.process = null;
     if (proc !== null) {
       proc.kill();
+      this.observer?.show('Host stop requested.');
     }
     this.failAllPending(new HostClientError('HOST_CRASHED', 'host stopped by client'));
+    this.observer?.finish();
+    this.observer = null;
   }
 
   /* --------------------------- typed commands --------------------------- */
@@ -1296,6 +1315,8 @@ export class HostClient {
     const id = this.config.auditExecutionId?.(command, capability, target) ?? this.nextId(command);
     const timeoutMs = DEFAULT_TIMEOUTS_MS[command];
     const wire = this.encode(id, command, args);
+    const startedAt = Date.now();
+    this.observer?.show(`SEND ${command}`);
     const exchange = this.config.operationalConsole?.beginExchange({
       channel: 'POWERSHELL',
       kind: 'command',
@@ -1314,6 +1335,7 @@ export class HostClient {
     const replyPromise = new Promise<ParsedResponse>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
+        this.observer?.show(`TIMEOUT ${command} after ${timeoutMs} ms`);
         exchange?.fail(new HostClientError('HOST_TIMEOUT', `${command} timed out after ${timeoutMs}ms`));
         reject(new HostClientError('HOST_TIMEOUT', `${command} timed out after ${timeoutMs}ms`));
       }, timeoutMs);
@@ -1323,6 +1345,7 @@ export class HostClient {
     try {
       proc.writeLine(wire);
     } catch (cause) {
+      this.observer?.show(`SEND FAILED ${command}`);
       const entry = this.pending.get(id);
       if (entry !== undefined) {
         clearTimeout(entry.timer);
@@ -1357,6 +1380,7 @@ export class HostClient {
 
     const responseIdentityError = this.checkProjectIdentityParity(response);
     if (responseIdentityError !== null) {
+      this.observer?.show(`REJECTED ${command} · Project Profile identity mismatch`);
       exchange?.summarize({
         title: `Host response rejected · ${command}`,
         what: 'The host response belongs to a different Project Profile generation.',
@@ -1370,6 +1394,7 @@ export class HostClient {
     }
 
     if (!response.ok) {
+      this.observer?.show(`REJECTED ${command} · PowerShell host reported failure`);
       exchange?.summarize({
         title: `Host command rejected · ${command}`,
         what: 'The PowerShell host returned an explicit failure response.',
@@ -1393,6 +1418,7 @@ export class HostClient {
         override?.parityZone,
       );
       if (parityError !== null) {
+        this.observer?.show(`REJECTED ${command} · resolved path zone mismatch`);
         exchange?.summarize({
           title: `Host response rejected · ${command}`,
           what: 'The host reported acting in a zone the client did not authorise.',
@@ -1413,8 +1439,12 @@ export class HostClient {
         validationState: 'schema_validated',
         cinematicCue: 'checkpoint',
       });
+      const exitCode = typeof decoded === 'object' && decoded !== null && 'exitCode' in decoded
+        && typeof decoded.exitCode === 'number' ? ` · process exit ${decoded.exitCode}` : '';
+      this.observer?.show(`RECV ${command} · validated in ${Date.now() - startedAt} ms${exitCode}`);
       return ok(decoded);
     } catch (cause) {
+      this.observer?.show(`REJECTED ${command} · response validation failed`);
       exchange?.summarize({
         title: `Host response invalid · ${command}`,
         what: 'The host replied, but the result did not match the expected schema.',
@@ -1543,7 +1573,10 @@ export class HostClient {
     this.crashed = true;
     this.process = null;
     this.diag('error', `host exited with code ${code === null ? 'null' : String(code)}`);
+    this.observer?.show(`PowerShell host process ended${code === null ? '' : ` · exit ${code}`}.`);
     this.failAllPending(new HostClientError('HOST_CRASHED', `host exited (code ${String(code)})`));
+    this.observer?.finish();
+    this.observer = null;
   }
 
   private failAllPending(error: HostClientError): void {

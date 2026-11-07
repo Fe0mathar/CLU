@@ -35,9 +35,14 @@
 
 import type { Runtime } from '../control/runtime.js';
 import { runRecognition } from '../control/recognitionRun.js';
-import { assertBenchmarkRunSubject, BENCHMARK_EVENT_TYPES, captureBenchmarkExecutableInputs, type PerformedRun } from '../control/benchmarkRun.js';
+import {
+  assertBenchmarkRunSubject,
+  BENCHMARK_EVENT_TYPES,
+  captureBenchmarkExecutableInputs,
+  verifyLockedContract,
+  type PerformedRun,
+} from '../control/benchmarkRun.js';
 import { requireProofExecutionBoundary } from '../benchmark/restrictedExecution.js';
-import { join } from 'node:path';
 import { captureSnapshot, snapshotManifestSchema } from '../analysis/source/snapshot.js';
 import { assertExactRunInputs, captureExactRunInputs } from '../control/exactRunInputs.js';
 import { resolveProjectRecognition } from '../control/projectProfiles/projectRecognition.js';
@@ -344,14 +349,18 @@ export class CycleOrchestrator {
         'The candidate arm needs a locked Master Benchmark stick (§13) — register the benchmark and open a cycle over it.',
       );
     }
+    const config = this.runtime.config;
+    let benchmarkContractPath: string;
     let executionBoundary;
     try {
+      const benchmark = verifyLockedContract(config.project.root, lock.master_benchmark);
+      if ('error' in benchmark) return { ok: false, stage: 'instrument', reasons: [benchmark.error] };
+      benchmarkContractPath = benchmark.path;
       executionBoundary = requireProofExecutionBoundary();
     } catch (error) {
       return { ok: false, stage: 'instrument', reasons: [(error as Error).message] };
     }
     const log = this.log;
-    const config = this.runtime.config;
     const screenedRef = this.evidenceRefsOf(cycle.id)['SCREENED'];
     const screened = screenedRef === undefined || screenedRef === null
       ? null
@@ -553,7 +562,7 @@ export class CycleOrchestrator {
         install_on_lockfile_change: config.shadow.install_on_lockfile_change,
       },
       scripts: { typecheck, build },
-      benchmarkContractPath: join(config.project.root, ...lock.master_benchmark.path.split('/')),
+      benchmarkContractPath,
       repoRoot: this.runtime.repoRoot,
     });
     if (execution.ok) {

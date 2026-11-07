@@ -1,6 +1,6 @@
-# CLU-E OpenAI routing — Creator decision P2-D4-OPENAI-GPT-5.6
+# CLU-E OpenAI routing — P2-D4-OPENAI-GPT-5.6-SOL (ADR-0020)
 #
-# Every P2 route uses one exact model identity. The adapter validates `gpt-5.6` against
+# Every P2 route uses one exact model identity. The adapter validates `gpt-5.6-sol` against
 # OpenAI /v1/models before execution and refuses rather than silently falling back.
 # No local price table is authoritative; exact token usage is recorded while OpenAI Platform remains the sole monetary authority.
 
@@ -26,95 +26,95 @@ routes:
     enabled: true
     lane: extraction
     mode: interactive
-    model: "gpt-5.6"
+    model: "gpt-5.6-sol"
     max_output_tokens: 4096
     pricing: null
-    note: "Creator-approved exact model; provider availability is validated before execution."
+    note: "Exact D4 model; provider availability is validated before execution."
   UNIT_SUMMARIZE:
     enabled: true
     lane: extraction
     mode: interactive
-    model: "gpt-5.6"
+    model: "gpt-5.6-sol"
     max_output_tokens: 4096
     pricing: null
-    note: "Creator-approved exact model; provider availability is validated before execution."
+    note: "Exact D4 model; provider availability is validated before execution."
   SOURCE_PARSE_FOLLOWUP:
     enabled: true
     lane: analysis
     mode: interactive
-    model: "gpt-5.6"
+    model: "gpt-5.6-sol"
     max_output_tokens: 8192
     pricing: null
-    note: "Creator-approved exact model; provider availability is validated before execution."
+    note: "Exact D4 model; provider availability is validated before execution."
   EDGE_RESOLVE:
     enabled: true
     lane: analysis
     mode: interactive
-    model: "gpt-5.6"
+    model: "gpt-5.6-sol"
     max_output_tokens: 8192
     pricing: null
-    note: "Creator-approved exact model; provider availability is validated before execution."
+    note: "Exact D4 model; provider availability is validated before execution."
   METRIC_ANALYZE:
     enabled: true
     lane: analysis
     mode: interactive
-    model: "gpt-5.6"
+    model: "gpt-5.6-sol"
     max_output_tokens: 8192
     pricing: null
-    note: "Creator-approved exact model; provider availability is validated before execution."
+    note: "Exact D4 model; provider availability is validated before execution."
   CANDIDATE_REVIEW:
     enabled: true
     lane: analysis
     mode: interactive
-    model: "gpt-5.6"
+    model: "gpt-5.6-sol"
     max_output_tokens: 8192
     pricing: null
-    note: "Creator-approved exact model; provider availability is validated before execution."
+    note: "Exact D4 model; provider availability is validated before execution."
   PROOF_CONTRACT_DESIGN:
     enabled: true
     lane: patch_design
     mode: interactive
-    model: "gpt-5.6"
+    model: "gpt-5.6-sol"
     max_output_tokens: 16384
     pricing: null
-    note: "Creator-approved exact model; provider availability is validated before execution."
+    note: "Exact D4 model; provider availability is validated before execution."
   PATCH_DESIGN:
     enabled: true
     lane: patch_design
     mode: interactive
-    model: "gpt-5.6"
+    model: "gpt-5.6-sol"
     max_output_tokens: 32768
     pricing: null
-    note: "Creator-approved exact model; provider availability is validated before execution."
+    note: "Exact D4 model; provider availability is validated before execution."
   PATCH_REVIEW:
     enabled: true
     lane: refutation
     mode: interactive
-    model: "gpt-5.6"
+    model: "gpt-5.6-sol"
     max_output_tokens: 16384
     pricing: null
-    note: "Creator-approved exact model; provider availability is validated before execution."
+    note: "Exact D4 model; provider availability is validated before execution."
   REFUTATION:
     enabled: true
     lane: refutation
     mode: interactive
-    model: "gpt-5.6"
+    model: "gpt-5.6-sol"
     max_output_tokens: 16384
     pricing: null
-    note: "Creator-approved exact model; provider availability is validated before execution."
+    note: "Exact D4 model; provider availability is validated before execution."
   EXPERIMENT_ANALYSIS:
     enabled: true
     lane: synthesis
     mode: interactive
-    model: "gpt-5.6"
+    model: "gpt-5.6-sol"
     max_output_tokens: 16384
     pricing: null
-    note: "Creator-approved exact model; provider availability is validated before execution."
+    note: "Exact D4 model; provider availability is validated before execution."
   GLOBAL_SYNTHESIS:
     enabled: true
     lane: synthesis
     mode: interactive
-    model: "gpt-5.6"
+    model: "gpt-5.6-sol"
     max_output_tokens: 32768
     pricing: null
-    note: "Creator-approved exact model; provider availability is validated before execution."
+    note: "Exact D4 model; provider availability is validated before execution."

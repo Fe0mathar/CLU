@@ -1,6 +1,7 @@
 # P2 closure policy — mission-bound Creator decisions only.
 #
-# P2-D4: real OpenAI GPT-5.6 activation. OpenAI Platform/project/key controls spending.
+# P2-D4 successor proposal (ADR-0020). Creator pack ratification is a separate recorded act.
+# OpenAI Platform/project/key controls spending.
 # CLU-E records token/cost observations and enters controlled provider-budget pause only after
 # an explicit provider billing/funding refusal. Local monetary caps are not authority.
 #
@@ -12,11 +13,11 @@ phase: P2
 
 gateway:
   decision: OPERATIONAL
-  decision_id: P2-D4-OPENAI-GPT-5.6
-  recorded_at: "2026-08-14"
+  decision_id: P2-D4-OPENAI-GPT-5.6-SOL
+  recorded_at: "2026-11-07"
   recorded_by: creator
-  reason: "OpenAI GPT-5.6 is the approved production gateway; OpenAI Platform owns budget enforcement and an explicit provider billing/funding refusal causes a controlled CLU-E cycle pause."
-  model: "gpt-5.6"
+  reason: "ADR-0020 proposes the exact gpt-5.6-sol provider ID for the installed P2 configuration. OpenAI Platform owns budget enforcement and an explicit provider billing/funding refusal causes a controlled CLU-E cycle pause. Creator approval is recorded by the separate pack ratification."
+  model: "gpt-5.6-sol"
   budget_authority: OPENAI_PLATFORM
   local_budget_enforced: false
   provider_exhaustion_action: CONTROLLED_PAUSE

@@ -79,6 +79,7 @@ const DOCUMENTATION_PACKS = {
 
 const REQUIRED_OPERATOR_PATHS = [
   'CLUE-Dashboard.bat',
+  'CLUE-Windows-Setup.bat',
   'CONFIG-EDIT.md',
   'MANIFEST.txt',
   'clue-status.md',

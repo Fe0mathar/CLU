@@ -14,7 +14,7 @@
   "publicationState": "NO_REMOTE_YET",
   "localOnly": true,
   "provider": "openai",
-  "requestedModel": "gpt-5.6",
+  "requestedModel": "gpt-5.6-sol",
   "effectiveModel": "<verified live value>",
   "credentialReference": "env:OPENAI_API_KEY",
   "apiKeyPresent": false,

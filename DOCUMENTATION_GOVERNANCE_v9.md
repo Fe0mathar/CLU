@@ -2,7 +2,7 @@
 ## Authority Order, Single-Owner Rules, Terminology, Versioning, and Change Control
 
 **Document status:** permanent normative documentation-governance contract  
-**Revision:** 9.2 (pack release 9.0) — revision 8.0 content preserved at the v9 re-baseline; §17 records executable-alignment ADRs through ADR-0016 and §18 records the final ADR-0017 Creator decisions that require a fresh seal, ratification and evidence epoch.  
+**Revision:** 9.3 (pack release 9.0). Sections 17 and 18 record the 2026-08 executable-alignment amendments. Section 19 records the proposed ADR-0020 successor model and the required ratification and evidence epoch.  
 **Language:** English  
 **Applies to:** the CLU-E permanent project knowledge base and every future coordinated documentation release  
 **Does not contain:** executable-program backlog, current implementation maturity, sprint status, or transient audit findings
@@ -392,6 +392,9 @@ installation.
 
 # 18. 2026-08-14 ADR-0017 ratification amendment
 
+This section records the original ADR-0017 decision. Section 19 describes the proposed successor
+to its model identity.
+
 Before the final P2 evidence epoch, the permanent authority set is amended to record the Creator's
 operational D4 decision and manual local-first Git boundary:
 
@@ -409,3 +412,17 @@ These amended bytes require a new manifest/seal, interactive Creator ratificatio
 `P2-authoritative` epoch before any final cycle evidence can satisfy closure. ADR-0017 supersedes
 ADR-0016's former `PENDING_CREATOR_DECISION` D4 state without changing ADR-0016's self-target proof
 and read-only closure-control decisions.
+
+---
+
+# 19. 2026-11-07 ADR-0020 proposed P2 model identity amendment
+
+ADR-0020 proposes the exact OpenAI API model `gpt-5.6-sol` for legacy P2. The AI Utilization contract
+owns the model identity. The proposal preserves the ADR-0017 provider-budget authority, controlled
+pause, token reporting, and manual Git decisions.
+
+The candidate pack remains at release 9.0 with revised document entries and a fresh v9 seal. The
+operator verifies the model using the intended provider key and retains that evidence separately.
+The Creator ratifies the exact installed pack and then seals a current `P2-authoritative` epoch
+before running the formal proof cycle. Previous authority records and evidence retain their
+original mission and seal identity. The deferred v10 pack retains its separately sealed state.

@@ -1,6 +1,6 @@
 # CLU-E P2 Closure Runbook
 
-**Runbook version:** 1.2  
+**Runbook version:** 1.3  
 **Prepared:** 2026-08-14  
 **Purpose:** convert the engineering-complete and Creator-configured P2 tree into one formally
 closed, evidence-backed state without allowing configuration, UI or scripts to invent a verdict.
@@ -27,13 +27,13 @@ Restart the dashboard/terminal process after setting it.
 
 CLU-E does not configure or enforce the monetary budget. OpenAI Platform remains the sole budget
 and credit authority. Local zero caps are compatibility fields, not a disabled gateway. The exact
-route model is `gpt-5.6`; the adapter checks that identity before use and refuses fallback.
+route model is `gpt-5.6-sol`. The adapter checks that identity before use and refuses fallback.
 
 Run the final browser probe. Before governance/evidence ceremony, a healthy state is:
 
 ```text
 integrationPass: true
-model: gpt-5.6
+model: gpt-5.6-sol
 budgetAuthority: openai_platform
 localBudgetEnforced: false
 providerPaused: false

@@ -11,8 +11,15 @@ import { join } from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 
 import { loadMeasurementCatalogue } from '../analysis/measure/catalogue.js';
+import type { GatewayFetch } from '../ai/gateway/openaiAdapter.js';
+import {
+  OPENAI_OFFICIAL_API_BASE,
+  listOpenAiModels,
+  type OpenAiModelCatalogueState,
+} from '../ai/gateway/openaiModelCatalogue.js';
 import { GATEWAY_TASK_TYPES, loadGatewayPolicies } from '../ai/gateway/policy.js';
-import type { Runtime } from '../control/runtime.js';
+import { loadLegacyConfig, type Runtime } from '../control/runtime.js';
+import { resolveProjectGatewayCredential } from '../control/projectProfiles/gatewayReadiness.js';
 import {
   assessAuthorityConflicts,
   assessProjectReadiness,
@@ -48,7 +55,7 @@ import {
   listGitHubProfileRepositories,
   verifyGitHubProfileRepository,
 } from '../integration/git/githubProfileConnection.js';
-import { assertNoSecretMaterial, redactSecretText } from '../shared/secretSafety.js';
+import { assertNoSecretMaterial, isCredentialReference, redactSecretText } from '../shared/secretSafety.js';
 import {
   projectIdSchema,
   projectProfileSchema,
@@ -90,6 +97,7 @@ export interface ProjectProfilesApiOptions {
     actor: Actor,
   ) => Promise<unknown> | unknown;
   readonly hostProbe?: (binding: ProjectHostLaunchBinding) => Promise<HostBanner>;
+  readonly openAiModelsFetch?: GatewayFetch;
   /** Interactive Windows account and key operations are for the loopback dashboard. */
   readonly allowHostConnections?: boolean;
   readonly now?: () => string;
@@ -112,6 +120,15 @@ type ConnectionCache = {
   browser?: ProjectBrowserReadiness;
   gateway?: ProjectGatewayReadiness;
 };
+
+interface ProjectGptModelCatalogue {
+  readonly projectId: string;
+  readonly generation: number;
+  readonly projectProfileHash: string;
+  readonly state: OpenAiModelCatalogueState | 'DISABLED' | 'POLICY_MISMATCH' |
+    'CREDENTIAL_MISSING' | 'CREDENTIAL_STORE_UNAVAILABLE';
+  readonly models: readonly string[];
+}
 
 export function validateProjectProfileRecord(
   record: ProjectProfileRecord,
@@ -181,6 +198,7 @@ export class ProjectProfilesApiService {
   private readonly actor: Actor;
   private readonly activateProject: ProjectProfilesApiOptions['activateProject'];
   private readonly hostProbe: (binding: ProjectHostLaunchBinding) => Promise<HostBanner>;
+  private readonly openAiModelsFetch: GatewayFetch | undefined;
   private readonly now: () => string;
   private readonly allowHostConnections: boolean;
   private readonly connections = new Map<string, ConnectionCache>();
@@ -192,6 +210,7 @@ export class ProjectProfilesApiService {
     this.actor = options.actor ?? 'daemon';
     this.activateProject = options.activateProject;
     this.hostProbe = options.hostProbe ?? ((binding) => defaultHostProbe(binding, this.runtime));
+    this.openAiModelsFetch = options.openAiModelsFetch;
     this.now = options.now ?? (() => new Date().toISOString());
     this.allowHostConnections = options.allowHostConnections === true;
   }
@@ -560,16 +579,69 @@ export class ProjectProfilesApiService {
 
   public async testGpt(projectId: string): Promise<ProjectGatewayReadiness> {
     const record = this.requireRecord(projectId);
-    const policies = loadGatewayPolicies(this.runtime.repoRoot, this.runtime.config);
-    const result = await testProjectGatewayReadiness(record, this.runtime.config, policies, {
-      globalCredentialReference: `env:${this.runtime.config.gateway.api_key_env}`,
-      resolveCredentialReference: async (reference) =>
-        reference === windowsOpenAiCredentialReference(record.profile.projectId)
-          ? readWindowsOpenAiCredential(reference) : null,
+    const config = this.gatewayInstallationConfig();
+    const policies = loadGatewayPolicies(this.runtime.repoRoot, config);
+    const result = await testProjectGatewayReadiness(record, config, policies, {
+      ...this.gatewayCredentialOptions(record.profile.projectId, config.gateway.api_key_env),
       checkedAt: this.now(),
     });
     this.remember(record, { gateway: result });
     return result;
+  }
+
+  public async listGptModels(
+    projectId: string,
+    expectedGeneration: number,
+    expectedProfileHash: string,
+  ): Promise<ProjectGptModelCatalogue> {
+    this.requireHostConnections();
+    this.requireNoCredentialPrompt(projectId);
+    const record = this.requireRecord(projectId);
+    assertRecordPrecondition(record, expectedGeneration, expectedProfileHash);
+    const base = { projectId: record.profile.projectId, generation: record.generation, projectProfileHash: record.projectProfileHash };
+    const unavailable = (state: ProjectGptModelCatalogue['state']): ProjectGptModelCatalogue => ({ ...base, state, models: [] });
+    const gpt = record.profile.integrations.gpt;
+    if (!gpt.enabled) return unavailable('DISABLED');
+
+    let config: Runtime['config'];
+    try {
+      config = this.gatewayInstallationConfig();
+      if (!config.gateway.enabled) return unavailable('DISABLED');
+      const { routing } = loadGatewayPolicies(this.runtime.repoRoot, config);
+      if (routing.api.base_url.replace(/\/+$/u, '') !== OPENAI_OFFICIAL_API_BASE) {
+        return unavailable('POLICY_MISMATCH');
+      }
+    } catch {
+      return unavailable('POLICY_MISMATCH');
+    }
+
+    const options = this.gatewayCredentialOptions(record.profile.projectId, config.gateway.api_key_env);
+    const reference = gpt.credential.source === 'project-override' ? gpt.credential.value : options.globalCredentialReference;
+    if (reference === null || !isCredentialReference(reference)) return unavailable('CREDENTIAL_MISSING');
+    const credential = await resolveProjectGatewayCredential(reference, options).catch(() => null);
+    this.requireNoCredentialPrompt(projectId);
+    assertRecordPrecondition(this.requireRecord(projectId), expectedGeneration, expectedProfileHash);
+    if (credential === null || credential.trim().length < 8) {
+      return unavailable(reference.startsWith('credential-store:') ? 'CREDENTIAL_STORE_UNAVAILABLE' : 'CREDENTIAL_MISSING');
+    }
+
+    const catalogue = await listOpenAiModels(credential, this.openAiModelsFetch);
+    this.requireNoCredentialPrompt(projectId);
+    assertRecordPrecondition(this.requireRecord(projectId), expectedGeneration, expectedProfileHash);
+    return { ...base, ...catalogue };
+  }
+
+  private gatewayInstallationConfig(): Runtime['config'] {
+    // A saved sibling must inherit the installation default, not the active profile's key.
+    return this.runtime.profileMode === 'project-profile' ? loadLegacyConfig(this.runtime.repoRoot) : this.runtime.config;
+  }
+
+  private gatewayCredentialOptions(projectId: string, apiKeyEnvironment: string) {
+    return {
+      globalCredentialReference: `env:${apiKeyEnvironment}`,
+      resolveCredentialReference: async (reference: string) =>
+        reference === windowsOpenAiCredentialReference(projectId) ? readWindowsOpenAiCredential(reference) : null,
+    };
   }
 
   private metricCatalogueState(): { readonly valid: boolean; readonly detail: string } {
@@ -713,6 +785,17 @@ export async function handleProjectProfilesApiRequest(
     }
     if (request.method === 'POST' && action === 'test-gpt') {
       return reply(response, 200, await service.testGpt(projectId));
+    }
+    if (parts.length === 5 && request.method === 'GET' && action === 'gpt' && parts[4] === 'models') {
+      const generation = url.searchParams.get('expectedGeneration') ?? '';
+      const profileHash = url.searchParams.get('expectedProfileHash') ?? '';
+      if (!/^[1-9]\d*$/u.test(generation) || !Number.isSafeInteger(Number(generation))) {
+        throw new ProjectProfilesApiError('EXPECTED_GENERATION_REQUIRED', 'expectedGeneration must be a positive integer.');
+      }
+      if (!/^profile:v1:[0-9a-f]{64}$/u.test(profileHash)) {
+        throw new ProjectProfilesApiError('PROFILE_HASH_REQUIRED', 'expectedProfileHash must be a saved Project Profile hash.');
+      }
+      return reply(response, 200, await service.listGptModels(projectId, Number(generation), profileHash));
     }
     if (parts.length === 4 && request.method === 'POST' && action === 'github-sign-in') {
       return reply(response, 200, await service.signInGitHub(projectId));

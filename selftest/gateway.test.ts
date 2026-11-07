@@ -7,6 +7,7 @@
  */
 
 import {
+  appendFileSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -33,6 +34,7 @@ import {
   gatewayRoutingPolicySchema,
   GATEWAY_TASK_TYPES,
   assessGatewayPolicy,
+  bindProjectGatewayModel,
   loadGatewayPolicies,
   priceForUsage,
   type GatewayRoutingPolicy,
@@ -52,12 +54,15 @@ import {
 import { authorityFor } from '../src/cli/commandAuthority.js';
 import { buildProgram } from '../src/cli/index.js';
 import { loadConfig, withRuntime } from '../src/control/runtime.js';
+import { ProjectProfileRegistry } from '../src/control/projectProfiles/profileRegistry.js';
+import { windowsOpenAiCredentialReference } from '../src/control/projectProfiles/windowsOpenAiCredential.js';
 import { EventLog, type AppendEventInput } from '../src/memory/eventLog.js';
 import { CycleRegistry } from '../src/cycle/cycleRegistry.js';
 import { CycleOrchestrator } from '../src/cycle/cycleOrchestrator.js';
 import { ProjectionStore } from '../src/memory/db.js';
 import { isBranchUnavailable } from '../src/status/statusContractV5.js';
 import { projectStatusFromRuntime } from '../src/status/statusFromRuntime.js';
+import { cloneProfile, makeProjectProfileFixture } from './project-profile-fixture.js';
 
 const SECRET = `sk-test-${'x'.repeat(32)}`;
 const AT = '2026-08-13T20:00:00.000Z';
@@ -326,6 +331,105 @@ function request(): GatewayRequest {
   };
 }
 
+test('profile gateway invokes the saved exact model and credential with the existing task policy', async (t) => {
+  const root = writeGatewayFixture({ enabled: true, providerAuthority: true, validateModel: true });
+  t.after(() => rmSync(root, { recursive: true, force: true, maxRetries: 3 }));
+  const fixture = makeProjectProfileFixture(join(root, 'profile'), { targetRoot: join(root, 'profile', 'alpha') });
+  const model = 'gpt-5-mini';
+  const reference = windowsOpenAiCredentialReference(fixture.profile.projectId);
+  const record = new ProjectProfileRegistry(fixture.profiles).create(cloneProfile(fixture.profile, (draft) => {
+    const integrations = draft['integrations'] as Record<string, unknown>;
+    const gpt = integrations['gpt'] as Record<string, unknown>;
+    gpt['modelId'] = model;
+    gpt['credential'] = { source: 'project-override', defaultKey: 'gateway.credential', value: reference };
+  }), { actor: 'creator' });
+  const runtimeOptions = { repoRoot: root, projectProfile: record };
+  withRuntime({ ...runtimeOptions, withLog: true, workspaceIdentityOnMissing: 'initialize-new' }, (runtime) => {
+    assert.ok(runtime.mission !== null);
+    runtime.mission.bootstrap();
+  });
+
+  const installation = loadGatewayPolicies(root, loadConfig(root));
+  const bound = bindProjectGatewayModel(installation, model);
+  assert.notEqual(bound.routingHash, installation.routingHash);
+  assert.notEqual(bound.routingHash, bindProjectGatewayModel(installation, 'gpt-5').routingHash);
+  assert.equal(installation.routing.routes.DOC_EXTRACT.model, 'fixture-model');
+  assert.deepEqual(bound.routing.routes.UNIT_SUMMARIZE, installation.routing.routes.UNIT_SUMMARIZE);
+  assert.deepEqual(bound.routing.routes.DOC_EXTRACT, {
+    ...installation.routing.routes.DOC_EXTRACT, model, pricing: null,
+  });
+
+  const options = {
+    ...runtimeOptions,
+    environment: { OPENAI_API_KEY: 'different-installation-key' },
+    credentialResolver: { resolve: (received: string) => {
+      assert.equal(received, reference);
+      return SECRET;
+    } },
+  };
+  let requests = 0;
+  const result = await invokeGateway(request(), {
+    ...options,
+    fetchImpl: async (url, init) => {
+      requests += 1;
+      assert.equal(new Headers(init?.headers).get('authorization'), `Bearer ${SECRET}`);
+      if (requests === 1) {
+        assert.equal(init?.method, 'GET');
+        assert.equal(String(url), `https://api.openai.com/v1/models/${model}`);
+        return responseJson({ id: model });
+      }
+      assert.equal(init?.method, 'POST');
+      assert.equal(String(url), 'https://api.openai.com/v1/responses');
+      const payload = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      assert.equal(payload['model'], model);
+      assert.equal(payload['max_output_tokens'], request().max_output_tokens);
+      return responseJson(completedProviderBody(model));
+    },
+  });
+  assert.equal(requests, 2);
+  if (result.state !== 'completed') assert.fail(JSON.stringify(result));
+  assert.equal(result.record.model, model);
+  assert.equal(result.record.lane, 'extraction');
+  assert.equal(result.record.profileGeneration, record.generation);
+  assert.equal(result.record.pricing.inputUsdPerMillion, 0);
+  withRuntime({ ...runtimeOptions, readOnly: true, withLog: false }, (runtime) => {
+    const status = readGatewayStatus(runtime, AT, options.environment, options.credentialResolver);
+    assert.equal(status.operationallyReady, true);
+    assert.equal(status.requestedModel, model);
+    assert.equal(status.effectiveModel, model);
+    assert.equal(status.routingHash, bound.routingHash);
+    assert.equal(status.credentialReference, reference);
+    assert.equal(JSON.stringify(status).includes(SECRET), false);
+  });
+
+  const disabled = await invokeGateway({ ...request(), task_type: 'UNIT_SUMMARIZE' }, {
+    ...options,
+    fetchImpl: async () => assert.fail('profile model must not enable disabled tasks'),
+  });
+  assert.equal(disabled.state, 'refused');
+  if (disabled.state === 'refused') assert.equal(disabled.code, 'ROUTE_DISABLED');
+
+  const substitution = await invokeGateway(request(), {
+    ...options,
+    fetchImpl: async (_url, init) => init?.method === 'GET'
+      ? responseJson({ id: model })
+      : responseJson(completedProviderBody('fixture-model')),
+  });
+  assert.equal(substitution.state, 'failed');
+  if (substitution.state === 'failed') assert.equal(substitution.code, 'PROVIDER_MODEL_ID_MISMATCH');
+
+  const changedPolicy = await invokeGateway(request(), {
+    ...options,
+    fetchImpl: async (_url, init) => {
+      if (init?.method === 'GET') return responseJson({ id: model });
+      appendFileSync(installation.routingPath, '\n# Routing authority changed during request\n');
+      return responseJson(completedProviderBody(model));
+    },
+  });
+  assert.equal(changedPolicy.state, 'failed');
+  if (changedPolicy.state === 'failed') assert.equal(changedPolicy.code, 'GATEWAY_POLICY_DRIFT');
+});
+
 function gatewayStack(): {
   readonly root: string;
   readonly log: EventLog;
@@ -366,14 +470,14 @@ test('DEV-P2-09: shipped policies are complete, content-addressed and fail-close
   assert.equal(assessment.spendAuthority, 'openai_platform');
   assert.equal(assessment.localBudgetEnforced, false);
   assert.equal(assessment.localPricingAuthoritative, false);
-  assert.equal(assessment.preferredModel, 'gpt-5.6');
+  assert.equal(assessment.preferredModel, 'gpt-5.6-sol');
   assert.equal(policies.routing.validate_model_before_use, true);
   assert.equal(config.gateway.default_mode, 'interactive');
   assert.equal(policies.budget.caps.daily_hard, 0);
   assert.equal(policies.budget.caps.monthly_hard, 0);
   assert.deepEqual(Object.keys(policies.routing.routes).sort(), [...GATEWAY_TASK_TYPES].sort());
   assert.ok(Object.values(policies.routing.routes).every((route) =>
-    route.enabled && route.model === 'gpt-5.6' && route.pricing === null,
+    route.enabled && route.model === 'gpt-5.6-sol' && route.pricing === null,
   ));
   assert.match(policies.budgetHash, /^[0-9a-f]{64}$/u);
   assert.match(policies.routingHash, /^[0-9a-f]{64}$/u);

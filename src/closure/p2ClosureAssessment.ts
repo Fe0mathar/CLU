@@ -19,6 +19,7 @@ import { EventLog } from '../memory/eventLog.js';
 import { hashBytes } from '../shared/ids.js';
 import {
   P2_CLOSURE_POLICY_PATH as CLOSURE_POLICY_PATH,
+  P2_OPENAI_MODEL,
   readP2ClosurePolicy,
   type P2ClosurePolicy as ClosurePolicy,
 } from '../control/p2ClosurePolicy.js';
@@ -179,7 +180,7 @@ export function decideP2Closure(
     }
   } else {
     const creatorPolicyCoherent =
-      policy.gateway.model === 'gpt-5.6' &&
+      policy.gateway.model === P2_OPENAI_MODEL &&
       policy.gateway.budget_authority === 'OPENAI_PLATFORM' &&
       policy.gateway.local_budget_enforced === false &&
       policy.gateway.provider_exhaustion_action === 'CONTROLLED_PAUSE' &&
@@ -189,7 +190,7 @@ export function decideP2Closure(
         'P2-D4-CREATOR-POLICY-CONTRADICTION',
         'creator-decision',
         'The OPERATIONAL decision does not encode the complete Creator-approved OpenAI authority boundary.',
-        'Record exact model gpt-5.6, OPENAI_PLATFORM budget authority, no local budget enforcement, CONTROLLED_PAUSE and PROVIDER_ONLY token-balance authority.',
+        `Record exact model ${P2_OPENAI_MODEL}, OPENAI_PLATFORM budget authority, no local budget enforcement, CONTROLLED_PAUSE and PROVIDER_ONLY token-balance authority.`,
       ));
     }
     const operational =
@@ -205,7 +206,7 @@ export function decideP2Closure(
       blockers.push(blocker(
         'P2-D4-OPERATIONAL-CONTRADICTION',
         'creator-decision',
-        'The policy records OPERATIONAL but the approved OpenAI GPT-5.6 gateway is not ready.',
+        `The policy records OPERATIONAL but the approved OpenAI ${P2_OPENAI_MODEL} gateway is not ready.`,
         'Set OPENAI_API_KEY, keep OpenAI Platform as budget authority, enable the approved routes, and clear any explicit provider-budget pause with `clue gateway resume`.',
       ));
     }

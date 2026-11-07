@@ -86,10 +86,10 @@ test('P2-CLOSURE-03: the shipped policy remains an explicit Creator decision, no
     parseYaml(readFileSync('config/policies/p2-closure.yaml', 'utf8')),
   );
   assert.equal(parsed.gateway.decision, 'OPERATIONAL');
-  assert.equal(parsed.gateway.decision_id, 'P2-D4-OPENAI-GPT-5.6');
-  assert.equal(parsed.gateway.recorded_at, '2026-08-14');
+  assert.equal(parsed.gateway.decision_id, 'P2-D4-OPENAI-GPT-5.6-SOL');
+  assert.equal(parsed.gateway.recorded_at, '2026-11-07');
   assert.equal(parsed.gateway.recorded_by, 'creator');
-  assert.equal(parsed.gateway.model, 'gpt-5.6');
+  assert.equal(parsed.gateway.model, 'gpt-5.6-sol');
   assert.equal(parsed.gateway.budget_authority, 'OPENAI_PLATFORM');
   assert.equal(parsed.gateway.local_budget_enforced, false);
   assert.equal(parsed.gateway.provider_exhaustion_action, 'CONTROLLED_PAUSE');
@@ -185,7 +185,7 @@ test('P2-CLOSURE-03: a real operational decision must have a live operational ga
       recorded_at: '2026-08-14',
       recorded_by: 'creator',
       reason: 'The Creator approved exact model and external OpenAI billing authority.',
-      model: 'gpt-5.6',
+      model: 'gpt-5.6-sol',
       budget_authority: 'OPENAI_PLATFORM',
       local_budget_enforced: false,
       provider_exhaustion_action: 'CONTROLLED_PAUSE',
@@ -204,12 +204,18 @@ test('P2-CLOSURE-03: a real operational decision must have a live operational ga
       gatewayEnabledRouteCount: 12,
       gatewayBudgetAuthority: 'openai_platform',
       gatewayLocalBudgetEnforced: false,
-      gatewayModel: 'gpt-5.6',
+      gatewayModel: 'gpt-5.6-sol',
       gatewayProviderPaused: false,
     }),
   );
   assert.equal(accepted.state, 'CLOSED');
   assert.equal(accepted.closed, true);
+  const olderDecision = p2ClosurePolicySchema.parse({
+    ...operational,
+    gateway: { ...operational.gateway, model: 'gpt-5.6' },
+  });
+  const superseded = decideP2Closure(olderDecision, withFacts({ gatewayModel: 'gpt-5.6' }));
+  assert.ok(superseded.blockers.some((item) => item.id === 'P2-D4-CREATOR-POLICY-CONTRADICTION'));
 });
 
 

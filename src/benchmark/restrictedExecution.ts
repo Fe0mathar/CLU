@@ -2,20 +2,23 @@
 import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, delimiter, dirname, isAbsolute, join, relative, sep } from 'node:path';
+import { performance } from 'node:perf_hooks';
 
 import type { ExecFn } from './benchmarkRunner.js';
 import { linuxContainmentInvocation, runBoundedProcess } from './containedProcess.js';
 import { resolveWindowsSupervisor, type WindowsExecutionSupervisorRequest } from './windowsExecutionSupervisor.js';
+import { requireWindowsSupervisorQualification } from './windowsSupervisorQualification.js';
 import { hashBytes, type Sha256 } from '../shared/ids.js';
 
-export interface ExecutionBoundary {
-  readonly kind: 'linux-bwrap' | 'windows-supervisor';
-  readonly sha256: Sha256;
-}
+export type ExecutionBoundary =
+  | { readonly kind: 'linux-bwrap'; readonly sha256: Sha256 }
+  | { readonly kind: 'windows-supervisor'; readonly sha256: Sha256; readonly qualificationSha256: Sha256 };
 
 export function requireProofExecutionBoundary(): ExecutionBoundary {
   if (process.platform === 'win32') {
-    return { kind: 'windows-supervisor', sha256: resolveWindowsSupervisor().sha256 };
+    const supervisor = resolveWindowsSupervisor();
+    const qualificationSha256 = requireWindowsSupervisorQualification(supervisor);
+    return { kind: 'windows-supervisor', sha256: supervisor.sha256, qualificationSha256 };
   }
   if (process.platform !== 'linux' || !existsSync('/usr/bin/bwrap')) {
     throw new Error('Proof execution requires /usr/bin/bwrap on Linux or an operator-qualified Windows supervisor.');
@@ -50,6 +53,12 @@ function npmCli(nodePath: string): string {
   throw new Error('Proof execution requires an installed npm CLI. Launch CLU-E using npm or install npm beside Node.');
 }
 
+function writeProofProgress(message: string): void {
+  // Keep observation out of the proof pipe and drop updates if the console is backlogged.
+  if (!process.stderr.writable || process.stderr.writableNeedDrain) return;
+  console.error(message);
+}
+
 interface Scope {
   readonly repoRoot: string;
   readonly projectRoot: string;
@@ -73,6 +82,8 @@ export function createRestrictedExecution(scope: Scope): { exec: ExecFn; dispose
   if (scope.mode === 'baseline') readOnly.add(cwd);
   const writable = [workspaceRoot, ...(scope.mode === 'candidate' ? [cwd] : [])];
   const windows = process.platform === 'win32';
+  const showProgress = windows && process.env['CLU_PROOF_VISIBLE'] === '1' && process.stderr.isTTY;
+  let visibleCommandCount = 0;
   const systemRoot = windows ? directory(process.env['SystemRoot'] ?? 'C:\\Windows') : null;
   const toolDirs = [nodeBin];
   if (systemRoot !== null) {
@@ -169,6 +180,7 @@ export function createRestrictedExecution(scope: Scope): { exec: ExecFn; dispose
     }
 
     let args: readonly string[];
+    let operation = 'Node workload';
     if (program === 'node' || program === process.execPath || program === node) {
       args = requested;
     } else if (program === 'npm') {
@@ -178,6 +190,7 @@ export function createRestrictedExecution(scope: Scope): { exec: ExecFn; dispose
         // selection on both sides without granting a benchmark write access to source.
         if (!existsSync(join(cwd, 'dist', 'selftest'))) throw new Error('Build CLU-E before benchmarking.');
         args = ['--test', '--test-reporter=tap', '--test-concurrency=1', 'dist/selftest/**/*.test.js'];
+        operation = 'npm run selftest';
       } else {
         if (scope.mode !== 'candidate' || !['ci', 'run typecheck', 'run build'].includes(command) ||
             requested.some((argument) => /\s/u.test(argument))) {
@@ -190,6 +203,7 @@ export function createRestrictedExecution(scope: Scope): { exec: ExecFn; dispose
         }
         readOnly.add(npmRoot);
         args = [cli, ...requested];
+        operation = `npm ${command}`;
       }
     } else {
       throw new Error('The proof command broker accepts only Node and approved npm invocations.');
@@ -210,8 +224,10 @@ export function createRestrictedExecution(scope: Scope): { exec: ExecFn; dispose
     }
 
     const supervisor = resolveWindowsSupervisor();
-    if (supervisor.sha256 !== boundary.sha256 || writable.some((path) => inside(path, supervisor.command))) {
-      throw new Error('The Windows supervisor changed or is inside a writable proof root.');
+    const qualificationSha256 = requireWindowsSupervisorQualification(supervisor, process.env, [...readOnly, ...writable]);
+    if (supervisor.sha256 !== boundary.sha256 || qualificationSha256 !== boundary.qualificationSha256 ||
+        writable.some((path) => inside(path, supervisor.command))) {
+      throw new Error('The Windows supervisor or qualification changed, or the supervisor is inside a writable proof root.');
     }
     const request: WindowsExecutionSupervisorRequest = {
       schemaVersion: 'clue-proof-exec/1',
@@ -220,16 +236,34 @@ export function createRestrictedExecution(scope: Scope): { exec: ExecFn; dispose
     };
     const requestDir = mkdtempSync(join(requestRoot, 'request-'));
     const requestFile = join(requestDir, 'request.json');
+    let heartbeat: ReturnType<typeof setInterval> | undefined;
+    const label = showProgress ? `[CLU-E proof ${scope.mode} #${++visibleCommandCount}] ${operation}` : null;
     try {
       writeFileSync(requestFile, JSON.stringify(request), { flag: 'wx', mode: 0o600 });
+      if (label !== null) {
+        const started = performance.now();
+        writeProofProgress(`${label} — starting isolated execution`);
+        heartbeat = setInterval(() => {
+          writeProofProgress(`${label} — running (${Math.floor((performance.now() - started) / 1000)}s)`);
+        }, 10_000);
+        heartbeat.unref();
+      }
       const result = await runBoundedProcess(supervisor.command, [...supervisor.argsPrefix, requestFile], {
         ...options, cwd: requestDir, timeoutMs: timeoutMs + 2000,
       });
+      if (label !== null) {
+        const timedOut = result.timedOut || result.code === 124;
+        writeProofProgress(
+          `${label} — exit ${result.code} in ${Math.round(result.wallMs)}ms, timeout ${timedOut}, ` +
+          `captured ${result.stdout.length} stdout / ${result.stderr.length} stderr characters`,
+        );
+      }
       if (result.code === 125) throw new Error('The Windows supervisor refused containment.');
       if (result.timedOut || result.code === 124) throw new Error('The isolated proof command exceeded its deadline.');
       if (result.code < 0) throw new Error('The isolated proof command could not complete within its process and output limits.');
       return result;
     } finally {
+      if (heartbeat !== undefined) clearInterval(heartbeat);
       rmSync(requestDir, { recursive: true, force: true });
     }
   };

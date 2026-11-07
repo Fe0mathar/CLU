@@ -1,9 +1,9 @@
 # CLU-E RPI Documentation Pack v9 — Validation Report
 
 **Release:** 9.0
-**Validation date:** 2026-08-04; executable-alignment amendment validation 2026-08-14
-**Result:** **PASS** (documentation scope; see §6 limitations)
-**Scope:** repair verification of the corrupted v8 deployment, name/content realignment, cross-reference integrity, catalogue integrity, Part II integration, governance restructuring, templates, release-seal preparation, and the 2026-08 executable-alignment amendments through ADR-0017.
+**Validation dates:** 2026-08-04 pack validation and 2026-08-14 executable-alignment validation. Section 11 records the 2026-11-07 ADR-0020 candidate.  
+**Result:** Historical pack validation **PASS** within the scope and limitations in §6.  
+**Scope:** Repair verification of the corrupted v8 deployment, name/content realignment, cross-reference and catalogue integrity, Part II integration, governance, templates, seal preparation and executable alignment.  
 
 ---
 
@@ -111,7 +111,8 @@ satisfied by editing this report.
 
 ## 9. ADR-0017 final activation amendment validation
 
-The 2026-08-14 final activation amendment was validated against the executable patch with the
+This section and §10 retain the historical 2026-08-14 results for the original `gpt-5.6` policy.
+The final activation amendment was validated against the executable patch with the
 separately accepted dashboard `app.js` held outside the backend/governance ZIP.
 
 | Check | Result |
@@ -162,3 +163,13 @@ provider model endpoint immediately before use and no fallback is permitted. Thi
 local implementation and package integrity. It does not prove access for a particular API key and
 does not substitute for Creator ratification, the current evidence epoch, a real ACCEPT, its atomic
 Great Book entry, proof-authoritative cycle closure, or final Creator acceptance.
+
+## 11. ADR-0020 candidate model validation
+
+This candidate aligns the v9 AI contract, operator sample and governance record to the proposed
+exact P2 identity `gpt-5.6-sol`. The v9 manifest binds the revised document bytes and the v9 seal
+binds the manifest. The v10 pack remains a separate deferred candidate.
+
+The live model-access check uses the operator's provider project and key. Inference still requires
+an exact provider response identity. Live access, Creator ratification and a current evidence epoch
+remain separate gates from the documentation and local runtime checks.

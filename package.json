@@ -22,7 +22,8 @@
     "tools/",
     "tsconfig.json",
     "CONFIG-EDIT.md",
-    "CLUE-Dashboard.bat"
+    "CLUE-Dashboard.bat",
+    "CLUE-Windows-Setup.bat"
   ],
   "scripts": {
     "typecheck": "tsc --noEmit",

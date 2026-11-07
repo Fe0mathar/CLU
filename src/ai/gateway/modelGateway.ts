@@ -41,6 +41,7 @@ import {
 import {
   GATEWAY_TASK_TYPES,
   assessGatewayPolicy,
+  bindProjectGatewayModel,
   estimateInputTokens,
   loadGatewayPolicies,
   priceForUsage,
@@ -326,6 +327,24 @@ function runtimeGatewayBinding(runtime: Runtime): RuntimeGatewayBinding {
   };
 }
 
+function runtimeGatewayPolicy(runtime: Runtime): {
+  readonly binding: RuntimeGatewayBinding;
+  readonly policies: LoadedGatewayPolicies;
+  readonly modelProblem: string | null;
+} {
+  const binding = runtimeGatewayBinding(runtime);
+  const policies = loadGatewayPolicies(runtime.repoRoot, runtime.config);
+  if (binding.projectId === null || !binding.enabled) return { binding, policies, modelProblem: null };
+  if (binding.requestedModel === null) {
+    return { binding, policies, modelProblem: 'The Project Profile must select one exact model.' };
+  }
+  try {
+    return { binding, policies: bindProjectGatewayModel(policies, binding.requestedModel), modelProblem: null };
+  } catch (error) {
+    return { binding, policies, modelProblem: (error as Error).message };
+  }
+}
+
 function resolveGatewayCredential(
   binding: RuntimeGatewayBinding,
   environment: NodeJS.ProcessEnv,
@@ -407,6 +426,11 @@ function assertPreparedProjectContext(runtime: Runtime, prepared: GatewayPrepare
       `Project Profile generation changed from ${String(prepared.profileGeneration)} to ${String(runtime.projectProfile.generation)} while the provider call was in flight.`,
     );
   }
+  const { policies, modelProblem } = runtimeGatewayPolicy(runtime);
+  if (modelProblem !== null || policies.routingHash !== prepared.policies.routingHash ||
+      policies.budgetHash !== prepared.policies.budgetHash) {
+    throw new OpenAiGatewayError('GATEWAY_POLICY_DRIFT', 'Gateway routing or budget policy changed while the provider call was in flight.');
+  }
 }
 
 function refusal(
@@ -464,13 +488,12 @@ function prepareGatewayCall(
     },
     (runtime) => {
       const callId = newCallId();
-      const policies = loadGatewayPolicies(runtime.repoRoot, runtime.config);
+      const { binding, policies, modelProblem } = runtimeGatewayPolicy(runtime);
       const environment = options.environment ?? process.env;
       const assessment = assessGatewayPolicy(runtime.config, policies, environment, {
         checkInstallationCredential: runtime.projectProfile === null,
       });
       const projectContext = runtimeProjectContext(runtime);
-      const binding = runtimeGatewayBinding(runtime);
       const policyProblems = assessment.problems;
 
       if (!binding.enabled) {
@@ -478,6 +501,9 @@ function prepareGatewayCall(
       }
       if (binding.fallbackPolicy !== 'FORBID') {
         return refusal(runtime, callId, request, policies, 'GATEWAY_FALLBACK_FORBIDDEN', 'The Project Profile must forbid silent model fallback.');
+      }
+      if (modelProblem !== null) {
+        return refusal(runtime, callId, request, policies, 'GATEWAY_MODEL_POLICY_MISMATCH', modelProblem);
       }
       if (policyProblems.length > 0) {
         return refusal(runtime, callId, request, policies, 'GATEWAY_POLICY_NOT_READY', policyProblems.join('; '));
@@ -512,16 +538,6 @@ function prepareGatewayCall(
       }
       if (route.model === null) {
         return refusal(runtime, callId, request, policies, 'ROUTE_INCOMPLETE', `Route ${request.task_type} has no model.`);
-      }
-      if (binding.requestedModel !== null && route.model !== binding.requestedModel) {
-        return refusal(
-          runtime,
-          callId,
-          request,
-          policies,
-          'GATEWAY_MODEL_POLICY_MISMATCH',
-          `Project Profile requests ${binding.requestedModel}, but route ${request.task_type} requests ${route.model}.`,
-        );
       }
       const pricing = route.pricing ?? ZERO_GATEWAY_PRICING;
 
@@ -625,6 +641,8 @@ function prepareGatewayCall(
           : {
               project_identity: projectContext.projectIdentity,
               profile_generation: projectContext.profileGeneration,
+              policy_hash: policies.budgetHash,
+              routing_hash: policies.routingHash,
             }),
         task_type: request.task_type,
         lane: route.lane,
@@ -1128,6 +1146,13 @@ function preparedFromRecord(
       `Gateway credential reference changed from ${prepared.credentialReference} to ${currentBinding.credentialReference}.`,
     );
   }
+  if (prepared.projectIdentity !== null && (
+    prepared.model !== currentBinding.requestedModel ||
+    (body['routing_hash'] !== undefined && body['routing_hash'] !== policies.routingHash) ||
+    (body['policy_hash'] !== undefined && body['policy_hash'] !== policies.budgetHash)
+  )) {
+    throw new OpenAiGatewayError('GATEWAY_POLICY_DRIFT', 'The pending batch does not match the current Project Profile model or policy.');
+  }
   return prepared;
 }
 
@@ -1156,7 +1181,8 @@ export async function reconcileGatewayBatch(
       if (record.state !== 'batch_pending' || record.providerBatchId === null) {
         throw new Error(`Gateway call ${callId} is not a pending batch.`);
       }
-      const policies = loadGatewayPolicies(runtime.repoRoot, runtime.config);
+      const { binding, policies, modelProblem } = runtimeGatewayPolicy(runtime);
+      if (modelProblem !== null) throw new OpenAiGatewayError('GATEWAY_MODEL_POLICY_MISMATCH', modelProblem);
       const submittedMs = Date.parse(record.submittedAt);
       const updatedMs = Date.parse(record.updatedAt);
       if (!Number.isFinite(submittedMs) || !Number.isFinite(updatedMs)) {
@@ -1167,7 +1193,6 @@ export async function reconcileGatewayBatch(
       const timedOut = atMs - submittedMs >= timeoutMs;
       const pollDue = atMs - updatedMs >= pollIntervalMs;
       const environment = options.environment ?? process.env;
-      const binding = runtimeGatewayBinding(runtime);
       const credential = resolveGatewayCredential(
         binding,
         environment,
@@ -1344,13 +1369,13 @@ export async function resumeGatewayProvider(
       ...projectProfileRuntimeOption(options),
     },
     (runtime) => {
-      const policies = loadGatewayPolicies(runtime.repoRoot, runtime.config);
+      const { binding, policies, modelProblem } = runtimeGatewayPolicy(runtime);
       const environment = options.environment ?? process.env;
       const assessment = assessGatewayPolicy(runtime.config, policies, environment, {
         checkInstallationCredential: runtime.projectProfile === null,
       });
-      const binding = runtimeGatewayBinding(runtime);
       const policyProblems = assessment.problems;
+      if (modelProblem !== null) throw new OpenAiGatewayError('GATEWAY_MODEL_POLICY_MISMATCH', modelProblem);
       if (!binding.enabled || policyProblems.length > 0) {
         throw new Error(
           `Gateway resume requires an enabled, coherent gateway policy: ${policyProblems.join('; ')}`,
@@ -1430,6 +1455,11 @@ export async function resumeGatewayProvider(
             'Project Profile generation changed while the OpenAI model probe was in flight.',
           );
         }
+        const { policies, modelProblem } = runtimeGatewayPolicy(runtime);
+        if (modelProblem !== null || policies.routingHash !== lookup.policies.routingHash ||
+            policies.budgetHash !== lookup.policies.budgetHash) {
+          throw new OpenAiGatewayError('GATEWAY_POLICY_DRIFT', 'Gateway routing or budget policy changed while the OpenAI model probe was in flight.');
+        }
       }
       const event = runtime.requireLog().append({
         type: GATEWAY_EVENT_TYPES.providerResumed,
@@ -1461,7 +1491,7 @@ export function readGatewayStatus(
   environment: NodeJS.ProcessEnv = process.env,
   credentialResolver?: GatewayCredentialResolver,
 ): GatewayStatus {
-  const policies = loadGatewayPolicies(runtime.repoRoot, runtime.config);
+  const { binding, policies, modelProblem } = runtimeGatewayPolicy(runtime);
   const assessment = assessGatewayPolicy(runtime.config, policies, environment, {
     checkInstallationCredential: runtime.projectProfile === null,
   });
@@ -1473,13 +1503,12 @@ export function readGatewayStatus(
   const effectiveProviderReason = providerStateCurrent ? providerState.reason : null;
   const providerPaused = effectiveProviderState === 'paused_budget';
   const projectContext = runtimeProjectContext(runtime);
-  const binding = runtimeGatewayBinding(runtime);
   const enabledModels = [...new Set(GATEWAY_TASK_TYPES
     .map((task) => policies.routing.routes[task])
     .filter((route) => route.enabled && route.model !== null)
     .map((route) => route.model as string))];
   const routedModel = enabledModels.length === 1 ? enabledModels[0] ?? null : null;
-  const requestedModel = binding.requestedModel ?? routedModel;
+  const requestedModel = binding.projectId === null ? routedModel : binding.requestedModel;
   const modelPolicyExact =
     requestedModel !== null &&
     routedModel !== null &&
@@ -1493,6 +1522,7 @@ export function readGatewayStatus(
   const apiKeyPresent = credential !== null;
   const policyProblems = [
     ...assessment.problems,
+    ...(modelProblem === null ? [] : [modelProblem]),
     ...(enabledModels.length !== 1
       ? [`enabled routes resolve to ${enabledModels.length} models instead of one exact model`]
       : []),

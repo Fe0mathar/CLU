@@ -5,11 +5,7 @@ import {
   OpenAiResponsesAdapter,
   type GatewayFetch,
 } from '../../ai/gateway/openaiAdapter.js';
-import {
-  GATEWAY_TASK_TYPES,
-  assessGatewayPolicy,
-  type LoadedGatewayPolicies,
-} from '../../ai/gateway/policy.js';
+import { assessGatewayPolicy, bindProjectGatewayModel, type LoadedGatewayPolicies } from '../../ai/gateway/policy.js';
 import {
   operationIdentityFromProfileRecord,
   type ProjectOperationIdentity,
@@ -92,12 +88,6 @@ export async function testProjectGatewayReadiness(
   const checkedAt = options.checkedAt ?? new Date().toISOString();
   const providerState = options.providerState ?? 'unknown';
   const pauseReason = options.providerPauseReason ?? null;
-  const policy = assessGatewayPolicy(
-    config,
-    policies,
-    options.environment ?? process.env,
-    { checkInstallationCredential: false },
-  );
   const reference =
     profileGpt.credential.source === 'project-override'
       ? profileGpt.credential.value
@@ -113,7 +103,7 @@ export async function testProjectGatewayReadiness(
     providerState,
     providerPauseReason: pauseReason,
     spendAuthority: policies.budget.spend_authority,
-    localBudgetEnforced: policy.localBudgetEnforced,
+    localBudgetEnforced: policies.budget.spend_authority === 'clue',
     checkedAt,
   } as const;
 
@@ -165,7 +155,7 @@ export async function testProjectGatewayReadiness(
       false,
     );
   }
-  if (policies.budget.spend_authority !== 'openai_platform' || policy.localBudgetEnforced) {
+  if (policies.budget.spend_authority !== 'openai_platform') {
     return output(
       'POLICY MISMATCH',
       false,
@@ -178,40 +168,26 @@ export async function testProjectGatewayReadiness(
     );
   }
 
-  const enabledModels = [...new Set(
-    GATEWAY_TASK_TYPES
-      .map((task) => policies.routing.routes[task])
-      .filter((route) => route.enabled)
-      .map((route) => route.model)
-      .filter((model): model is string => model !== null),
-  )];
-  if (
-    policies.routing.provider !== 'openai' ||
-    config.gateway.provider !== 'openai' ||
-    enabledModels.length !== 1 ||
-    enabledModels[0] !== profileGpt.modelId ||
-    policy.problems.length > 0
-  ) {
-    const problems = [
-      ...policy.problems,
-      ...(enabledModels.length !== 1
-        ? ['enabled routes do not resolve to one exact model']
-        : enabledModels[0] !== profileGpt.modelId
-          ? [`Project Profile requests ${profileGpt.modelId}, routing policy requests ${enabledModels[0] ?? 'none'}`]
-          : []),
-    ];
+  let effectivePolicies: LoadedGatewayPolicies;
+  try {
+    effectivePolicies = bindProjectGatewayModel(policies, profileGpt.modelId);
+    const assessment = assessGatewayPolicy(config, effectivePolicies, options.environment ?? process.env, {
+      checkInstallationCredential: false,
+    });
+    if (assessment.problems.length > 0) throw new Error(assessment.problems.join('; '));
+  } catch (error) {
     return output(
       'POLICY MISMATCH',
       false,
       'GATEWAY_POLICY_MISMATCH',
-      problems.join('; ') || 'Gateway policy is inconsistent with the Project Profile.',
+      sanitizedError(error),
       base,
       null,
       false,
       false,
     );
   }
-  const credential = await resolveCredential(reference, options);
+  const credential = await resolveProjectGatewayCredential(reference, options);
   if (credential === null || credential.trim().length < 8) {
     const state = reference.startsWith('credential-store:')
       ? 'CREDENTIAL STORE UNAVAILABLE'
@@ -259,7 +235,7 @@ export async function testProjectGatewayReadiness(
     const probe = options.probeModel ?? (async (input) => {
       const adapter = new OpenAiResponsesAdapter({
         apiKey: input.credential,
-        routing: policies.routing,
+        routing: effectivePolicies.routing,
         ...(options.fetchImpl === undefined ? {} : { fetchImpl: options.fetchImpl }),
       });
       return adapter.probeModel(input.model);
@@ -309,9 +285,9 @@ export async function testProjectGatewayReadiness(
   );
 }
 
-async function resolveCredential(
+export async function resolveProjectGatewayCredential(
   reference: string,
-  options: ProjectGatewayReadinessOptions,
+  options: Pick<ProjectGatewayReadinessOptions, 'environment' | 'resolveCredentialReference'>,
 ): Promise<string | null> {
   if (reference.startsWith('env:')) {
     const name = reference.slice('env:'.length);

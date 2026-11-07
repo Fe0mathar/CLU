@@ -16,6 +16,7 @@ import { z } from 'zod';
 import { hashBytes } from '../shared/ids.js';
 
 export const P2_CLOSURE_POLICY_PATH = 'config/policies/p2-closure.yaml' as const;
+export const P2_OPENAI_MODEL = 'gpt-5.6-sol' as const;
 
 export const p2GatewayDecisionSchema = z.enum([
   'PENDING_CREATOR_DECISION',
@@ -35,7 +36,7 @@ export const p2ClosurePolicySchema = z
         recorded_by: z.literal('creator').nullable(),
         reason: z.string().min(1),
         /** Exact Creator-approved provider model; no implicit fallback is allowed. */
-        model: z.literal('gpt-5.6').nullable().default(null),
+        model: z.enum(['gpt-5.6', P2_OPENAI_MODEL]).nullable().default(null),
         /** Billing/credit authority is external; CLU-E never invents a provider balance. */
         budget_authority: z.enum(['OPENAI_PLATFORM', 'CLU_E']).nullable().default(null),
         local_budget_enforced: z.boolean().nullable().default(null),

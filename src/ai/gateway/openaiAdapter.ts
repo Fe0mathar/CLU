@@ -319,6 +319,8 @@ async function readJson(response: Response, maximumBytes: number): Promise<unkno
   }
 }
 
+export { readJson as readOpenAiJson };
+
 async function readText(response: Response, maximumBytes: number): Promise<string> {
   const bytes = await readBoundedBytes(response, maximumBytes);
   try {

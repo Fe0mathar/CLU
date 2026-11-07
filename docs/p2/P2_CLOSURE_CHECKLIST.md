@@ -25,7 +25,7 @@
 - [ ] Exact Chrome target passes when the proof requires a browser.
 - [ ] `OPENAI_API_KEY` present without exposure.
 - [ ] Provider is OpenAI.
-- [ ] Requested and effective model are exactly `gpt-5.6`.
+- [ ] Requested and effective model are exactly `gpt-5.6-sol`.
 - [ ] No fallback.
 - [ ] Gateway operationally ready.
 

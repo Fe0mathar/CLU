@@ -14,6 +14,13 @@ import {
   writePath,
 } from './viewPrimitives.js';
 
+const MODEL_LIST_STATES = new Set([
+  'READY', 'CREDENTIAL_MISSING', 'DISABLED', 'PROVIDER_UNREACHABLE',
+  'AUTH_REFUSED', 'RATE_LIMITED', 'PROVIDER_REFUSED', 'CATALOGUE_INVALID', 'CREDENTIAL_STORE_UNAVAILABLE',
+  'POLICY_MISMATCH', 'EMPTY',
+]);
+const MODEL_ID_PATTERN = /^(?!sk-)[a-z0-9][a-z0-9.-]{0,127}$/u;
+
 function initialState() {
   return {
     phase: 'idle',
@@ -451,6 +458,37 @@ export function createConfigurationState(options = {}) {
     return { applied: true };
   }
 
+  function beginGatewayModels() {
+    state.connectionChecks = { ...state.connectionChecks, gatewayModels: null };
+    return begin('reading-gateway-models');
+  }
+
+  function applyGatewayModels(token, value) {
+    if (!tokenMatchesSelection(token, state)) return { applied: false, reason: 'STALE_MODEL_LIST_RESPONSE' };
+    if (state.dirty) {
+      complete(token, 'local', 'Save or reset the draft before loading model IDs.');
+      return { applied: false, reason: 'DRAFT_CHANGED' };
+    }
+    const body = bodyObject(value);
+    const current = operationIdentityOf(state.selectedRecord);
+    if (!sameOperationIdentity(token.recordIdentity, current) || body.projectId !== current?.projectId ||
+        body.generation !== current.profileGeneration || body.projectProfileHash !== current.projectProfileHash) {
+      return applyFailure(token, 'MODEL_LIST_IDENTITY_MISMATCH', 'The model list belongs to a different saved profile generation.');
+    }
+    if (!MODEL_LIST_STATES.has(body.state) || !Array.isArray(body.models) || body.models.length > 256 ||
+        body.models.some((id) => typeof id !== 'string' || !MODEL_ID_PATTERN.test(id)) ||
+        ((body.state === 'READY') !== (body.models.length > 0))) {
+      return applyFailure(token, 'MODEL_LIST_RESPONSE_INVALID', 'The backend did not return a valid model list.');
+    }
+    return applyConnectionCheck(token, 'gatewayModels', {
+      projectId: body.projectId,
+      generation: body.generation,
+      projectProfileHash: body.projectProfileHash,
+      state: body.state,
+      models: [...new Set(body.models)].sort(),
+    });
+  }
+
   function complete(token, tone = 'good', message = '') {
     if (token && !tokenMatchesSelection(token, state)) return { applied: false, reason: 'STALE_COMPLETION' };
     state.phase = 'ready';
@@ -499,6 +537,8 @@ export function createConfigurationState(options = {}) {
     applyValidation,
     applyReadiness,
     applyConnectionCheck,
+    beginGatewayModels,
+    applyGatewayModels,
     complete,
     setReadinessOperation,
     setNotice,

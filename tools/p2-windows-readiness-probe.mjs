@@ -13,6 +13,8 @@ const USAGE = 'Usage: node tools/p2-windows-readiness-probe.mjs [--output <exter
 const BROKER = 'dist/src/benchmark/restrictedExecution.js';
 const SUPERVISOR_PATH = 'CLU_WINDOWS_SUPERVISOR_PATH';
 const SUPERVISOR_SHA256 = 'CLU_WINDOWS_SUPERVISOR_SHA256';
+const QUALIFICATION_PATH = 'CLU_WINDOWS_SUPERVISOR_QUALIFICATION';
+const QUALIFICATION_SHA256 = 'CLU_WINDOWS_SUPERVISOR_QUALIFICATION_SHA256';
 const EXPECTED_SOURCE = {
   'src/analysis/source/navigatorEvents.ts': 'a2946cd2cb3f433742f9f3d7fcac0eb78b271bca73dad73128345fca92e13c1a',
   'src/control/recognitionRun.ts': '5d1e84433261011b5bdbf99a8701b1111314a1e77063ef414f139c589176e699',
@@ -118,7 +120,7 @@ function inspectPreflight(config, env) {
   }
   const keyName = gatewayKeyName(config);
   const childEnv = { ...env };
-  for (const key of [SUPERVISOR_PATH, SUPERVISOR_SHA256]) {
+  for (const key of [SUPERVISOR_PATH, SUPERVISOR_SHA256, QUALIFICATION_PATH, QUALIFICATION_SHA256]) {
     if (process.env[key] !== undefined) childEnv[key] = process.env[key];
   }
   if (keyName !== null && process.env[keyName]?.trim()) {
@@ -261,9 +263,8 @@ function report() {
   const navigator = inspectGraph(env, windows);
   const keyName = gatewayKeyName(config);
   const keyPresent = keyName !== null && Boolean(process.env[keyName]?.trim());
-  const models = data?.gateway?.requestedModels;
   const exactGatewayPolicy = data?.gateway?.provider === 'openai' && data?.gateway?.spendAuthority === 'openai_platform' &&
-    Array.isArray(models) && models.length === 1 && models[0] === 'gpt-5.6';
+    data?.gateway?.exactModelPolicy === true;
   const builtBrokerPresent = fileExists(join(ROOT, BROKER));
   const pathConfigured = Boolean(process.env[SUPERVISOR_PATH]?.trim());
   const pinConfigured = Boolean(process.env[SUPERVISOR_SHA256]?.trim());
@@ -271,8 +272,15 @@ function report() {
   const observedPin = data?.proofExecutionBoundary?.sha256;
   const pinVerified = windows && builtBrokerPresent && pathConfigured && pinConfigured && pinShapeValid &&
     data?.proofExecutionBoundary?.kind === 'windows-supervisor' && observedPin === process.env[SUPERVISOR_SHA256];
+  const qualificationConfigured = Boolean(process.env[QUALIFICATION_PATH]?.trim() && process.env[QUALIFICATION_SHA256]?.trim());
+  const qualificationVerified = pinVerified && qualificationConfigured &&
+    data?.proofExecutionBoundary?.nativeQualification === 'VERIFIED' &&
+    data.proofExecutionBoundary.qualificationSha256 === process.env[QUALIFICATION_SHA256];
+  const qualification = qualificationVerified ? 'VERIFIED'
+    : qualificationConfigured ? 'RECEIPT_NOT_VERIFIED' : 'PENDING_NATIVE_CANARIES';
   const supervisorState = !windows ? 'WINDOWS_HOST_REQUIRED' : !builtBrokerPresent ? 'BUILD_REQUIRED'
     : !pathConfigured || !pinConfigured ? 'CONFIGURATION_MISSING' : !pinShapeValid ? 'PIN_INVALID'
+    : qualificationVerified ? 'PIN_AND_QUALIFICATION_VERIFIED'
     : pinVerified ? 'PIN_VERIFIED_QUALIFICATION_PENDING' : 'PIN_NOT_VERIFIED';
   const blockers = [];
   if (!windows) blockers.push('NATIVE_WINDOWS_REQUIRED');
@@ -294,14 +302,15 @@ function report() {
   return {
     schemaVersion: 'clue-p2-windows-readiness/1',
     checkedAt: new Date().toISOString(),
-    status: blockers.length === 0 ? 'PREREQUISITES_PRESENT_QUALIFICATION_PENDING' : 'BLOCKED',
+    status: blockers.length > 0 ? 'BLOCKED' : qualificationVerified
+      ? 'QUALIFICATION_RECEIPT_VERIFIED_LIVE_CHECKS_PENDING' : 'PREREQUISITES_PRESENT_QUALIFICATION_PENDING',
     platform: { name: process.platform, arch: process.arch, nativeWindows: windows },
     host: { node: process.versions.node, nodeSupported, npm: data?.hostTools?.npm === true, powershell7: data?.hostTools?.powershell === true, sqlite, git },
     paths: { workspace: preflightRoot('workspace'), shadow: preflightRoot('shadow'), chromeExecutable: preflightRoot('Chrome executable') },
     documentation: { activeV9, activeSeal: authority, deferredV10Seal: v10 },
     preflight: { state: preflightState },
-    supervisor: { state: supervisorState, builtBrokerPresent, pathConfigured, pinConfigured, pinShapeValid, verifiedSha256: pinVerified ? observedPin : null, qualification: 'PENDING_NATIVE_CANARIES' },
-    gateway: { keyPresentInThisProcess: keyPresent, exactModelAndBudgetPolicy: exactGatewayPolicy, liveProviderCheck: 'PENDING' },
+    supervisor: { state: supervisorState, builtBrokerPresent, pathConfigured, pinConfigured, pinShapeValid, verifiedSha256: pinVerified ? observedPin : null, qualificationConfigured, qualification },
+    gateway: { keyPresentInThisProcess: keyPresent, approvedModel: data?.gateway?.approvedModel ?? null, exactModelAndBudgetPolicy: exactGatewayPolicy, liveProviderCheck: 'PENDING' },
     source, navigator,
     blockers,
   };
