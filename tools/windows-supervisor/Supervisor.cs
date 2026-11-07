@@ -55,6 +55,8 @@ internal static class Supervisor
                     string outcome = InspectWorkloadExit(log, exit);
                     if (outcome != "EXIT_CONFIRMED")
                         return Refuse("MXC_EXECUTION_REFUSED ENGINE_EXIT_" + exit + " " + outcome);
+                    Console.Error.WriteLine("[CLU-E supervisor] WORKLOAD_EXIT_0x" +
+                        unchecked((uint)exit).ToString("X8"));
                     return exit == 124 || exit == 125 ? 1 : exit;
                 }
                 finally

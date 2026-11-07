@@ -45,6 +45,16 @@ function supervisorDiagnostic(run) {
   return matches.length === 1 ? matches[0][1] : null;
 }
 
+function windowsExitEvidence(run) {
+  if (!Number.isInteger(run.code) || run.code < -2147483648 || run.code > 4294967295) return null;
+  const hex = '0x' + (run.code >>> 0).toString(16).toUpperCase().padStart(8, '0');
+  const markers = [...run.stderr.matchAll(/^\[CLU-E supervisor\] WORKLOAD_EXIT_(0x[A-F0-9]{8})\r?$/gmu)];
+  return {
+    hex,
+    confirmedWorkloadExit: markers.length === 1 && markers[0][1] === hex,
+  };
+}
+
 function writeRequest(root, request) {
   const dir = mkdtempSync(join(root, 'request-'));
   const file = join(dir, 'request.json');
@@ -239,6 +249,7 @@ async function exercise({ report, root, supervisor, resolveWindowsSupervisor, ru
   set('allowed-command', baselinePass && candidatePass ? 'PASS' : 'FAIL', {
     baselinePass, candidatePass, baselineExit: baseRun.code, candidateExit: candidateRun.code,
     baselineDiagnostic: supervisorDiagnostic(baseRun), candidateDiagnostic: supervisorDiagnostic(candidateRun),
+    baselineExitEvidence: windowsExitEvidence(baseRun), candidateExitEvidence: windowsExitEvidence(candidateRun),
   });
   if (!baselinePass || !candidatePass) return;
 

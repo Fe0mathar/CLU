@@ -121,7 +121,10 @@ public static class Protocol
                 "deniedPaths", new[] { Path.Combine(r.fixtureRoot, "private") }),
             "network", Object("egress", Object("default", "deny"),
                 "ingress", Object("default", "deny", "hostLoopback", "deny")),
-            "ui", Object("disable", true, "clipboard", "none", "injection", false)));
+            // The pinned Node fixture needs Win32k initialization. Keep UI scoped to its job.
+            "ui", Object("disable", false, "clipboard", "none", "injection", false),
+            "processContainer", Object("ui", Object("isolation", "container",
+                "desktopSystemControl", false, "ime", false, "systemSettings", "none"))));
     }
 
     public static string Quote(string value)
@@ -527,7 +530,10 @@ public static class Protocol
         {
             char c = json[i];
             if (c == '{')
+            {
+                Check(scopes.Count < 16, "Request nesting exceeds the limit.");
                 scopes.Push(new HashSet<string>(StringComparer.OrdinalIgnoreCase));
+            }
             else if (c == '}')
             {
                 Check(scopes.Count > 0, "Unbalanced request object.");
@@ -552,6 +558,8 @@ public static class Protocol
                     Check(scopes.Count > 0 && scopes.Peek().Add(key), "Duplicate request key.");
                 }
             }
+            else if (c == '\'')
+                throw new InvalidDataException("JSON keys and strings require double quotes.");
         }
         Check(scopes.Count == 0, "Unbalanced request object.");
     }

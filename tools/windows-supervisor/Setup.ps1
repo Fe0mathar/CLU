@@ -250,10 +250,18 @@ try {
     Assert-NoReparsePath $install -CreateDirectory
 
     $arch = [Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()
+    $shell = [Diagnostics.Process]::GetCurrentProcess()
+    try { $sessionId = $shell.SessionId }
+    finally { $shell.Dispose() }
     $windowsHost = [ordered]@{
         version = [Environment]::OSVersion.Version.ToString()
         updateBuildRevision = Get-ItemPropertyValue -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -Name UBR -ErrorAction SilentlyContinue
         architecture = $arch
+        sessionId = $sessionId
+        userInteractive = [Environment]::UserInteractive
+    }
+    if ($sessionId -eq 0 -or !$windowsHost.userInteractive) {
+        throw 'Run CLUE-Windows-Supervisor.bat from your signed-in Windows desktop for this canary.'
     }
     if ($arch -notin @('x64', 'arm64')) { throw 'Microsoft MXC requires a supported x64 or ARM64 Windows installation.' }
     $node = (Get-Command node.exe -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
@@ -359,6 +367,7 @@ internal static class MxcPin {
         engineVersion = 'v1.0.1'
         engineSha256 = $mxcHash
         mxcDownload = $mxcDownload
+        canaryUiMode = 'CONTAINER_SCOPED_WIN32K'
         canaryExitCode = $code
         canaryReport = (Get-Content -LiteralPath $stagedReport -Raw | ConvertFrom-Json -AsHashtable)
     }
@@ -381,6 +390,7 @@ internal static class MxcPin {
                 engineVersion = 'v1.0.1'
                 engineSha256 = $mxcHash
                 mxcDownload = $mxcDownload
+                canaryUiMode = 'CONTAINER_SCOPED_WIN32K'
                 canaryExitCode = $null
                 canaryReport = $null
             })
