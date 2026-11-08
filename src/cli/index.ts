@@ -343,7 +343,10 @@ function isEntryPoint(): boolean {
   const entry = process.argv[1];
   if (entry === undefined) return false;
   try {
-    return realpathSync(entry) === realpathSync(fileURLToPath(import.meta.url));
+    // On Windows, the native lookup can resolve an allowed file through ancestors
+    // whose metadata the process cannot read during a JavaScript path walk.
+    const realpath = process.platform === 'win32' ? realpathSync.native : realpathSync;
+    return realpath(entry) === realpath(fileURLToPath(import.meta.url));
   } catch {
     return false;
   }
