@@ -56,6 +56,31 @@ function samePath(actual, expected) {
   return path.relative(expected, actual) === '';
 }
 
+function canonicalDrivePath(value) {
+  return /^[a-z]:\\/i.test(value) && !/[/:*?"<>|\u0000-\u001f]/u.test(value.slice(3)) &&
+    path.win32.normalize(value) === value &&
+    value.slice(3).split('\\').every((part) => part.length > 0 && !/[. ]$/.test(part));
+}
+
+function classifyScratchPath(actual, expected, kind) {
+  if (actual === undefined) return 'MISSING';
+  if (actual === '') return 'EMPTY';
+  if (samePath(actual, expected)) return 'MATCH';
+  if (!path.isAbsolute(actual)) return 'RELATIVE';
+  if (process.platform !== 'win32') return 'OTHER_PATH';
+
+  if (actual.startsWith('\\\\?\\') && canonicalDrivePath(actual.slice(4)) &&
+      samePath(actual.slice(4), expected)) {
+    return 'EXTENDED_PATH_ALIAS';
+  }
+  if (canonicalDrivePath(actual)) {
+    const appContainer = /\\Packages\\sandbox\.[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\\AC(\\Temp)?$/i.exec(actual);
+    if (appContainer && kind === 'temp' && appContainer[1]) return 'APP_CONTAINER_TEMP';
+    if (appContainer && kind === 'home' && !appContainer[1]) return 'APP_CONTAINER_PROFILE';
+  }
+  return 'OTHER_PATH';
+}
+
 const cwdMatches = process.argv.length === 2 && (side === 'baseline' || side === 'candidate') &&
   path.basename(cwd) === 'checkout' && path.basename(caseRoot) === side &&
   path.basename(admissionRoot) === 'admission';
@@ -65,6 +90,13 @@ const scratchHome = path.join(caseRoot, 'scratch-home');
 const trustedSource = path.join(admissionRoot, 'trusted-source');
 
 const started = cwdMatches && writeMarker(path.join(workspace, 'started.txt')) === 'ALLOWED';
+const scratchEnvironment = Object.fromEntries([
+  ...['TEMP', 'TMP', 'TMPDIR'].map((key) => [key, scratchTemp, 'temp']),
+  ...['HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA'].map((key) => [key, scratchHome, 'home']),
+  ['NPM_CONFIG_CACHE', path.join(scratchHome, 'npm-cache')],
+  ['NPM_CONFIG_USERCONFIG', path.join(scratchHome, 'user.npmrc')],
+  ['NPM_CONFIG_GLOBALCONFIG', path.join(scratchHome, 'global.npmrc')],
+].map(([key, expected, kind]) => [key, classifyScratchPath(process.env[key], expected, kind)]));
 const result = {
   side: side === 'baseline' || side === 'candidate' ? side : 'unverified',
   cwdMatches,
@@ -79,11 +111,8 @@ const result = {
   privateReadDenied: started && readDenied(path.join(caseRoot, 'private', 'sealed.txt')),
   hostEnvironmentAbsent: ['CLU_ADMISSION_HOST_SENTINEL', 'OPENAI_API_KEY', 'CLU_WINDOWS_SUPERVISOR_PATH']
     .every((key) => process.env[key] === undefined),
-  scratchEnvironmentMatches: ['TEMP', 'TMP', 'TMPDIR'].every((key) => samePath(process.env[key], scratchTemp)) &&
-    ['HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA'].every((key) => samePath(process.env[key], scratchHome)) &&
-    samePath(process.env.NPM_CONFIG_CACHE, path.join(scratchHome, 'npm-cache')) &&
-    samePath(process.env.NPM_CONFIG_USERCONFIG, path.join(scratchHome, 'user.npmrc')) &&
-    samePath(process.env.NPM_CONFIG_GLOBALCONFIG, path.join(scratchHome, 'global.npmrc')),
+  scratchEnvironmentMatches: Object.values(scratchEnvironment).every((value) => value === 'MATCH'),
+  scratchEnvironment,
 };
 
 console.log('CLU_E_ADMISSION_FIXTURE ' + JSON.stringify(result));
@@ -91,5 +120,6 @@ const expectedCheckout = side === 'baseline' ? 'DENIED' : 'ALLOWED';
 process.exitCode = Object.entries(result).every(([key, value]) => {
   if (key === 'side') return cwdMatches;
   if (key === 'checkoutWrite') return value === expectedCheckout;
+  if (key === 'scratchEnvironment') return true;
   return value === true;
 }) ? 0 : 1;

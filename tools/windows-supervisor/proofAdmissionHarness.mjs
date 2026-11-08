@@ -12,6 +12,14 @@ const booleans = [
   'cwdMatches', 'checkoutRead', 'trustedSourceRead', 'workspaceWrite', 'tempWrite', 'homeWrite',
   'sourceWriteDenied', 'outsideReadDenied', 'privateReadDenied', 'hostEnvironmentAbsent', 'scratchEnvironmentMatches',
 ];
+const scratchKeys = [
+  'TEMP', 'TMP', 'TMPDIR', 'HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA',
+  'NPM_CONFIG_CACHE', 'NPM_CONFIG_USERCONFIG', 'NPM_CONFIG_GLOBALCONFIG',
+];
+const scratchStates = new Set([
+  'MATCH', 'MISSING', 'EMPTY', 'RELATIVE', 'EXTENDED_PATH_ALIAS', 'APP_CONTAINER_PROFILE',
+  'APP_CONTAINER_TEMP', 'OTHER_PATH',
+]);
 
 function createFile(path, value) {
   writeFileSync(path, value, { flag: 'wx' });
@@ -113,7 +121,17 @@ function fixtureEvidence(stdout, side) {
   try { value = JSON.parse(lines[0].slice(fixturePrefix.length)); } catch { return null; }
   if (value?.side !== side || !booleans.every((name) => typeof value[name] === 'boolean') ||
       !['ALLOWED', 'DENIED', 'UNVERIFIED'].includes(value.checkoutWrite)) return null;
-  return { ...Object.fromEntries(booleans.map((name) => [name, value[name]])), checkoutWrite: value.checkoutWrite };
+  const scratch = value.scratchEnvironment;
+  if (!scratch || typeof scratch !== 'object' || Array.isArray(scratch) ||
+      Object.keys(scratch).length !== scratchKeys.length ||
+      !scratchKeys.every((name) => Object.hasOwn(scratch, name) && scratchStates.has(scratch[name]))) return null;
+  const allScratchPathsMatch = scratchKeys.every((name) => scratch[name] === 'MATCH');
+  if (value.scratchEnvironmentMatches !== allScratchPathsMatch) return null;
+  return {
+    ...Object.fromEntries(booleans.map((name) => [name, value[name]])),
+    checkoutWrite: value.checkoutWrite,
+    scratchEnvironment: Object.fromEntries(scratchKeys.map((name) => [name, scratch[name]])),
+  };
 }
 
 export async function exerciseProofAdmissionFixtures({ stage, supervisor, node, systemRoot, script, invoke = launchSupervisor }) {
