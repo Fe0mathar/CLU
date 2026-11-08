@@ -297,21 +297,67 @@ function Write-StagedProofDiagnosticReport([string] $Path, [string] $State, $Exi
 }
 
 function Assert-WfpFaultStageAcl([string] $Path, [string] $Dacl) {
-    Assert-NoReparsePath $Path
-    $section = [Security.AccessControl.AccessControlSections]::Access
-    $security = [IO.FileSystemAclExtensions]::GetAccessControl([IO.DirectoryInfo]::new($Path), $section)
-    if (!$security.AreAccessRulesProtected) { throw 'The WFP diagnostic stage has inherited access.' }
-    $actual = [Security.AccessControl.RawSecurityDescriptor]::new($security.GetSecurityDescriptorSddlForm($section)).DiscretionaryAcl
-    $expected = [Security.AccessControl.RawSecurityDescriptor]::new($Dacl).DiscretionaryAcl
-    if ($null -eq $actual -or $actual.BinaryLength -ne $expected.BinaryLength) {
-        throw 'The WFP diagnostic stage access rules are unverified.'
+    try { Assert-NoReparsePath $Path }
+    catch { throw 'WFP_STAGE_ACL_PATH_UNVERIFIED' }
+    try {
+        # Read the Windows descriptor before any managed ACL canonicalization.
+        if ($null -eq ('ClueWfpFaultAclNative' -as [type])) {
+            Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+public static class ClueWfpFaultAclNative
+{
+    private const uint DaclSecurityInformation = 4;
+    private const int InsufficientBuffer = 122;
+
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode, ExactSpelling = true, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetFileSecurityW(string path, uint information,
+        [Out] byte[] descriptor, uint length, out uint needed);
+
+    public static byte[] Read(string path)
+    {
+        uint needed;
+        if (GetFileSecurityW(path, DaclSecurityInformation, null, 0, out needed) ||
+            Marshal.GetLastWin32Error() != InsufficientBuffer || needed < 20 || needed > 16384)
+            throw new InvalidOperationException();
+        var bytes = new byte[needed];
+        if (!GetFileSecurityW(path, DaclSecurityInformation, bytes, (uint)bytes.Length, out needed))
+            throw new InvalidOperationException();
+        return bytes;
     }
-    $actualBytes = [byte[]]::new($actual.BinaryLength)
-    $expectedBytes = [byte[]]::new($expected.BinaryLength)
-    $actual.GetBinaryForm($actualBytes, 0)
-    $expected.GetBinaryForm($expectedBytes, 0)
-    if ([Convert]::ToBase64String($actualBytes) -cne [Convert]::ToBase64String($expectedBytes)) {
-        throw 'The WFP diagnostic stage access rules are unverified.'
+}
+'@
+        }
+        $descriptor = [Security.AccessControl.RawSecurityDescriptor]::new([ClueWfpFaultAclNative]::Read($Path), 0)
+    } catch { throw 'WFP_STAGE_ACL_READ_UNAVAILABLE' }
+    if (!($descriptor.ControlFlags -band [Security.AccessControl.ControlFlags]::DiscretionaryAclProtected)) {
+        throw 'WFP_STAGE_ACL_UNPROTECTED'
+    }
+    $actual = $descriptor.DiscretionaryAcl
+    if (!($descriptor.ControlFlags -band [Security.AccessControl.ControlFlags]::DiscretionaryAclPresent) -or $null -eq $actual) {
+        throw 'WFP_STAGE_ACL_MISSING'
+    }
+    $expected = [Security.AccessControl.RawSecurityDescriptor]::new($Dacl).DiscretionaryAcl
+    if ($actual.Count -ne $expected.Count) { throw 'WFP_STAGE_ACL_ACE_COUNT_MISMATCH' }
+
+    # Every expected ACE is a plain explicit allow. Their order and ACL header encoding
+    # can vary without changing access. The exact trustees, masks and flags must match.
+    $expectedBySid = @{}
+    foreach ($ace in $expected) { $expectedBySid[$ace.SecurityIdentifier.Value] = $ace }
+    $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($ace in $actual) {
+        if ($ace -isnot [Security.AccessControl.CommonAce] -or
+            $ace.AceType -ne [Security.AccessControl.AceType]::AccessAllowed -or $ace.IsCallback -or $ace.OpaqueLength -ne 0) {
+            throw 'WFP_STAGE_ACL_UNSUPPORTED_ACE'
+        }
+        $sid = $ace.SecurityIdentifier.Value
+        if (!$expectedBySid.ContainsKey($sid)) { throw 'WFP_STAGE_ACL_UNEXPECTED_TRUSTEE' }
+        if (!$seen.Add($sid)) { throw 'WFP_STAGE_ACL_DUPLICATE_TRUSTEE' }
+        $required = $expectedBySid[$sid]
+        if ($ace.AceFlags -ne $required.AceFlags) { throw 'WFP_STAGE_ACL_ACE_FLAGS_MISMATCH' }
+        if ($ace.AccessMask -ne $required.AccessMask) { throw 'WFP_STAGE_ACL_ACCESS_MASK_MISMATCH' }
     }
 }
 
@@ -358,6 +404,7 @@ function Write-WfpEnforcementFaultReport([string] $Path, [string] $State) {
         checkedAt = [DateTime]::UtcNow.ToString('o')
         state = $State
         setupStage = $script:setupStage
+        stageAclMismatch = $script:wfpFaultStageAclMismatch
         proofAuthorization = $false
         bfeRestartQualified = $false
         hostTraffic = 'NOT_TESTED'
@@ -447,6 +494,7 @@ $admissionResult = $null
 $wfpFaultResult = $null
 $wfpFaultControllerHash = $null
 $wfpFaultFixtureHash = $null
+$wfpFaultStageAclMismatch = $null
 $wfpFaultCleanup = 'NOT_REQUIRED'
 $wfpFaultCleanupAttempted = $false
 $setupStage = 'HOST_PREREQUISITES'
@@ -681,7 +729,9 @@ try {
         }
         # OWNER RIGHTS suppresses the owner's implicit WRITE_DAC for a filtered token.
         $faultStageDacl = 'D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;RC;;;OW)'
+        $setupStage = 'WFP_ENFORCEMENT_FAULT_STAGE_ACL'
         New-WfpFaultStage $stage $faultStageDacl
+        $setupStage = 'MXC_RELEASE_VERIFICATION'
         $diagnosticSourceRoot = Join-Path $stage 'trusted-source'
         $faultSourceSha256 = [ordered]@{
             # Pinned canonical UTF-8/LF sources. See the patch manifest for raw payload hashes.
@@ -706,7 +756,9 @@ try {
         . (Join-Path $diagnosticSourceRoot 'WfpPairedSetup.ps1')
         foreach ($priorStage in (Get-ChildItem -LiteralPath $faultStageRoot -Directory -Force -Filter '.clue-wfp-fault-setup-*')) {
             if ($priorStage.FullName -ieq $stage -or $priorStage.Name -cnotmatch '^\.clue-wfp-fault-setup-[0-9a-f]{32}$') { continue }
+            $setupStage = 'WFP_ENFORCEMENT_FAULT_PRIOR_STAGE_ACL'
             Assert-WfpFaultStageAcl $priorStage.FullName $faultStageDacl
+            $setupStage = 'MXC_RELEASE_VERIFICATION'
             $priorFault = [IO.Path]::Combine($priorStage.FullName, 'enforcement-fault', 'private')
             $priorFaultLaunch = Join-Path $priorFault 'fault-launch.txt'
             if (![IO.File]::Exists($priorFaultLaunch)) { continue }
@@ -956,7 +1008,9 @@ $diagnosticPins
             $stageCleanupSafe = $false
             $faultExperiment = Invoke-WfpEnforcementFaultSetup $controller $stage
             $wfpFaultResult = $faultExperiment.result
+            $setupStage = 'WFP_ENFORCEMENT_FAULT_POSTRUN_STAGE_ACL'
             Assert-WfpFaultStageAcl $stage $faultStageDacl
+            $setupStage = 'WFP_ENFORCEMENT_FAULT_EXECUTION'
             foreach ($faultInput in @($controller, $fixture, $mxc)) { Assert-NoReparsePath $faultInput }
             if ((Get-Sha256 $controller) -cne $wfpFaultControllerHash -or
                 (Get-Sha256 $fixture) -cne $wfpFaultFixtureHash -or (Get-Sha256 $mxc) -cne $mxcHash) {
@@ -1143,6 +1197,9 @@ $diagnosticPins
     exit $code
 } catch {
     $failure = $_.Exception.Message
+    if ($WfpEnforcementFaultDiagnostic -and $failure -cmatch '\AWFP_STAGE_ACL_[A-Z0-9_]{1,48}\z') {
+        $wfpFaultStageAclMismatch = $failure
+    }
     Write-Host "CLU-E supervisor setup stopped: $failure"
     if ($stagedProofDiagnostic -and !$admissionCleanupAttempted) {
         $admissionCleanup = Clear-ProofAdmissionStage $stage $stageCleanupSafe $admissionCleanupMaximumEntries
