@@ -5,7 +5,8 @@ param(
     [switch] $WfpDiagnostic,
     [switch] $WfpPairedDiagnostic,
     [switch] $WfpBfeLab,
-    [switch] $ProofAdmissionDiagnostic
+    [switch] $ProofAdmissionDiagnostic,
+    [switch] $ReviewedWorkloadDiagnostic
 )
 
 Set-StrictMode -Version Latest
@@ -253,9 +254,11 @@ function Clear-ProofAdmissionStage([string] $Path, [bool] $Safe) {
     return 'RETAINED_UNVERIFIED'
 }
 
-function Write-ProofAdmissionReport([string] $Path, [string] $State, $ExitCode) {
-    Write-DiagnosticFile $Path ([ordered]@{
-        schemaVersion = 'clue-windows-proof-admission-diagnostic/1'
+function Write-StagedProofDiagnosticReport([string] $Path, [string] $State, $ExitCode) {
+    $payload = [ordered]@{
+        schemaVersion = if ($script:ReviewedWorkloadDiagnostic) {
+            'clue-windows-reviewed-workload-diagnostic/1'
+        } else { 'clue-windows-proof-admission-diagnostic/1' }
         checkedAt = [DateTime]::UtcNow.ToString('o')
         state = $State
         setupStage = $script:setupStage
@@ -267,12 +270,20 @@ function Write-ProofAdmissionReport([string] $Path, [string] $State, $ExitCode) 
         mxcDownload = $script:mxcDownload
         nodeSha256 = $script:admissionNodeHash
         supervisorSha256 = $script:admissionSupervisorHash
-        fixtureSha256 = $script:admissionFixtureHash
-        fixtureExitCode = $ExitCode
-        fixture = $script:admissionResult
-        cleanup = $script:admissionCleanup
-        diagnosticStageRetained = $script:admissionCleanup -eq 'RETAINED_UNVERIFIED'
-    }) 65536
+    }
+    if ($script:ReviewedWorkloadDiagnostic) {
+        $payload.bootstrapSha256 = $script:admissionFixtureHash
+        $payload.runnerSha256 = $script:admissionRunnerHash
+        $payload.workloadExitCode = $ExitCode
+        $payload.reviewedWorkload = $script:admissionResult
+    } else {
+        $payload.fixtureSha256 = $script:admissionFixtureHash
+        $payload.fixtureExitCode = $ExitCode
+        $payload.fixture = $script:admissionResult
+    }
+    $payload.cleanup = $script:admissionCleanup
+    $payload.diagnosticStageRetained = $script:admissionCleanup -eq 'RETAINED_UNVERIFIED'
+    Write-DiagnosticFile $Path $payload 65536
 }
 
 function Get-WfpAttribution([System.Collections.IDictionary] $CanaryReport) {
@@ -335,17 +346,23 @@ $windowsHost = $null
 $admissionNodeHash = $null
 $admissionSupervisorHash = $null
 $admissionFixtureHash = $null
+$admissionRunnerHash = $null
 $admissionCleanup = 'NOT_REQUIRED'
 $admissionCleanupAttempted = $false
 $admissionExitCode = $null
 $admissionResult = $null
 $setupStage = 'HOST_PREREQUISITES'
+$stagedProofDiagnostic = $ProofAdmissionDiagnostic -or $ReviewedWorkloadDiagnostic
+$setupFailureState = $null
 try {
     if ($PSVersionTable.PSVersion.Major -lt 7 -or !$IsWindows) { throw 'Run this setup on native Windows with PowerShell 7.' }
     if ($WfpDiagnostic -and $WfpPairedDiagnostic) { throw 'Select one WFP diagnostic mode.' }
     if ($WfpBfeLab -and !$WfpPairedDiagnostic) { throw 'The BFE lab requires the paired WFP diagnostic.' }
     if ($ProofAdmissionDiagnostic -and ($WfpDiagnostic -or $WfpPairedDiagnostic -or $WfpBfeLab)) {
         throw 'Run the proof admission diagnostic separately from the WFP diagnostics.'
+    }
+    if ($ReviewedWorkloadDiagnostic -and ($ProofAdmissionDiagnostic -or $WfpDiagnostic -or $WfpPairedDiagnostic -or $WfpBfeLab)) {
+        throw 'Run the reviewed workload diagnostic separately from other diagnostics.'
     }
     $repo = Get-LocalPath (Split-Path -Parent (Split-Path -Parent $PSScriptRoot))
     Assert-NoReparsePath $repo
@@ -360,10 +377,12 @@ try {
     }
     Assert-NoReparsePath $evidence -CreateDirectory
     $stamp = [DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss-fff') + '-' + [Guid]::NewGuid().ToString('N').Substring(0, 8)
-    $report = if ($ProofAdmissionDiagnostic) {
+    $report = if ($ReviewedWorkloadDiagnostic) {
+        Join-Path $evidence "CLU-E_WINDOWS_REVIEWED_WORKLOAD_$stamp.json"
+    } elseif ($ProofAdmissionDiagnostic) {
         Join-Path $evidence "CLU-E_WINDOWS_PROOF_ADMISSION_$stamp.json"
     } else { Join-Path $evidence "CLU-E_MXC_SUPERVISOR_DIAGNOSTIC_$stamp.json" }
-    Assert-NoReparsePath $install -CreateDirectory
+    if (!$ReviewedWorkloadDiagnostic) { Assert-NoReparsePath $install -CreateDirectory }
 
     $arch = [Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()
     $shell = [Diagnostics.Process]::GetCurrentProcess()
@@ -429,21 +448,32 @@ try {
         }
     }
     if ($arch -notin @('x64', 'arm64')) { throw 'Microsoft MXC requires a supported x64 or ARM64 Windows installation.' }
-    if ($ProofAdmissionDiagnostic) {
-        Write-Host '[1/4] Checking the Windows proof admission diagnostic prerequisites.'
+    if ($stagedProofDiagnostic) {
+        if ($ReviewedWorkloadDiagnostic) {
+            Write-Host '[1/4] Checking the reviewed Windows workload diagnostic prerequisites.'
+        } else {
+            Write-Host '[1/4] Checking the Windows proof admission diagnostic prerequisites.'
+        }
         Remove-Item Env:NODE_OPTIONS, Env:NODE_PATH, Env:NODE_COMPILE_CACHE, Env:NODE_V8_COVERAGE, Env:OPENAI_API_KEY -ErrorAction SilentlyContinue
         $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
         try {
             $principal = [Security.Principal.WindowsPrincipal]::new($identity)
             $windowsHost.elevated = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
         } finally { $identity.Dispose() }
+        if ($ReviewedWorkloadDiagnostic) {
+            if ($windowsHost.elevated) {
+                $setupFailureState = 'REVIEWED_WORKLOAD_REQUIRES_STANDARD_USER'
+                throw 'Open the reviewed workload launcher from normal Windows Explorer without Run as administrator.'
+            }
+            Assert-NoReparsePath $install -CreateDirectory
+        }
     }
     $node = (Get-Command node.exe -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
     $nodeResult = @(& $node -p "require('node:fs').realpathSync.native(process.execPath)")
     if ($LASTEXITCODE -ne 0 -or $nodeResult.Count -ne 1) { throw 'Could not resolve the selected native Node executable.' }
     $node = Get-LocalPath $nodeResult[0]
     Assert-NoReparsePath $node
-    if ($ProofAdmissionDiagnostic) {
+    if ($stagedProofDiagnostic) {
         $admissionNodeHash = Get-Sha256 $node
     } else {
         $npm = Join-Path (Split-Path -Parent $node) 'node_modules\npm\bin\npm-cli.js'
@@ -476,7 +506,7 @@ try {
     $qualificationTemp = Get-LocalPath $tempResult[0]
     Assert-NoReparsePath $qualificationTemp
 
-    if (!$ProofAdmissionDiagnostic) {
+    if (!$stagedProofDiagnostic) {
         $setupStage = 'CLUE_BUILD'
         Write-Host '[1/4] Building CLU-E and checking supervisor prerequisites.'
         if ((Invoke-ExactExecutable $node @($npm, 'run', 'build') $repo) -ne 0) { throw 'CLU-E build failed.' }
@@ -490,8 +520,11 @@ try {
     Assert-NoReparsePath $bin -CreateDirectory
     $mxc = Join-Path $bin 'wxc-exec.exe'
     if (!(Copy-PinnedInstalledMxc $arch $install $mxc $mxcDownload)) {
-        if ($ProofAdmissionDiagnostic) {
+        if ($stagedProofDiagnostic) {
             $mxcDownload.state = 'VERIFIED_X64_CACHE_REQUIRED'
+            if ($ReviewedWorkloadDiagnostic) {
+                throw 'The reviewed workload diagnostic requires the previously verified x64 MXC engine under the current Windows account.'
+            }
             throw 'The proof admission diagnostic requires the previously verified x64 MXC engine under the current Windows account.'
         }
         if ($WfpDiagnostic -or $WfpPairedDiagnostic) {
@@ -500,7 +533,7 @@ try {
         }
         Get-MxcExecutable $arch $stage $mxc $mxcDownload
     }
-    if (!$ProofAdmissionDiagnostic -and (Invoke-ExactExecutable $mxc @('--help') $bin 15) -ne 0) {
+    if (!$stagedProofDiagnostic -and (Invoke-ExactExecutable $mxc @('--help') $bin 15) -ne 0) {
         throw 'The signed MXC executor could not start standalone on this Windows installation.'
     }
     $mxcHash = Get-Sha256 $mxc
@@ -510,12 +543,16 @@ try {
     $quotedNode = $node.Replace('"', '""')
     $quotedAdmissionStage = ''
     $admissionScriptPin = ''
-    if ($ProofAdmissionDiagnostic) {
-        $setupStage = 'PROOF_ADMISSION_BUILD'
+    $admissionReviewedPin = 'false'
+    if ($stagedProofDiagnostic) {
+        $setupStage = if ($ReviewedWorkloadDiagnostic) { 'REVIEWED_WORKLOAD_BUILD' } else { 'PROOF_ADMISSION_BUILD' }
         $admissionStage = Join-Path $stage 'admission'
         Assert-NoReparsePath $admissionStage -CreateDirectory
         $quotedAdmissionStage = $admissionStage.Replace('"', '""')
-        $admissionFixtureSource = Join-Path $PSScriptRoot 'ProofAdmissionFixture.cjs'
+        $admissionFixtureSource = if ($ReviewedWorkloadDiagnostic) {
+            $admissionReviewedPin = 'true'
+            Join-Path $PSScriptRoot 'ReviewedWorkloadBootstrap.cjs'
+        } else { Join-Path $PSScriptRoot 'ProofAdmissionFixture.cjs' }
         Assert-NoReparsePath $admissionFixtureSource
         $admissionFixtureHash = Get-Sha256 $admissionFixtureSource
         $admissionScriptPin = $admissionFixtureHash
@@ -560,43 +597,62 @@ internal static class MxcPin {
     internal const string QualificationNodeExe = @"$quotedNode";
     internal const string ProofAdmissionStage = @"$quotedAdmissionStage";
     internal const string ProofAdmissionScriptSha256 = "$admissionScriptPin";
+    internal const bool ProofAdmissionReviewedWorkload = $admissionReviewedPin;
 $diagnosticPins
 }
 "@
     [IO.File]::WriteAllText($pinSource, $generatedPin)
-    if ($ProofAdmissionDiagnostic) {
+    if ($stagedProofDiagnostic) {
         $admissionSupervisor = Join-Path $bin 'CLU-E-Windows-Supervisor.exe'
         $admissionArgs = $compilerBase + @('/platform:anycpu', '/main:Supervisor', "/out:$admissionSupervisor", "/reference:$web") +
             $frameworkReferences + $sources + $pinSource
-        if ((Invoke-ExactExecutable $csc $admissionArgs $stage 60) -ne 0) { throw 'Proof admission supervisor compilation failed.' }
+        if ((Invoke-ExactExecutable $csc $admissionArgs $stage 60) -ne 0) { throw 'Staged diagnostic supervisor compilation failed.' }
         Assert-NoReparsePath $admissionSupervisor
         $admissionSupervisorHash = Get-Sha256 $admissionSupervisor
-        $admissionRunner = Join-Path $repo 'tools\p2-windows-proof-admission-diagnostic.mjs'
+        if ($ReviewedWorkloadDiagnostic) {
+            $admissionRunner = Join-Path $repo 'tools\p2-windows-reviewed-workload-diagnostic.mjs'
+            $admissionSchema = 'clue-windows-reviewed-workload/1'
+            $admissionSuccess = 'REVIEWED_WORKLOADS_OBSERVED'
+            $admissionTimeout = 420
+            $admissionLabel = 'CLU-E reviewed workload'
+            $setupStage = 'REVIEWED_WORKLOAD_EXECUTION'
+        } else {
+            $admissionRunner = Join-Path $repo 'tools\p2-windows-proof-admission-diagnostic.mjs'
+            $admissionSchema = 'clue-windows-proof-admission-fixture/1'
+            $admissionSuccess = 'PRODUCTION_SHAPED_FIXTURES_OBSERVED'
+            $admissionTimeout = 220
+            $admissionLabel = 'CLU-E proof admission'
+        }
         Assert-NoReparsePath $admissionRunner
+        if ($ReviewedWorkloadDiagnostic) { $admissionRunnerHash = Get-Sha256 $admissionRunner }
         $admissionOutput = Join-Path $stage 'admission-result.json'
-        $setupStage = 'PROOF_ADMISSION_EXECUTION'
-        Write-Host '[3/4] Running production-shaped baseline and candidate fixture requests on Windows.'
+        if ($ReviewedWorkloadDiagnostic) {
+            Write-Host '[3/4] Preparing dashboard snapshots for operator review and Windows workload tests.'
+        } else {
+            $setupStage = 'PROOF_ADMISSION_EXECUTION'
+            Write-Host '[3/4] Running production-shaped baseline and candidate fixture requests on Windows.'
+        }
         $stageCleanupSafe = $false
         $admissionExitCode = Invoke-ExactExecutable $node @($admissionRunner, '--stage', $admissionStage,
-            '--supervisor', $admissionSupervisor, '--output', $admissionOutput) $repo 220
+            '--supervisor', $admissionSupervisor, '--output', $admissionOutput) $repo $admissionTimeout
         Assert-NoReparsePath $admissionOutput
         $admissionOutputItem = Get-Item -LiteralPath $admissionOutput -Force
         if ($admissionOutputItem.PSIsContainer -or $admissionOutputItem.Length -lt 1 -or $admissionOutputItem.Length -gt 32768) {
-            throw 'Proof admission fixture report has an invalid size or type.'
+            throw 'Staged diagnostic runner report has an invalid size or type.'
         }
         $admissionRead = [IO.File]::ReadAllText($admissionOutput) | ConvertFrom-Json -AsHashtable -Depth 12
         if ($admissionRead -isnot [System.Collections.IDictionary] -or
-            $admissionRead['schemaVersion'] -cne 'clue-windows-proof-admission-fixture/1' -or
+            $admissionRead['schemaVersion'] -cne $admissionSchema -or
             $admissionRead['proofAuthorization'] -isnot [bool] -or $admissionRead['proofAuthorization'] -ne $false -or
             $admissionRead['stageCleanupSafe'] -isnot [bool] -or
             $admissionRead['state'] -isnot [string] -or $admissionRead['state'] -cnotmatch '\A[A-Z][A-Z0-9_]{1,79}\z' -or
-            !$admissionRead.Contains('cases') -or !$admissionRead.Contains('refusals') -or
+            (!$ReviewedWorkloadDiagnostic -and (!$admissionRead.Contains('cases') -or !$admissionRead.Contains('refusals'))) -or
             $admissionExitCode -notin @(0, 1) -or
-            ($admissionExitCode -eq 0) -ne ($admissionRead['state'] -ceq 'PRODUCTION_SHAPED_FIXTURES_OBSERVED') -or
+            ($admissionExitCode -eq 0) -ne ($admissionRead['state'] -ceq $admissionSuccess) -or
             ($admissionExitCode -eq 0 -and !$admissionRead['stageCleanupSafe'])) {
-            throw 'Proof admission fixture report failed contract validation.'
+            throw 'Staged diagnostic runner report failed contract validation.'
         }
-        $stageCleanupSafe = $admissionRead['stageCleanupSafe']
+        if (!$ReviewedWorkloadDiagnostic) { $stageCleanupSafe = $admissionRead['stageCleanupSafe'] }
         foreach ($admissionPinnedPath in @($node, $admissionSupervisor, $mxc, $admissionFixtureSource)) {
             Assert-NoReparsePath $admissionPinnedPath
         }
@@ -604,21 +660,30 @@ $diagnosticPins
             (Get-Sha256 $admissionSupervisor) -cne $admissionSupervisorHash -or
             (Get-Sha256 $mxc) -cne $mxcHash -or
             (Get-Sha256 $admissionFixtureSource) -cne $admissionFixtureHash) {
-            throw 'A pinned proof admission diagnostic input changed during execution.'
+            throw 'A pinned staged diagnostic input changed during execution.'
+        }
+        if ($ReviewedWorkloadDiagnostic) {
+            Assert-NoReparsePath $admissionRunner
+            if ((Get-Sha256 $admissionRunner) -cne $admissionRunnerHash) {
+                throw 'The reviewed workload diagnostic runner changed during execution.'
+            }
+            $stageCleanupSafe = $admissionRead['stageCleanupSafe']
         }
         $admissionResult = $admissionRead
         $admissionCleanup = Clear-ProofAdmissionStage $stage $stageCleanupSafe
         $admissionCleanupAttempted = $true
-        $setupStage = 'PROOF_ADMISSION_FINISHED'
+        $setupStage = if ($ReviewedWorkloadDiagnostic) { 'REVIEWED_WORKLOAD_FINISHED' } else { 'PROOF_ADMISSION_FINISHED' }
         $admissionState = $admissionResult['state']
         $admissionProcessExit = $admissionExitCode
         if ($admissionCleanup -eq 'RETAINED_UNVERIFIED') {
-            $admissionState = 'PROOF_ADMISSION_STAGE_CLEANUP_UNVERIFIED'
+            $admissionState = if ($ReviewedWorkloadDiagnostic) {
+                'REVIEWED_WORKLOAD_STAGE_CLEANUP_UNVERIFIED'
+            } else { 'PROOF_ADMISSION_STAGE_CLEANUP_UNVERIFIED' }
             $admissionProcessExit = 1
             Write-Host 'The diagnostic stage was retained because cleanup is unverified.'
         }
-        Write-ProofAdmissionReport $report $admissionState $admissionExitCode
-        Write-Host ('[CLU-E proof admission] ' + $admissionState)
+        Write-StagedProofDiagnosticReport $report $admissionState $admissionExitCode
+        Write-Host "[$admissionLabel] $admissionState"
         Write-Host "[4/4] Diagnostic report: $report"
         exit $admissionProcessExit
     }
@@ -795,15 +860,16 @@ $diagnosticPins
 } catch {
     $failure = $_.Exception.Message
     Write-Host "CLU-E supervisor setup stopped: $failure"
-    if ($ProofAdmissionDiagnostic -and !$admissionCleanupAttempted) {
+    if ($stagedProofDiagnostic -and !$admissionCleanupAttempted) {
         $admissionCleanup = Clear-ProofAdmissionStage $stage $stageCleanupSafe
     }
     if ($null -ne $report -and !(Test-Path -LiteralPath $report)) {
         try {
             Assert-NoReparsePath (Split-Path -Parent $report)
-            if ($ProofAdmissionDiagnostic) {
+            if ($stagedProofDiagnostic) {
                 $admissionResult = $null
-                Write-ProofAdmissionReport $report ($setupStage + '_FAILED') $admissionExitCode
+                $admissionFailure = if ($setupFailureState) { $setupFailureState } else { $setupStage + '_FAILED' }
+                Write-StagedProofDiagnosticReport $report $admissionFailure $admissionExitCode
                 Write-Host "Diagnostic report: $report"
                 exit 1
             }
@@ -837,7 +903,7 @@ $diagnosticPins
     }
     exit 1
 } finally {
-    if (!$ProofAdmissionDiagnostic -and $stageCleanupSafe -and $null -ne $stage -and (Test-Path -LiteralPath $stage -PathType Container)) {
+    if (!$stagedProofDiagnostic -and $stageCleanupSafe -and $null -ne $stage -and (Test-Path -LiteralPath $stage -PathType Container)) {
         Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
     }
     if ($null -ne $staticDiagnosticLock) {

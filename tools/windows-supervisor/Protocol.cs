@@ -9,6 +9,7 @@ using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Web.Script.Serialization;
 using Microsoft.Win32.SafeHandles;
 
@@ -31,6 +32,11 @@ public sealed class Request
 public static class Protocol
 {
     private const int MaxRequestBytes = 1024 * 1024;
+    private const int MaxReviewedWorkloadBytes = 4096;
+    private const int MaxReviewedWorkloadTests = 64;
+    private static readonly Regex ReviewedTestPath = new Regex(
+        @"\Aui/clue-dashboard/test/[A-Za-z0-9][A-Za-z0-9._-]*\.test\.mjs\z",
+        RegexOptions.CultureInvariant);
     private static readonly string[] RequestKeys = {
         "schemaVersion", "command", "args", "cwd", "readOnlyRoots",
         "writableRoots", "env", "timeoutMs", "denyNetwork"
@@ -45,6 +51,8 @@ public static class Protocol
         var r = new Request();
         r.requestPath = LocalPath(path, false, false);
         bool proofAdmission = !String.IsNullOrEmpty(MxcPin.ProofAdmissionStage);
+        bool reviewedWorkload = MxcPin.ProofAdmissionReviewedWorkload;
+        Check(!reviewedWorkload || proofAdmission, "A reviewed workload requires a pinned proof admission stage.");
         if (proofAdmission)
             r.fixtureRoot = ProofAdmissionCaseRoot(r.requestPath);
         var serializer = Serializer();
@@ -65,7 +73,7 @@ public static class Protocol
         Check(fields["timeoutMs"] is int, "Invalid timeout type.");
         r.timeoutMs = (int)fields["timeoutMs"];
         if (proofAdmission)
-            Check(r.timeoutMs == 20000, "Invalid proof admission timeout.");
+            Check(r.timeoutMs == (reviewedWorkload ? 90000 : 20000), "Invalid proof admission timeout.");
         else
             Check(r.timeoutMs == 5000 || r.timeoutMs == 12000, "Invalid qualification timeout.");
         r.readOnlyRoots = ReadRoots(fields["readOnlyRoots"]);
@@ -90,7 +98,7 @@ public static class Protocol
             "Working directory is outside the declared roots.");
         if (proofAdmission)
         {
-            ReadProofAdmissionFixture(r, fields["env"]);
+            ReadProofAdmissionFixture(r, fields["env"], reviewedWorkload);
             return r;
         }
         EnsureQualificationFixture(r);
@@ -178,9 +186,10 @@ public static class Protocol
         return caseRoot;
     }
 
-    private static void ReadProofAdmissionFixture(Request r, object environment)
+    private static void ReadProofAdmissionFixture(Request r, object environment, bool reviewedWorkload)
     {
         bool candidate = Same(Path.GetFileName(r.fixtureRoot), "candidate");
+        bool writableCheckout = candidate && !reviewedWorkload;
         var stage = Path.GetDirectoryName(r.fixtureRoot);
         var checkout = Path.Combine(r.fixtureRoot, "checkout");
         var workspace = Path.Combine(r.fixtureRoot, "workspace");
@@ -195,12 +204,12 @@ public static class Protocol
         Check(!Overlaps(stage, nodeRoot) && !Overlaps(stage, r.systemRoot),
             "Proof admission fixture overlaps a runtime root.");
         Check(Same(r.cwd, checkout) &&
-            r.readOnlyRoots.Length == (candidate ? 3 : 4) &&
+            r.readOnlyRoots.Length == (writableCheckout ? 3 : 4) &&
             ContainsExact(nodeRoot, r.readOnlyRoots) && ContainsExact(r.systemRoot, r.readOnlyRoots) &&
-            ContainsExact(trusted, r.readOnlyRoots) && (candidate || ContainsExact(checkout, r.readOnlyRoots)) &&
-            r.writableRoots.Length == (candidate ? 4 : 3) &&
+            ContainsExact(trusted, r.readOnlyRoots) && (writableCheckout || ContainsExact(checkout, r.readOnlyRoots)) &&
+            r.writableRoots.Length == (writableCheckout ? 4 : 3) &&
             ContainsExact(workspace, r.writableRoots) && ContainsExact(temp, r.writableRoots) &&
-            ContainsExact(home, r.writableRoots) && (!candidate || ContainsExact(checkout, r.writableRoots)),
+            ContainsExact(home, r.writableRoots) && (!writableCheckout || ContainsExact(checkout, r.writableRoots)),
             "Unexpected proof admission roots.");
 
         Check(r.args.Length == 3 && r.args[0] == "-e" &&
@@ -212,10 +221,12 @@ public static class Protocol
             Check(hash == MxcPin.ProofAdmissionScriptSha256, "Proof admission script pin mismatch.");
         }
         Check(IsSyntheticFile(Path.Combine(trusted, "trusted.txt"), "clue-admission-source-v1\n") &&
-            IsSyntheticFile(Path.Combine(checkout, "input.txt"), "clue-admission-checkout-v1\n") &&
+            (reviewedWorkload || IsSyntheticFile(Path.Combine(checkout, "input.txt"), "clue-admission-checkout-v1\n")) &&
             IsSyntheticFile(Path.Combine(r.fixtureRoot, "outside", "forbidden.txt"), "clue-admission-outside-v1\n") &&
             IsSyntheticFile(Path.Combine(home, "user.npmrc"), "") &&
             IsSyntheticFile(Path.Combine(home, "global.npmrc"), ""), "Proof admission fixture inputs do not match.");
+        if (reviewedWorkload)
+            EnsureReviewedWorkload(checkout, trusted);
 
         var cache = CanonicalPath(Path.Combine(home, "npm-cache"), true);
         var interpreter = CanonicalPath(Path.Combine(systemDirectory, "cmd.exe"), false);
@@ -264,6 +275,42 @@ public static class Protocol
             env.Add(pair.Key, pair.Value);
         }
         r.env = env;
+    }
+
+    private static void EnsureReviewedWorkload(string checkout, string trusted)
+    {
+        var manifest = CanonicalPath(Path.Combine(trusted, "reviewed-workload.json"), false);
+        string json;
+        using (var stream = new FileStream(manifest, FileMode.Open, FileAccess.Read, FileShare.Read))
+        {
+            Check(IsSingleLink(stream) && stream.Length > 0 && stream.Length <= MaxReviewedWorkloadBytes,
+                "Invalid reviewed workload manifest file.");
+            using (var reader = new StreamReader(stream, new UTF8Encoding(false, true), false))
+                json = reader.ReadToEnd();
+        }
+        var serializer = Serializer();
+        CheckUniqueKeys(json, serializer);
+        var fields = serializer.DeserializeObject(json) as IDictionary<string, object>;
+        Check(fields != null && fields.Count == 2 && fields.ContainsKey("schemaVersion") && fields.ContainsKey("testPaths") &&
+            AsText(fields["schemaVersion"], 64) == "clue-windows-reviewed-workload/1", "Invalid reviewed workload manifest.");
+        var tests = ReadStrings(fields["testPaths"], MaxReviewedWorkloadTests, 128);
+        Check(tests.Length > 0, "Reviewed workload requires at least one test.");
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var test in tests)
+        {
+            Check(ReviewedTestPath.IsMatch(test) && seen.Add(test), "Invalid reviewed workload test path.");
+            EnsureReviewedFile(checkout, test);
+        }
+        EnsureReviewedFile(checkout, "package.json");
+        EnsureReviewedFile(checkout, "ui/clue-dashboard/index.html");
+        EnsureReviewedFile(checkout, "ui/clue-dashboard/app.js");
+    }
+
+    private static void EnsureReviewedFile(string checkout, string relativePath)
+    {
+        var path = CanonicalPath(Path.Combine(checkout, relativePath.Replace('/', '\\')), false);
+        using (var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
+            Check(IsSingleLink(stream), "Reviewed workload input must be a single-link file.");
     }
 
     private static void EnsureQualificationFixture(Request r)
@@ -388,15 +435,19 @@ public static class Protocol
         path = CanonicalPath(path, false);
         using (var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
         {
-            FileInformation information;
-            if (!GetFileInformationByHandle(stream.SafeFileHandle, out information) ||
-                information.NumberOfLinks != 1 || stream.Length != marker.Length)
+            if (!IsSingleLink(stream) || stream.Length != marker.Length)
                 return false;
             foreach (char expected in marker)
                 if (stream.ReadByte() != expected)
                     return false;
             return true;
         }
+    }
+
+    private static bool IsSingleLink(FileStream stream)
+    {
+        FileInformation information;
+        return GetFileInformationByHandle(stream.SafeFileHandle, out information) && information.NumberOfLinks == 1;
     }
 
     private static bool LocalSocketTargets(string json)
