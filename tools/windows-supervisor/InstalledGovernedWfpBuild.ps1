@@ -10,7 +10,8 @@ param(
     [Parameter(Mandatory)] [int] $OperatorSessionId,
     [Parameter(Mandatory)] [int] $OperatorPid,
     [switch] $OwnerLoss,
-    [switch] $ActiveLoss
+    [switch] $ActiveLoss,
+    [switch] $Production
 )
 
 Set-StrictMode -Version Latest
@@ -110,7 +111,9 @@ function Assert-ProtectedRoot([string] $Path, [string] $Dacl) {
 # Keep the parent receipt independent of elevated console output.
 $failureExitCode = 41
 try {
-    if ($OwnerLoss -and $ActiveLoss) { throw 'WFP_BUILD_DIAGNOSTIC_MODES_CONFLICT' }
+    if (($OwnerLoss -and ($ActiveLoss -or $Production)) -or ($ActiveLoss -and $Production)) {
+        throw 'WFP_BUILD_DIAGNOSTIC_MODES_CONFLICT'
+    }
     if (!$IsWindows -or $PSVersionTable.PSVersion.Major -lt 7 -or $OperatorSessionId -le 0 -or $OperatorPid -le 0 -or
         ![Environment]::UserInteractive) { throw 'WFP_BUILD_INTERACTIVE_WINDOWS_REQUIRED' }
     if ($OperatorSid.Length -gt 128 -or $OperatorSid -cnotmatch '\AS-1(?:-[0-9]{1,15}){2,16}\z' -or
@@ -182,7 +185,8 @@ public static class ClueGovernedWfpOperator
         $failureExitCode = 44
         $programFiles = [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles)
         Assert-LocalExactPath $programFiles $true
-        $protectedRoot = Join-Path $programFiles ".clue-governed-wfp-$runId"
+        $protectedLeaf = if ($Production) { ".clue-proof-production-$runId" } else { ".clue-governed-wfp-$runId" }
+        $protectedRoot = Join-Path $programFiles $protectedLeaf
         $dacl = "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;RC;;;OW)(A;OICI;0x1200a9;;;$OperatorSid)"
         if (Test-Path -LiteralPath $protectedRoot) { throw 'WFP_BUILD_PROTECTED_STAGE_COLLISION' }
         $security = [Security.AccessControl.DirectorySecurity]::new()
@@ -193,22 +197,29 @@ public static class ClueGovernedWfpOperator
         $bin = Join-Path $protectedRoot 'bin'
         $null = [IO.Directory]::CreateDirectory($sourceDir)
         $null = [IO.Directory]::CreateDirectory($bin)
+        if ($Production) {
+            $runs = Join-Path $protectedRoot 'runs'
+            $null = [IO.Directory]::CreateDirectory($runs)
+            Assert-LocalExactPath $runs $true
+        }
         $engine = Join-Path $bin 'wxc-exec.exe'
         [IO.File]::Copy($stageEngine, $engine, $false)
         Assert-Image $engine $EngineSha256 134217728 -Microsoft
         $failureExitCode = 45
         $sourcePins = [ordered]@{
-            'Supervisor.cs' = '55d379eb6f13e848639663c2c58cb6c62547ab6658c99a5c06384015828e0068'
-            'Protocol.cs' = '11a2727d811b6963782b3dc2600d3ef5476b3b4ef2e1b4d7fad81076df806118'
+            'ProductionProofSession.cs' = 'b2592b259d19d662ec339ae1d2929471fedb6f4a571531fedbdb659fd7e9a732'
+            'ProductionProofRequest.cs' = '22bc835b89e30d895aaedb4c7ee9d1dfc82264b4b3dc650bc17b7f188e361a99'
+            'Supervisor.cs' = 'b6f20a9a91820950a98af141ddf84239a67276564a123e069a8d62a5cdd00e37'
+            'Protocol.cs' = 'a8d30925039ec3307d5472d4cb3ed881ee028e9b96d8274374fa133b3d496abc'
             'NativeJob.cs' = '11db6d635accb80083b198aa2c78a49fb6b3f7952011946e4fda430e95e2618d'
             'WfpBootstrapRun.cs' = '92bfb701d33f672bc3788c3d67a74d0bc7baf96d11f41597989e4c869e74f990'
             'WfpContainerIdentity.cs' = 'adf701f021cba2cf6de73660e8f890ce18fa1de690cbf227059154e41442bb34'
             'WfpLoopbackLease.cs' = '22f6da4c0a380763e00c17892b10452c3746a42c346e63467e997d077e60c9d0'
             'WfpDropObservation.cs' = 'f9131d325ce6f30d77840d2f786b1ca2898e82338156aa98b7cb3f8c0946510b'
             'WfpBfeWatch.cs' = '6fa8d9c9f7865a35783082f11fb210a64f28705b8f63431c016288a34fc5ab4c'
-            'WfpIntegratedRun.cs' = 'a73e7bb66c2b6e6dd02ccb30186af3d42b2c750b76c740c97a1de897585676fd'
-            'WfpIntegratedGuardian.cs' = 'bcef987d117d2074ebc18a115eba5a4883fb1e502dad0becdfffb28bb94e8bbe'
-            'WfpIntegratedActiveBackup.cs' = 'c68ea89c196acbb9644664ba5d3985ddfa421d1c83a33694ffbdbafe440573eb'
+            'WfpIntegratedRun.cs' = 'cdb8746b294dbd7e1e290896d6d9fe7915a65eefbce457a73381891f3d38a69f'
+            'WfpIntegratedGuardian.cs' = '52a8e79ca5bfb481299f4e61699f8df40fc4e1083309ba0fe875ca9654b9a833'
+            'WfpIntegratedActiveBackup.cs' = '3d99dadeb1a4950fd94599672062c2ecd74d786d40dcf3e637d6b933b2c9b437'
             'GovernedWorkloadBootstrap.cjs' = '1350631e94c3fa7ce45a74ca298d5e8bea6b983fab1c0c465be97b90bf871ae6'
             'GovernedWfpBindPrelude.cjs' = '334ca86fb237c565f38b17a7b84485c5fc1b603d1b16e07a68a3278cf42a37e9'
         }
@@ -220,24 +231,37 @@ public static class ClueGovernedWfpOperator
         }
         $bootstrapHash = Copy-PinnedSource 'GovernedWorkloadBootstrap.cjs' $sourcePins['GovernedWorkloadBootstrap.cjs'] $sourceDir
         $preludeHash = Copy-PinnedSource 'GovernedWfpBindPrelude.cjs' $sourcePins['GovernedWfpBindPrelude.cjs'] $sourceDir
+        if ($Production) {
+            $runtimePrelude = Join-Path $protectedRoot 'production-bind-prelude.cjs'
+            [IO.File]::Copy((Join-Path $PSScriptRoot 'GovernedWfpBindPrelude.cjs'), $runtimePrelude, $false)
+            Assert-Image $runtimePrelude $preludeHash 8192
+        }
         $pinSource = Join-Path $sourceDir 'MxcPin.cs'
         $ownerLossPin = if ($OwnerLoss) { 'true' } else { 'false' }
         $activeLossPin = if ($ActiveLoss) { 'true' } else { 'false' }
+        $productionPin = if ($Production) { 'true' } else { 'false' }
+        $governedPin = if ($Production) { 'false' } else { 'true' }
+        $stagePin = if ($Production) { '' } else { $admission }
+        $scriptPin = if ($Production) { '' } else { $bootstrapHash }
+        $operatorPidPin = if ($Production) { 0 } else { $OperatorPid }
+        $nodeHashPin = if ($Production) { $NodeSha256 } else { '' }
         $generatedPin = @"
 internal static class MxcPin {
     internal const string Sha256 = "$EngineSha256";
     internal const string QualificationTempRoot = @"$QualificationTemp";
     internal const string QualificationNodeExe = @"$Node";
-    internal const string ProofAdmissionStage = @"$admission";
-    internal const string ProofAdmissionScriptSha256 = "$bootstrapHash";
+    internal const string QualificationNodeSha256 = "$nodeHashPin";
+    internal const bool ProofProductionAdmission = $productionPin;
+    internal const string ProofAdmissionStage = @"$stagePin";
+    internal const string ProofAdmissionScriptSha256 = "$scriptPin";
     internal const bool ProofAdmissionReviewedWorkload = false;
-    internal const bool ProofAdmissionGovernedWorkload = true;
+    internal const bool ProofAdmissionGovernedWorkload = $governedPin;
     internal const string ProofAdmissionNpmCliSha256 = "$NpmCliSha256";
-    internal const bool GovernedWfpIntegration = true;
+    internal const bool GovernedWfpIntegration = $governedPin;
     internal const bool GovernedWfpOwnerLoss = $ownerLossPin;
     internal const bool GovernedWfpActiveLoss = $activeLossPin;
     internal const string GovernedWfpPreludeSha256 = "$preludeHash";
-    internal const int GovernedWfpOperatorPid = $OperatorPid;
+    internal const int GovernedWfpOperatorPid = $operatorPidPin;
 }
 "@
         [IO.File]::WriteAllText($pinSource, $generatedPin)
@@ -296,14 +320,18 @@ internal static class MxcPin {
         $start.WorkingDirectory = $destination
         $start.UseShellExecute = $false
         $start.CreateNoWindow = $true
-        $start.ArgumentList.Add('--governed-wfp-guardian')
+        if ($Production) {
+            $start.ArgumentList.Add('--production-session')
+            $start.ArgumentList.Add([string] $OperatorPid)
+        } else { $start.ArgumentList.Add('--governed-wfp-guardian') }
         $start.Environment.Clear()
         $start.Environment['SystemRoot'] = $systemRoot
         $start.Environment['WINDIR'] = $systemRoot
         $start.Environment['PATH'] = [Environment]::SystemDirectory
         $guardian = [Diagnostics.Process]::Start($start)
         try {
-            $listening = Join-Path $protectedRoot 'guardian-listening.txt'
+            $markerName = if ($Production) { 'production-session-ready.txt' } else { 'guardian-listening.txt' }
+            $listening = Join-Path $protectedRoot $markerName
             $clock = [Diagnostics.Stopwatch]::StartNew()
             while (![IO.File]::Exists($listening) -and $clock.ElapsedMilliseconds -lt 8000 -and
                 !$guardian.HasExited -and !$operator.HasExited) {
@@ -319,7 +347,9 @@ internal static class MxcPin {
             }
             $failureExitCode = 50
             $receipt = [ordered]@{
-                schemaVersion = if ($ActiveLoss) {
+                schemaVersion = if ($Production) {
+                    'clue-proof-production-installed-image/1'
+                } elseif ($ActiveLoss) {
                     'clue-governed-wfp-active-loss-installed-image/1'
                 } elseif ($OwnerLoss) {
                     'clue-governed-wfp-owner-loss-installed-image/1'

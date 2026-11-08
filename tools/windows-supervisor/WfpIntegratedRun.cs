@@ -50,11 +50,13 @@ internal sealed class WfpIntegratedRun : IDisposable
     private bool identityVerified, leaseVerified, removalVerified, failed, finished, passed;
     private bool guardianLossDetected, ownerExitVerified, nodeExited, releaseWithheld, ownerLossObserved;
     private bool backupSurvived;
+    private bool productionBackupVerified;
 
     internal WfpIntegratedRun(Request request)
     {
         this.request = request;
-        workspace = Protocol.CanonicalPath(Path.Combine(request.fixtureRoot, "workspace"), true);
+        workspace = Protocol.CanonicalPath(request.productionProof
+            ? request.productionGateDirectory : Path.Combine(request.fixtureRoot, "workspace"), true);
         pipeName = WfpIntegratedGuardian.PipeName();
         using (var self = OpenProcess(ProcessQueryLimitedInformation, false, GetCurrentProcessId()))
         {
@@ -122,12 +124,18 @@ internal sealed class WfpIntegratedRun : IDisposable
                         phase = Phase.OwnerLoss;
                         break;
                     }
+                    if (request.productionProof)
+                    {
+                        ConnectBackup();
+                        productionBackupVerified = true;
+                    }
                     Release("wfp-release-go.txt");
                     phase = Phase.Workload;
                     break;
                 case Phase.Workload:
                 case Phase.OwnerLoss:
                     RequireGuardian();
+                    if (request.productionProof) RequireBackup();
                     return;
                 case Phase.Active:
                     RequireGuardian();
@@ -253,7 +261,7 @@ internal sealed class WfpIntegratedRun : IDisposable
     private static string ReadProtectedMarker(string name)
     {
         string imageDirectory = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
-        string root = Path.GetDirectoryName(imageDirectory);
+        string root = MxcPin.ProofProductionAdmission ? ProductionProofSession.RunRoot : Path.GetDirectoryName(imageDirectory);
         string marker = Path.Combine(root, name);
         if (!File.Exists(marker)) return null;
         using (var input = new FileStream(Protocol.CanonicalPath(marker, false), FileMode.Open, FileAccess.Read, FileShare.Read))
@@ -411,7 +419,7 @@ internal sealed class WfpIntegratedRun : IDisposable
 
     private static void Await(IAsyncResult pending, Stopwatch timeout)
     {
-        int limit = MxcPin.GovernedWfpActiveLoss ? ActivePipeTimeoutMs : PipeTimeoutMs;
+        int limit = MxcPin.GovernedWfpActiveLoss || MxcPin.ProofProductionAdmission ? ActivePipeTimeoutMs : PipeTimeoutMs;
         while (!pending.IsCompleted)
         {
             if (timeout.ElapsedMilliseconds >= limit)
@@ -481,6 +489,16 @@ internal sealed class WfpIntegratedRun : IDisposable
         string directory = Protocol.CanonicalPath(Path.GetDirectoryName(request.requestPath), true);
         string path = Path.Combine(directory, "wfp-integration-result.json");
         var serializer = new JavaScriptSerializer { MaxJsonLength = 4096 };
+        if (request.productionProof)
+        {
+            WriteNew(path, serializer.Serialize(new {
+                schemaVersion = "clue-windows-production-wfp/1",
+                state = passed ? "PRODUCTION_WFP_LIFECYCLE_VERIFIED" : "PRODUCTION_WFP_LIFECYCLE_UNVERIFIED",
+                identityVerified, leaseVerified, jobEmpty, removalVerified, control, armed, productionBackupVerified,
+                proofAuthorization = false,
+            }));
+            return;
+        }
         if (MxcPin.GovernedWfpActiveLoss)
         {
             WriteNew(path, serializer.Serialize(new {

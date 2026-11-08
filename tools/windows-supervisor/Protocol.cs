@@ -28,9 +28,14 @@ public sealed class Request
     public string wfpMode;
     public string wfpContainerId;
     public bool integratedWfp;
+    public bool productionProof;
+    public string productionWorkspace;
+    public string productionGateDirectory;
+    public string productionPrivateDirectory;
+    public string productionNpmCli;
 }
 
-public static class Protocol
+public static partial class Protocol
 {
     private const int MaxRequestBytes = 1024 * 1024;
     private const int MaxNpmCliBytes = 1024 * 1024;
@@ -54,11 +59,13 @@ public static class Protocol
     {
         var r = new Request();
         r.requestPath = LocalPath(path, false, false);
+        bool productionProof = MxcPin.ProofProductionAdmission;
         bool proofAdmission = !String.IsNullOrEmpty(MxcPin.ProofAdmissionStage);
         bool reviewedWorkload = MxcPin.ProofAdmissionReviewedWorkload;
         bool governedWorkload = MxcPin.ProofAdmissionGovernedWorkload;
         Check(!(reviewedWorkload && governedWorkload), "Conflicting pinned proof admission modes.");
         Check(proofAdmission || !(reviewedWorkload || governedWorkload), "Missing pinned proof admission stage.");
+        Check(!productionProof || !proofAdmission, "Conflicting production and diagnostic proof modes.");
         if (proofAdmission)
             r.fixtureRoot = ProofAdmissionCaseRoot(r.requestPath);
         var serializer = Serializer();
@@ -66,6 +73,7 @@ public static class Protocol
         using (var stream = new FileStream(r.requestPath, FileMode.Open, FileAccess.Read, FileShare.Read))
         {
             Check(stream.Length > 0 && stream.Length <= MaxRequestBytes, "Invalid request size.");
+            Check(!productionProof || IsSingleLink(stream), "Production request file must have one link.");
             using (var reader = new StreamReader(stream, new UTF8Encoding(false, true), false))
                 json = reader.ReadToEnd();
         }
@@ -78,7 +86,9 @@ public static class Protocol
         Check(fields["denyNetwork"] is bool && (bool)fields["denyNetwork"], "Network denial is required.");
         Check(fields["timeoutMs"] is int, "Invalid timeout type.");
         r.timeoutMs = (int)fields["timeoutMs"];
-        if (proofAdmission)
+        if (productionProof)
+            Check(r.timeoutMs >= 1 && r.timeoutMs <= 5400000, "Invalid production proof timeout.");
+        else if (proofAdmission)
         {
             int deadline = reviewedWorkload ? 90000 : 20000;
             if (governedWorkload)
@@ -104,6 +114,11 @@ public static class Protocol
         r.cwd = LocalPath(AsText(fields["cwd"], 4096), true, false);
         Check(InRoots(r.cwd, r.readOnlyRoots) || InRoots(r.cwd, r.writableRoots),
             "Working directory is outside the declared roots.");
+        if (productionProof)
+        {
+            ReadProductionProof(r, fields["env"]);
+            return r;
+        }
         if (proofAdmission)
         {
             ReadProofAdmissionFixture(r, fields["env"], reviewedWorkload, governedWorkload);
@@ -147,7 +162,7 @@ public static class Protocol
             "process", Object("commandLine", commandLine.ToString(), "cwd", r.cwd,
                 "env", entries.ToArray(), "inheritDefaultEnv", false, "timeout", 0),
             "filesystem", Object("readonlyPaths", r.readOnlyRoots, "readwritePaths", r.writableRoots,
-                "deniedPaths", new[] { Path.Combine(r.fixtureRoot, "private") }),
+                "deniedPaths", new[] { r.productionProof ? r.productionPrivateDirectory : Path.Combine(r.fixtureRoot, "private") }),
             "network", Object("egress", Object("default", "deny"),
                 "ingress", Object("default", "deny", "hostLoopback", "deny")),
             // The pinned Node fixture needs Win32k initialization. Keep UI scoped to its job.

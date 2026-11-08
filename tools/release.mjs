@@ -93,6 +93,7 @@ const REQUIRED_OPERATOR_PATHS = [
   'CLUE-Windows-Governed-WFP.bat',
   'CLUE-Windows-Governed-WFP-Owner-Loss.bat',
   'CLUE-Windows-Governed-WFP-Active-Loss.bat',
+  'CLUE-Windows-Proof-Supervisor.bat',
   'CONFIG-EDIT.md',
   'MANIFEST.txt',
   'clue-status.md',

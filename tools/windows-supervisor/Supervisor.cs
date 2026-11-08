@@ -24,81 +24,104 @@ internal static class Supervisor
             if (MxcPin.GovernedWfpIntegration && MxcPin.GovernedWfpOwnerLoss && args.Length == 1 &&
                 args[0] == "--governed-wfp-owner-loss-readback")
                 return WfpIntegratedGuardian.ReadBackOwnerLoss();
+            if (MxcPin.ProofProductionAdmission && args.Length == 2 && args[0] == "--production-session")
+            {
+                ProductionProofSession.SetOperator(args[1]);
+                return WfpIntegratedGuardian.RunProductionRegistration();
+            }
+            if (MxcPin.ProofProductionAdmission && args.Length == 4 &&
+                (args[0] == "--production-guardian" || args[0] == "--production-backup"))
+            {
+                ProductionProofSession.SetRole(args[1], args[2], args[3]);
+                return args[0] == "--production-guardian" ? WfpIntegratedGuardian.Run() : WfpIntegratedGuardian.RunActiveBackup();
+            }
             if (args.Length != 2 || args[0] != "--request-file")
                 return Refuse("REQUEST_ARGUMENTS_INVALID");
 
             Request request = Protocol.Read(args[1]);
-            phase = "ENGINE_PIN";
-            string install = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
-            string engine = Protocol.CanonicalPath(Path.Combine(install, "wxc-exec.exe"), false);
-            Protocol.EnsurePrivatePath(request, engine);
-            string directory = Path.GetDirectoryName(request.requestPath);
-            string prefix = Path.Combine(directory, "mxc-" + Guid.NewGuid().ToString("N"));
-            string config = prefix + ".json";
-            string log = prefix + ".log";
-
-            // Keep the pinned image open through process creation and execution.
-            using (var image = new FileStream(engine, FileMode.Open, FileAccess.Read, FileShare.Read))
+            using (var nodePin = request.productionProof
+                ? ProductionProofSession.PinTool(request.command, MxcPin.QualificationNodeSha256, 128 * 1024 * 1024) : null)
+            using (var npmPin = request.productionProof && request.productionNpmCli != null
+                ? ProductionProofSession.PinTool(request.productionNpmCli, MxcPin.ProofAdmissionNpmCliSha256, 1024 * 1024) : null)
             {
-                if (image.Length < 1 || image.Length > 128L * 1024 * 1024 ||
-                    !String.Equals(Hash(image), MxcPin.Sha256, StringComparison.Ordinal))
-                    return Refuse("MXC_IMAGE_PIN_MISMATCH");
-
-                try
+                if (request.productionProof)
                 {
-                    phase = "CONFIG_WRITE";
-                    using (var file = new FileStream(config, FileMode.CreateNew, FileAccess.Write, FileShare.None))
-                    using (var writer = new StreamWriter(file, new UTF8Encoding(false)))
-                        writer.Write(Protocol.BuildConfig(request));
-
-                    int remaining = request.timeoutMs - (int)Math.Min(clock.ElapsedMilliseconds, Int32.MaxValue);
-                    if (remaining < 1) return 124;
-                    bool deadlineExpired;
-                    phase = "ENGINE_RUN";
-                    int exit;
-                    if (request.integratedWfp)
-                    {
-                        var integrated = new WfpIntegratedRun(request);
-                        bool lifecycleComplete = false;
-                        try
-                        {
-                            exit = NativeJob.Run(engine, log, config, request.systemRoot, remaining,
-                                out deadlineExpired, integrated.Observe, () => lifecycleComplete = integrated.Finish(true));
-                        }
-                        finally { integrated.Dispose(); }
-                        if (!lifecycleComplete) return Refuse("GOVERNED_WFP_INTEGRATION_INCOMPLETE");
-                    }
-                    else if (request.wfpMode == null)
-                        exit = NativeJob.Run(engine, log, config, request.systemRoot, remaining, out deadlineExpired);
-                    else
-                    {
-                        var wfp = new WfpBootstrapRun(request);
-                        bool jobEmpty = false;
-                        bool lifecycleComplete;
-                        try
-                        {
-                            exit = NativeJob.Run(engine, log, config, request.systemRoot, remaining,
-                                out deadlineExpired, wfp.Observe, () => jobEmpty = true);
-                        }
-                        finally { lifecycleComplete = wfp.Finish(jobEmpty); }
-                        if (!lifecycleComplete) return Refuse("WFP_BOOTSTRAP_LIFECYCLE_INCOMPLETE");
-                    }
-                    if (deadlineExpired) return 124;
-                    if (exit == 0) return 0;
-                    // A protected backend record distinguishes a workload failure from an MXC
-                    // startup refusal. Workload stdout/stderr cannot authorize the exit code.
-                    phase = "ENGINE_LOG";
-                    string outcome = InspectWorkloadExit(log, exit);
-                    if (outcome != "EXIT_CONFIRMED")
-                        return Refuse("MXC_EXECUTION_REFUSED ENGINE_EXIT_" + exit + " " + outcome);
-                    Console.Error.WriteLine("[CLU-E supervisor] WORKLOAD_EXIT_0x" +
-                        unchecked((uint)exit).ToString("X8"));
-                    return exit == 124 || exit == 125 ? 1 : exit;
+                    phase = "PRODUCTION_SESSION";
+                    ProductionProofSession.Prepare(request);
                 }
-                finally
+                phase = "ENGINE_PIN";
+                string install = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
+                string engine = Protocol.CanonicalPath(Path.Combine(install, "wxc-exec.exe"), false);
+                Protocol.EnsurePrivatePath(request, engine);
+                string directory = Path.GetDirectoryName(request.requestPath);
+                string prefix = Path.Combine(directory, "mxc-" + Guid.NewGuid().ToString("N"));
+                string config = prefix + ".json";
+                string log = prefix + ".log";
+
+                // Keep the pinned image open through process creation and execution.
+                using (var image = new FileStream(engine, FileMode.Open, FileAccess.Read, FileShare.Read))
                 {
-                    File.Delete(config);
-                    File.Delete(log);
+                    if (image.Length < 1 || image.Length > 128L * 1024 * 1024 ||
+                        !String.Equals(Hash(image), MxcPin.Sha256, StringComparison.Ordinal))
+                        return Refuse("MXC_IMAGE_PIN_MISMATCH");
+
+                    try
+                    {
+                        phase = "CONFIG_WRITE";
+                        using (var file = new FileStream(config, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                        using (var writer = new StreamWriter(file, new UTF8Encoding(false)))
+                            writer.Write(Protocol.BuildConfig(request));
+
+                        int remaining = request.timeoutMs - (int)Math.Min(clock.ElapsedMilliseconds, Int32.MaxValue);
+                        if (remaining < 1) return 124;
+                        bool deadlineExpired;
+                        phase = "ENGINE_RUN";
+                        int exit;
+                        if (request.integratedWfp)
+                        {
+                            var integrated = new WfpIntegratedRun(request);
+                            bool lifecycleComplete = false;
+                            try
+                            {
+                                exit = NativeJob.Run(engine, log, config, request.systemRoot, remaining,
+                                    out deadlineExpired, integrated.Observe, () => lifecycleComplete = integrated.Finish(true));
+                            }
+                            finally { integrated.Dispose(); }
+                            if (!lifecycleComplete) return Refuse("GOVERNED_WFP_INTEGRATION_INCOMPLETE");
+                        }
+                        else if (request.wfpMode == null)
+                            exit = NativeJob.Run(engine, log, config, request.systemRoot, remaining, out deadlineExpired);
+                        else
+                        {
+                            var wfp = new WfpBootstrapRun(request);
+                            bool jobEmpty = false;
+                            bool lifecycleComplete;
+                            try
+                            {
+                                exit = NativeJob.Run(engine, log, config, request.systemRoot, remaining,
+                                    out deadlineExpired, wfp.Observe, () => jobEmpty = true);
+                            }
+                            finally { lifecycleComplete = wfp.Finish(jobEmpty); }
+                            if (!lifecycleComplete) return Refuse("WFP_BOOTSTRAP_LIFECYCLE_INCOMPLETE");
+                        }
+                        if (deadlineExpired) return 124;
+                        if (request.productionProof && exit == 125) return Refuse("PRODUCTION_PROOF_WORKLOAD_LAUNCH_UNVERIFIED");
+                        if (exit == 0) return 0;
+                        // A protected backend record distinguishes a workload failure from an MXC
+                        // startup refusal. Workload stdout/stderr cannot authorize the exit code.
+                        phase = "ENGINE_LOG";
+                        string outcome = InspectWorkloadExit(log, exit);
+                        if (outcome != "EXIT_CONFIRMED")
+                            return Refuse("MXC_EXECUTION_REFUSED ENGINE_EXIT_" + exit + " " + outcome);
+                        Console.Error.WriteLine("[CLU-E supervisor] WORKLOAD_EXIT_0x" +
+                            unchecked((uint)exit).ToString("X8"));
+                        return exit == 124 || exit == 125 ? 1 : exit;
+                    }
+                    finally
+                    {
+                        File.Delete(config);
+                        File.Delete(log);
+                    }
                 }
             }
         }

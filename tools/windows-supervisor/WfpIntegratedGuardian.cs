@@ -19,6 +19,7 @@ internal static partial class WfpIntegratedGuardian
     private const int ConnectTimeoutMs = 1200000;
     private const int HandshakeTimeoutMs = 20000;
     private const int WorkloadTimeoutMs = 360000;
+    private const int ProductionWorkloadTimeoutMs = 5400000;
     private const int AbortDrainTimeoutMs = 8000;
     private const int OwnerLossReadbackTimeoutMs = 8000;
     internal const uint OwnerLossExitCode = 0x06E00001;
@@ -44,6 +45,7 @@ internal static partial class WfpIntegratedGuardian
 
     private static string StageId()
     {
+        if (MxcPin.ProofProductionAdmission) return ProductionProofSession.RunId;
         if (!MxcPin.GovernedWfpIntegration || String.IsNullOrEmpty(MxcPin.ProofAdmissionStage) ||
             Path.GetFileName(MxcPin.ProofAdmissionStage) != "admission")
             throw new InvalidDataException("GUARDIAN_STAGE_PIN_INVALID");
@@ -58,11 +60,13 @@ internal static partial class WfpIntegratedGuardian
         NamedPipeServerStream pipe = null;
         OwnedHandle operatorProcess = null;
         OwnedHandle client = null;
+        OwnedHandle productionJob = null;
         WfpContainerIdentity.OwnedHandle node = null;
         WfpLoopbackLease lease = null;
         ActiveBackupScope activeBackup = null;
         WfpBfeWatch bfe = null;
         IntPtr sourceJob = IntPtr.Zero;
+        bool productionJobVerified = false;
         bool removed = false;
         string phase = "PREFLIGHT";
         try
@@ -71,6 +75,8 @@ internal static partial class WfpIntegratedGuardian
             using (var imagePin = OpenPinnedImage(image))
             using (var identity = WindowsIdentity.GetCurrent())
             using (var self = Process.GetCurrentProcess())
+            using (var registeredClient = MxcPin.ProofProductionAdmission
+                ? OpenBackupPeer(ProductionProofSession.WrapperPid, image, identity.User, self.SessionId, false) : null)
             {
                 operatorProcess = OpenOperatorProcess(identity, self.SessionId);
                 string expectedNode = Protocol.CanonicalPath(MxcPin.QualificationNodeExe, false);
@@ -80,11 +86,13 @@ internal static partial class WfpIntegratedGuardian
                 var pending = pipe.BeginWaitForConnection(null, null);
                 var signal = pending.AsyncWaitHandle;
                 var connectionClock = Stopwatch.StartNew();
+                int connectionTimeout = MxcPin.ProofProductionAdmission ? HandshakeTimeoutMs : ConnectTimeoutMs;
                 while (true)
                 {
                     if (WaitForSingleObject(operatorProcess, 0) != WaitTimeout)
                         throw new InvalidDataException("GUARDIAN_OPERATOR_EXITED");
-                    if (connectionClock.ElapsedMilliseconds >= ConnectTimeoutMs) throw new TimeoutException();
+                    if (registeredClient != null) RequireLive(registeredClient);
+                    if (connectionClock.ElapsedMilliseconds >= connectionTimeout) throw new TimeoutException();
                     if (signal.WaitOne(SampleIntervalMs)) break;
                 }
                 pipe.EndWaitForConnection(pending);
@@ -110,12 +118,19 @@ internal static partial class WfpIntegratedGuardian
                     node = WfpContainerIdentity.OpenForJob(query.DangerousGetHandle(), nodePid);
                     sid = WfpContainerIdentity.ReadForJob(query.DangerousGetHandle(), node, expectedNode);
                 }
+                if (MxcPin.ProofProductionAdmission)
+                {
+                    productionJob = DuplicateJob(client, sourceJob, JobQuery | JobTerminate);
+                    if (!WfpContainerIdentity.Same(sid, WfpContainerIdentity.ReadForJob(productionJob.DangerousGetHandle(), node, expectedNode)))
+                        throw new InvalidDataException("GUARDIAN_PRODUCTION_JOB_IDENTITY_CHANGED");
+                    productionJobVerified = true;
+                }
                 phase = "LEASE_INSTALL";
                 bool installationCleanupVerified;
                 lease = WfpLoopbackLease.Install(sid, out installationCleanupVerified, LeaseSublayerWeight);
                 bfe.RequireHealthy();
                 VerifyLiveScope(client, sourceJob, node, expectedNode, sid, lease);
-                if (MxcPin.GovernedWfpActiveLoss)
+                if (MxcPin.GovernedWfpActiveLoss || MxcPin.ProofProductionAdmission)
                     activeBackup = StartActiveBackup(image, self.Id, client, sourceJob, nodePid, sid, lease, bfe);
                 WriteLine(pipe, "ARMED", client, bfe);
 
@@ -123,8 +138,17 @@ internal static partial class WfpIntegratedGuardian
                 while (true)
                 {
                     phase = "COMMAND";
-                    int deadline = checkedOnce ? HandshakeTimeoutMs + WorkloadTimeoutMs : 2 * HandshakeTimeoutMs;
-                    string command = ReadLine(pipe, client, bfe, clock, deadline);
+                    int workloadDeadline = MxcPin.ProofProductionAdmission ?
+                        ProductionWorkloadTimeoutMs + 2 * HandshakeTimeoutMs : WorkloadTimeoutMs + HandshakeTimeoutMs;
+                    int deadline = checkedOnce ? workloadDeadline : 2 * HandshakeTimeoutMs;
+                    Action productionHealth = null;
+                    if (MxcPin.ProofProductionAdmission)
+                        productionHealth = () =>
+                        {
+                            RequireLive(operatorProcess);
+                            if (activeBackup.Process.HasExited) throw new InvalidDataException("GUARDIAN_BACKUP_EXITED");
+                        };
+                    string command = ReadLine(pipe, client, bfe, clock, deadline, productionHealth);
                     if (command == "CHECK")
                     {
                         if (checkedOnce) throw new InvalidDataException("GUARDIAN_DUPLICATE_CHECK");
@@ -135,7 +159,8 @@ internal static partial class WfpIntegratedGuardian
                         checkedOnce = true;
                         continue;
                     }
-                    if (command == "FAULT" && checkedOnce && (MxcPin.GovernedWfpOwnerLoss || MxcPin.GovernedWfpActiveLoss))
+                    if (command == "FAULT" && checkedOnce && !MxcPin.ProofProductionAdmission &&
+                        (MxcPin.GovernedWfpOwnerLoss || MxcPin.GovernedWfpActiveLoss))
                     {
                         phase = "OWNER_LOSS";
                         VerifyLiveScope(client, sourceJob, node, expectedNode, sid, lease);
@@ -160,6 +185,13 @@ internal static partial class WfpIntegratedGuardian
                             throw new InvalidDataException("GUARDIAN_JOB_NOT_DRAINED");
                     }
                     bfe.RequireHealthy();
+                    if (MxcPin.ProofProductionAdmission)
+                    {
+                        WfpLoopbackLease.VerifyExactDynamicInstalled(sid, lease.SublayerKey, lease.FilterKeys,
+                            lease.FilterIds, LeaseSublayerWeight);
+                        PublishProtectedMarker(image, ProductionDrainFile, "DRAIN");
+                        WaitForProductionBackupRemoval(activeBackup, client, operatorProcess, bfe);
+                    }
                     removed = lease.ReleaseAndVerify();
                     if (!removed) throw new InvalidDataException("GUARDIAN_LEASE_REMOVAL_UNVERIFIED");
                     WriteLine(pipe, "REMOVED", client, bfe);
@@ -189,12 +221,18 @@ internal static partial class WfpIntegratedGuardian
             {
                 try
                 {
-                    if (WaitForAbortDrain(client, sourceJob, node)) removed = lease.ReleaseAndVerify();
+                    if (productionJobVerified)
+                    {
+                        DrainFailedBackupJob(productionJob, node);
+                        removed = lease.ReleaseAndVerify();
+                    }
+                    else if (WaitForAbortDrain(client, sourceJob, node)) removed = lease.ReleaseAndVerify();
                 }
                 catch (Exception) { }
                 if (!removed) Console.Error.WriteLine("[CLU-E WFP guardian] ABORT_DRAIN_UNVERIFIED");
             }
             if (node != null) node.Dispose();
+            if (productionJob != null) productionJob.Dispose();
             if (activeBackup != null) activeBackup.Process.Dispose();
             if (client != null) client.Dispose();
             if (operatorProcess != null) operatorProcess.Dispose();
@@ -302,6 +340,7 @@ internal static partial class WfpIntegratedGuardian
 
     private static string ProtectedImage()
     {
+        if (MxcPin.ProofProductionAdmission) return ProductionProofSession.Image();
         string image = Protocol.CanonicalPath(Assembly.GetExecutingAssembly().Location, false);
         string programFiles = Protocol.CanonicalPath(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), true);
         string digest = Path.GetFileName(Path.GetDirectoryName(image));
@@ -312,7 +351,7 @@ internal static partial class WfpIntegratedGuardian
         return image;
     }
 
-    private static FileStream OpenPinnedImage(string image)
+    internal static FileStream OpenPinnedImage(string image)
     {
         var stream = new FileStream(image, FileMode.Open, FileAccess.Read, FileShare.Read);
         try
@@ -341,6 +380,7 @@ internal static partial class WfpIntegratedGuardian
 
     private static string ProtectedRunRoot(string image)
     {
+        if (MxcPin.ProofProductionAdmission) return ProductionProofSession.RunRoot;
         return Protocol.CanonicalPath(Path.GetDirectoryName(Path.GetDirectoryName(image)), true);
     }
 
@@ -366,8 +406,9 @@ internal static partial class WfpIntegratedGuardian
         if (!new WindowsPrincipal(identity).IsInRole(WindowsBuiltInRole.Administrator) ||
             TokenValue(identity.Token, TokenElevation) != 1 || identity.User == null)
             throw new InvalidDataException("GUARDIAN_ELEVATION_REQUIRED");
-        if (MxcPin.GovernedWfpOperatorPid < 1) throw new InvalidDataException("GUARDIAN_OPERATOR_PIN_INVALID");
-        var process = OpenProcess(ProcessQueryLimitedInformation | Synchronize, false, (uint)MxcPin.GovernedWfpOperatorPid);
+        int operatorPid = MxcPin.ProofProductionAdmission ? ProductionProofSession.OperatorPid : MxcPin.GovernedWfpOperatorPid;
+        if (operatorPid < 1) throw new InvalidDataException("GUARDIAN_OPERATOR_PIN_INVALID");
+        var process = OpenProcess(ProcessQueryLimitedInformation | Synchronize, false, (uint)operatorPid);
         try
         {
             if (process.IsInvalid) throw LastError();
@@ -407,11 +448,14 @@ internal static partial class WfpIntegratedGuardian
         finally { LocalFree(descriptor); }
     }
 
-    private static OwnedHandle OpenClient(NamedPipeServerStream pipe, string image, SecurityIdentifier operatorSid, int session)
+    private static OwnedHandle OpenClient(NamedPipeServerStream pipe, string image, SecurityIdentifier operatorSid, int session,
+        bool registration = false)
     {
         uint pid;
         if (!GetNamedPipeClientProcessId(pipe.SafePipeHandle, out pid)) throw LastError();
-        if (pid == 0 || pid > Int32.MaxValue) throw new InvalidDataException("GUARDIAN_CLIENT_PID_INVALID");
+        if (pid == 0 || pid > Int32.MaxValue ||
+            (MxcPin.ProofProductionAdmission && !registration && pid != (uint)ProductionProofSession.WrapperPid))
+            throw new InvalidDataException("GUARDIAN_CLIENT_PID_INVALID");
         var process = OpenProcess(ProcessDuplicateHandle | ProcessQueryLimitedInformation | Synchronize, false, pid);
         try
         {
@@ -478,14 +522,15 @@ internal static partial class WfpIntegratedGuardian
         if (WaitForSingleObject(process, 0) != WaitTimeout) throw new InvalidDataException("GUARDIAN_CLIENT_EXITED");
     }
 
-    private static string ReadLine(NamedPipeServerStream pipe, OwnedHandle client, WfpBfeWatch bfe, Stopwatch clock, int deadline)
+    private static string ReadLine(NamedPipeServerStream pipe, OwnedHandle client, WfpBfeWatch bfe, Stopwatch clock,
+        int deadline, Action productionHealth = null)
     {
         var line = new StringBuilder(MaxLineBytes);
         var next = new byte[1];
         while (line.Length < MaxLineBytes)
         {
             var pending = pipe.BeginRead(next, 0, 1, null, null);
-            AwaitSignal(pending.AsyncWaitHandle, client, bfe, clock, deadline);
+            AwaitSignal(pending.AsyncWaitHandle, client, bfe, clock, deadline, productionHealth);
             if (pipe.EndRead(pending) != 1) throw new EndOfStreamException();
             if (next[0] == 10) return line.ToString();
             if (next[0] < 32 || next[0] > 126) throw new InvalidDataException("GUARDIAN_WIRE_INVALID");
@@ -502,12 +547,14 @@ internal static partial class WfpIntegratedGuardian
         pipe.EndWrite(pending);
     }
 
-    private static void AwaitSignal(WaitHandle signal, OwnedHandle client, WfpBfeWatch bfe, Stopwatch clock, int deadline)
+    private static void AwaitSignal(WaitHandle signal, OwnedHandle client, WfpBfeWatch bfe, Stopwatch clock, int deadline,
+        Action productionHealth = null)
     {
         while (true)
         {
             RequireLive(client);
             bfe.RequireHealthy();
+            if (productionHealth != null) productionHealth();
             long remaining = deadline - clock.ElapsedMilliseconds;
             if (remaining <= 0) throw new TimeoutException();
             if (signal.WaitOne((int)Math.Min(SampleIntervalMs, remaining))) return;

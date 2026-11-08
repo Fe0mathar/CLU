@@ -23,6 +23,7 @@ internal static partial class WfpIntegratedGuardian
     private const string BackupReadyFile = "active-backup-ready.txt";
     private const string BackupSurvivedFile = "active-backup-survived.txt";
     private const string BackupCleanupFile = "active-backup-cleanup.txt";
+    private const string ProductionDrainFile = "guardian-drain-requested.txt";
 
     private sealed class BackupKeys
     {
@@ -54,8 +55,11 @@ internal static partial class WfpIntegratedGuardian
             FormatBackupKeys(primaryKeys), FormatBackupIds(primaryKeys.Ids), FormatBackupKeys(keys),
         }));
 
+        string arguments = MxcPin.ProofProductionAdmission ? "--production-backup " + ProductionProofSession.RunId + " " +
+            ProductionProofSession.OperatorPid.ToString(CultureInfo.InvariantCulture) + " " +
+            ProductionProofSession.WrapperPid.ToString(CultureInfo.InvariantCulture) : "--governed-wfp-active-backup";
         var start = new ProcessStartInfo {
-            FileName = image, Arguments = "--governed-wfp-active-backup", WorkingDirectory = ProtectedRunRoot(image),
+            FileName = image, Arguments = arguments, WorkingDirectory = ProtectedRunRoot(image),
             UseShellExecute = false, CreateNoWindow = true,
         };
         string systemRoot = Path.GetDirectoryName(Environment.SystemDirectory);
@@ -106,7 +110,7 @@ internal static partial class WfpIntegratedGuardian
 
     internal static int RunActiveBackup()
     {
-        if (!MxcPin.GovernedWfpActiveLoss || MxcPin.GovernedWfpOwnerLoss) return 125;
+        if (!MxcPin.ProofProductionAdmission && (!MxcPin.GovernedWfpActiveLoss || MxcPin.GovernedWfpOwnerLoss)) return 125;
         OwnedHandle job = null;
         WfpContainerIdentity.OwnedHandle node = null;
         WfpLoopbackLease backup = null;
@@ -128,6 +132,7 @@ internal static partial class WfpIntegratedGuardian
                 int nodePid = ParseBackupPid(fields[2]);
                 long source;
                 if (primaryPid == wrapperPid || primaryPid == self.Id || wrapperPid == self.Id || nodePid == self.Id ||
+                    (MxcPin.ProofProductionAdmission && wrapperPid != ProductionProofSession.WrapperPid) ||
                     !Int64.TryParse(fields[3], NumberStyles.None, CultureInfo.InvariantCulture, out source) || source < 1)
                     throw new InvalidDataException("GUARDIAN_BACKUP_PLAN_INVALID");
                 var primaryKeys = ParseBackupKeys(fields, 4);
@@ -164,6 +169,20 @@ internal static partial class WfpIntegratedGuardian
                     bfe.RequireHealthy();
                     PublishProtectedMarker(image, BackupIdsFile, FormatBackupIds(backupKeys.Ids));
                     PublishProtectedMarker(image, BackupReadyFile, "READY");
+
+                    if (MxcPin.ProofProductionAdmission)
+                    {
+                        phase = "PRODUCTION_DRAIN";
+                        WaitForProductionDrain(image, primary, client, operatorProcess, job, node, bfe);
+                        VerifyBackupKeysInstalled(sid, primaryKeys, LeaseSublayerWeight);
+                        VerifyBackupKeysInstalled(sid, backupKeys, BackupSublayerWeight);
+                        backupRemoved = backup.ReleaseAndVerify();
+                        if (!backupRemoved || !WfpLoopbackLease.VerifyExactDynamicAbsent(backupKeys.Sublayer, backupKeys.Filters))
+                            throw new InvalidDataException("GUARDIAN_BACKUP_REMOVAL_UNVERIFIED");
+                        bfe.RequireHealthy();
+                        PublishProtectedMarker(image, BackupCleanupFile, "REMOVED");
+                        return 0;
+                    }
 
                     phase = "PRIMARY_LOSS";
                     WaitForPrimaryLoss(primary, client, operatorProcess, bfe);
@@ -213,6 +232,50 @@ internal static partial class WfpIntegratedGuardian
             if (job != null) job.Dispose();
         }
         return 125;
+    }
+
+    private static void WaitForProductionDrain(string image, OwnedHandle primary, OwnedHandle client,
+        OwnedHandle operatorProcess, OwnedHandle job, WfpContainerIdentity.OwnedHandle node, WfpBfeWatch bfe)
+    {
+        var clock = Stopwatch.StartNew();
+        while (clock.ElapsedMilliseconds < ProductionWorkloadTimeoutMs + 2 * HandshakeTimeoutMs)
+        {
+            RequireLive(primary);
+            RequireLive(client);
+            RequireLive(operatorProcess);
+            bfe.RequireHealthy();
+            string drain = ReadProtectedBackupText(image, ProductionDrainFile, 5, false);
+            if (drain != null)
+            {
+                if (drain != "DRAIN" || !ExactBackupJobDrained(job, node))
+                    throw new InvalidDataException("GUARDIAN_BACKUP_PRODUCTION_DRAIN_INVALID");
+                return;
+            }
+            Thread.Sleep(SampleIntervalMs);
+        }
+        throw new TimeoutException();
+    }
+
+    private static void WaitForProductionBackupRemoval(ActiveBackupScope backup, OwnedHandle client,
+        OwnedHandle operatorProcess, WfpBfeWatch bfe)
+    {
+        var clock = Stopwatch.StartNew();
+        while (clock.ElapsedMilliseconds < AbortDrainTimeoutMs)
+        {
+            RequireLive(client);
+            RequireLive(operatorProcess);
+            bfe.RequireHealthy();
+            if (backup.Process.HasExited)
+            {
+                if (backup.Process.ExitCode != 0 ||
+                    ReadProtectedBackupText(backup.Image, BackupCleanupFile, 7, true) != "REMOVED" ||
+                    !WfpLoopbackLease.VerifyExactDynamicAbsent(backup.Keys.Sublayer, backup.Keys.Filters))
+                    throw new InvalidDataException("GUARDIAN_BACKUP_PRODUCTION_REMOVAL_INVALID");
+                return;
+            }
+            Thread.Sleep(SampleIntervalMs);
+        }
+        throw new TimeoutException();
     }
 
     private static OwnedHandle OpenBackupPeer(int pid, string image, SecurityIdentifier sid, int session, bool elevated)
