@@ -277,7 +277,7 @@ function report() {
     data?.proofExecutionBoundary?.nativeQualification === 'VERIFIED' &&
     data.proofExecutionBoundary.qualificationSha256 === process.env[QUALIFICATION_SHA256];
   const qualification = qualificationVerified ? 'VERIFIED'
-    : qualificationConfigured ? 'RECEIPT_NOT_VERIFIED' : 'PENDING_NATIVE_CANARIES';
+    : qualificationConfigured ? 'RECEIPT_NOT_VERIFIED' : 'PENDING_PRODUCTION_QUALIFICATION';
   const supervisorState = !windows ? 'WINDOWS_HOST_REQUIRED' : !builtBrokerPresent ? 'BUILD_REQUIRED'
     : !pathConfigured || !pinConfigured ? 'CONFIGURATION_MISSING' : !pinShapeValid ? 'PIN_INVALID'
     : qualificationVerified ? 'PIN_AND_QUALIFICATION_VERIFIED'

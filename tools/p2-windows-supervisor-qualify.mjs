@@ -1,4 +1,4 @@
-/** Native canaries for the separately installed Windows proof supervisor. */
+/** Fixture diagnostics for the separately installed Windows supervisor. */
 import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
@@ -556,6 +556,7 @@ async function exercise({ report, root, supervisor, resolveWindowsSupervisor, ru
 async function qualify(wfpDiagnostic) {
   const report = {
     schemaVersion: 'clue-console-probe-native-supervisor/1', checkedAt: new Date().toISOString(),
+    qualificationScope: 'FIXTURE_DIAGNOSTIC', proofAuthorization: false,
     status: 'PENDING', canaryStatus: 'PENDING', blocker: null, supervisorSha256: null, supervisorPathSha256: null, host: null,
     cases: Object.fromEntries([...REQUIRED, 'measurement-parity'].map((id) => [id, 'NOT_EXECUTED'])),
     caseEvidence: {}, fixtureRemoved: null,
@@ -615,7 +616,7 @@ async function qualify(wfpDiagnostic) {
     report.blocker ??= 'REQUIRED_CANARY_FAILED';
   } else if (report.fixtureRemoved === true && REQUIRED.every((id) => report.cases[id] === 'PASS')) {
     report.canaryStatus = 'PASS';
-    report.status = 'MEASUREMENT_PENDING';
+    report.status = 'FIXTURE_CANARIES_PASSED';
   } else {
     report.blocker = 'REQUIRED_CANARIES_NOT_EXECUTED';
   }

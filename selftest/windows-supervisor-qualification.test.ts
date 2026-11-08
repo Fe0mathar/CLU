@@ -34,6 +34,8 @@ const host = {
 function fixture() {
   return {
     schemaVersion: WINDOWS_SUPERVISOR_QUALIFICATION_SCHEMA,
+    qualificationScope: 'PRODUCTION_PROOF',
+    proofAuthorization: true,
     checkedAt: '2026-11-07T18:00:00.000Z',
     supervisorSha256: supervisor.sha256,
     supervisorPathSha256: windowsSupervisorPathSha256(supervisor.command),
@@ -48,8 +50,11 @@ function fixture() {
   };
 }
 
-test('Windows qualification requires all pre-proof canaries and allows later measurement parity', () => {
+test('Windows production qualification requires all admission cases and allows later measurement parity', () => {
   const receipt = fixture();
+  assert.equal(receipt.schemaVersion, 'clue-windows-supervisor-production-qualification/2');
+  assert.ok(WINDOWS_SUPERVISOR_QUALIFICATION_CASES.includes('production-request-admission'));
+  assert.ok(WINDOWS_SUPERVISOR_QUALIFICATION_CASES.includes('network-boundary-fault'));
   assert.doesNotThrow(() => verifyWindowsSupervisorQualificationReceipt(receipt, supervisor, host));
   for (const name of WINDOWS_SUPERVISOR_QUALIFICATION_CASES) {
     assert.throws(() => verifyWindowsSupervisorQualificationReceipt({
@@ -60,6 +65,51 @@ test('Windows qualification requires all pre-proof canaries and allows later mea
     /all mandatory pre-proof canaries/);
   assert.throws(() => verifyWindowsSupervisorQualificationReceipt({ ...receipt, fixtureRemoved: false }, supervisor, host),
     /all mandatory pre-proof canaries/);
+});
+
+test('Passing Windows fixture diagnostics cannot authorize production proof', () => {
+  const legacy = {
+    ...fixture(),
+    schemaVersion: 'clue-console-probe-native-supervisor/1',
+    cases: {
+      'allowed-command': 'PASS',
+      'filesystem-denied': 'PASS',
+      'secrets-denied': 'PASS',
+      'network-denied': 'PASS',
+      'descendant-timeout': 'PASS',
+      'launcher-cancellation': 'PASS',
+      'tamper-refused': 'PASS',
+      'measurement-parity': 'NOT_EXECUTED',
+    },
+  };
+  for (const receipt of [
+    legacy,
+    { ...legacy, qualificationScope: undefined, proofAuthorization: undefined },
+    {
+      schemaVersion: 'clue-mxc-supervisor-diagnostic/1',
+      proofAuthorization: false,
+      canaryReport: legacy,
+    },
+    { ...fixture(), proofAuthorization: false },
+  ]) {
+    assert.throws(() => verifyWindowsSupervisorQualificationReceipt(receipt, supervisor, host),
+      /diagnostic.*cannot authorize/i);
+  }
+});
+
+test('Windows production qualification needs explicit scope and authorization', () => {
+  const receipt = fixture();
+  for (const changed of [
+    { ...receipt, qualificationScope: undefined },
+    { ...receipt, qualificationScope: 'FIXTURE_ONLY' },
+    { ...receipt, proofAuthorization: undefined },
+    { ...receipt, proofAuthorization: 'true' },
+  ]) {
+    assert.throws(() => verifyWindowsSupervisorQualificationReceipt(changed, supervisor, host),
+      /explicit production authorization/i);
+  }
+  assert.throws(() => verifyWindowsSupervisorQualificationReceipt({ ...receipt, schemaVersion: 'unknown' }, supervisor, host),
+    /receipt is malformed/i);
 });
 
 test('Windows qualification refuses stale binary, installed path, OS, account and Node identities', () => {

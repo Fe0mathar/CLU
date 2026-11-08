@@ -10,7 +10,8 @@ const QUALIFICATION_PATH = 'CLU_WINDOWS_SUPERVISOR_QUALIFICATION';
 const QUALIFICATION_SHA256 = 'CLU_WINDOWS_SUPERVISOR_QUALIFICATION_SHA256';
 const MAX_RECEIPT_BYTES = 1024 * 1024;
 
-export const WINDOWS_SUPERVISOR_QUALIFICATION_SCHEMA = 'clue-console-probe-native-supervisor/1';
+const WINDOWS_SUPERVISOR_DIAGNOSTIC_SCHEMA = 'clue-console-probe-native-supervisor/1';
+export const WINDOWS_SUPERVISOR_QUALIFICATION_SCHEMA = 'clue-windows-supervisor-production-qualification/2';
 export const WINDOWS_SUPERVISOR_QUALIFICATION_CASES = [
   'allowed-command',
   'filesystem-denied',
@@ -19,6 +20,8 @@ export const WINDOWS_SUPERVISOR_QUALIFICATION_CASES = [
   'descendant-timeout',
   'launcher-cancellation',
   'tamper-refused',
+  'production-request-admission',
+  'network-boundary-fault',
 ] as const;
 
 interface QualificationHost {
@@ -89,10 +92,16 @@ export function verifyWindowsSupervisorQualificationReceipt(
   host: QualificationHost,
 ): void {
   const receipt = object(value);
+  if (receipt?.['schemaVersion'] === WINDOWS_SUPERVISOR_DIAGNOSTIC_SCHEMA || receipt?.['proofAuthorization'] === false) {
+    throw new Error('Windows supervisor diagnostic evidence cannot authorize production proof. Supply a production qualification receipt.');
+  }
   if (receipt === null || receipt['schemaVersion'] !== WINDOWS_SUPERVISOR_QUALIFICATION_SCHEMA ||
     typeof receipt['checkedAt'] !== 'string' || !Number.isFinite(Date.parse(receipt['checkedAt'])) ||
     new Date(receipt['checkedAt']).toISOString() !== receipt['checkedAt']) {
     throw new Error('The Windows supervisor qualification receipt is malformed.');
+  }
+  if (receipt['qualificationScope'] !== 'PRODUCTION_PROOF' || receipt['proofAuthorization'] !== true) {
+    throw new Error('Windows supervisor qualification requires explicit production authorization.');
   }
   if (receipt['supervisorSha256'] !== supervisor.sha256 ||
     receipt['supervisorPathSha256'] !== windowsSupervisorPathSha256(supervisor.command)) {
@@ -115,8 +124,8 @@ function inside(root: string, path: string): boolean {
 }
 
 /**
- * Require a locally generated, operator-pinned acceptance receipt. The trusted launcher's
- * pin is the authorization. A report alone cannot establish continuing OS containment.
+ * Require the operator-pinned production receipt for the installed boundary. The
+ * trusted launcher approves the exact receipt bytes and the supervisor enforces containment.
  */
 export function requireWindowsSupervisorQualification(
   supervisor: WindowsExecutionSupervisor,

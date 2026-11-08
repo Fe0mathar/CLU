@@ -54,3 +54,16 @@ Use a disposable fixture containing harmless canaries and run these cases agains
 | Measurement parity | Opening, candidate, and closing runs use the same native Windows boundary and pinned toolchain. Preserve their execution receipts with the release evidence. |
 
 The portable tests check input and pin validation. Run this native suite before claiming Windows containment or starting the P2 proof ceremony.
+
+## Production admission receipt
+
+The bundled MXC supervisor and its seven-canary suite currently exercise pinned fixtures. The suite writes `clue-console-probe-native-supervisor/1` reports with `proofAuthorization` set to `false`. Older reports using that schema remain fixture evidence and require a fresh production qualification.
+
+To authorize production proof, the trusted launcher must pin a locally generated and reviewed `clue-windows-supervisor-production-qualification/2` receipt. It requires `qualificationScope` equal to `PRODUCTION_PROOF` and `proofAuthorization` equal to `true`. The verifier checks the exact receipt bytes, supervisor executable and installed path, host, account, Node executable and version, successful cleanup, and all nine pre-proof cases.
+
+| Additional required case | Evidence to review before approval |
+|---|---|
+| `production-request-admission` | The exact installed supervisor accepts broker-shaped requests for the approved Node and npm workloads in normal baseline and candidate roots, with the documented access limits and deadlines. The qualification exercises harmless workloads and records both admissions and refusals. |
+| `network-boundary-fault` | Network containment continues to cover the controlled host, LAN, and confined loopback endpoints through the declared enforcement failure model. Retain fault and recovery evidence for the exact configuration. If the design uses an independent isolation layer, exercise it while the inner enforcement component is unavailable. |
+
+The two new cases supplement the seven pre-proof cases above. Measurement parity still comes from the later proof ceremony. Treat synthetic cancellation and sampled BFE recovery as diagnostic inputs to the review. A production qualification runner for the bundled supervisor depends on a production-capable OS boundary and its native tests.

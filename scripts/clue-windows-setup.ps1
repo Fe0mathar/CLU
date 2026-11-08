@@ -21,11 +21,17 @@ function Invoke-ClueNode {
     finally { $process.Dispose() }
 }
 
-function Clear-SupervisorSettings {
-    foreach ($name in @('CLU_WINDOWS_SUPERVISOR_PATH', 'CLU_WINDOWS_SUPERVISOR_SHA256',
-        'CLU_WINDOWS_SUPERVISOR_QUALIFICATION', 'CLU_WINDOWS_SUPERVISOR_QUALIFICATION_SHA256')) {
+function Clear-QualificationSettings {
+    foreach ($name in @('CLU_WINDOWS_SUPERVISOR_QUALIFICATION', 'CLU_WINDOWS_SUPERVISOR_QUALIFICATION_SHA256')) {
         Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue
     }
+}
+
+function Clear-SupervisorSettings {
+    foreach ($name in @('CLU_WINDOWS_SUPERVISOR_PATH', 'CLU_WINDOWS_SUPERVISOR_SHA256')) {
+        Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue
+    }
+    Clear-QualificationSettings
 }
 
 function Test-DashboardPort {
@@ -90,21 +96,20 @@ try {
                 $env:CLU_WINDOWS_SUPERVISOR_QUALIFICATION = $existingReceipt
                 $env:CLU_WINDOWS_SUPERVISOR_QUALIFICATION_SHA256 = $existingReceiptDigest
                 $supervisorReady = (Invoke-ClueNode @('tools/p2-windows-setup.mjs', 'receipt')) -eq 0
+                if (!$supervisorReady) { Clear-QualificationSettings }
             }
-            $qualify = if (!$supervisorReady) { Read-Host 'Run the native containment canaries against this pinned executable? [y/N]' } else { '' }
+            $qualify = if (!$supervisorReady) { Read-Host 'Run the native fixture canaries against this pinned executable? [y/N]' } else { '' }
             if ($qualify -match '^(y|yes)$') {
-                if ((Invoke-ClueNode @('tools/p2-windows-supervisor-qualify.mjs', '--output', $canaries)) -eq 0 -and
-                    (Test-Path -LiteralPath $canaries -PathType Leaf)) {
-                    $env:CLU_WINDOWS_SUPERVISOR_QUALIFICATION = $canaries
-                    $env:CLU_WINDOWS_SUPERVISOR_QUALIFICATION_SHA256 = (Get-FileHash -LiteralPath $canaries -Algorithm SHA256).Hash.ToLowerInvariant()
-                    $supervisorReady = (Invoke-ClueNode @('tools/p2-windows-setup.mjs', 'receipt')) -eq 0
-                    if ($supervisorReady) { Write-Host "Native canaries passed. Receipt $canaries" }
+                $fixtureCode = Invoke-ClueNode @('tools/p2-windows-supervisor-qualify.mjs', '--output', $canaries)
+                Write-Host "Native fixture diagnostics exited with code $fixtureCode."
+                if (Test-Path -LiteralPath $canaries -PathType Leaf) {
+                    Write-Host "Native fixture report $canaries"
                 }
             }
         }
     }
     if (!$supervisorReady) {
-        Write-Host 'Native proof is blocked pending a trusted compatible supervisor and a passing qualification receipt.'
+        Write-Host 'Native proof requires a trusted compatible supervisor and an independently reviewed production qualification receipt.'
     }
 
     Write-Host '[3/5] Checking legacy clu OpenAI model access.'
