@@ -343,7 +343,8 @@ public static class Protocol
         {
             r.integratedWfp = true;
             r.wfpContainerId = "sandbox-" + Guid.NewGuid().ToString("N").Substring(0, 16);
-            script = ReadGovernedWfpPrelude(trusted) + "\n" + script;
+            string activeMode = MxcPin.GovernedWfpActiveLoss ? "const governedWfpActiveLoss = true;\n" : "";
+            script = ReadGovernedWfpPrelude(trusted) + "\n" + activeMode + script;
         }
         r.args = new[] { "-e", script, side, operation };
         EnsureCommandLineLength(r);

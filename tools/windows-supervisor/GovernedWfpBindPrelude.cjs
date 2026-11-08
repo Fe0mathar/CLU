@@ -87,6 +87,12 @@ async function runGovernedWfpBindPrelude(workspace) {
     });
   }
 
+  function requireReleaseAbsent() {
+    if (fs.lstatSync(path.join(workspace, 'wfp-release-go.txt'), { throwIfNoEntry: false })) {
+      throw new Error('Unexpected npm release gate');
+    }
+  }
+
   publish('wfp-start.txt', String(process.pid));
   let samplesMatch = true;
   for (const phase of ['control', 'armed']) {
@@ -95,6 +101,19 @@ async function runGovernedWfpBindPrelude(workspace) {
     if (!codes.every((code) => code === 0 || code === 10013)) throw new Error('WFP socket result unavailable');
     publish('wfp-' + phase + '-result.txt', codes.join(' '));
     samplesMatch = samplesMatch && codes.every((code) => code === (phase === 'control' ? 0 : 10013));
+  }
+  if (typeof governedWfpActiveLoss !== 'undefined' && governedWfpActiveLoss === true) {
+    if (!samplesMatch) throw new Error('WFP socket result mismatch');
+    for (const phase of ['active', 'fault']) {
+      requireReleaseAbsent();
+      await waitForGate('wfp-' + phase + '-go.txt');
+      requireReleaseAbsent();
+      const codes = await Promise.all(lanes.map(([address, tcp, ipv6]) => attempt(address, tcp, ipv6)));
+      if (!codes.every((code) => code === 10013)) throw new Error('WFP active-loss denial unverified');
+      publish('wfp-' + phase + '-result.txt', codes.join(' '));
+    }
+    await new Promise((resolve) => setTimeout(resolve, gateTimeoutMs));
+    throw new Error('WFP active-loss cancellation deadline');
   }
   await waitForGate('wfp-release-go.txt');
   if (!samplesMatch) throw new Error('WFP socket result mismatch');

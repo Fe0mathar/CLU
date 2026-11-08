@@ -12,6 +12,9 @@ const wfpSchemaVersion = 'clue-windows-governed-wfp-integration/1';
 const wfpOwnerLossSchemaVersion = 'clue-windows-governed-wfp-owner-loss/1';
 const wfpOwnerLossObserved = 'GOVERNED_WFP_OWNER_LOSS_OBSERVED';
 const wfpOwnerLossUnverified = 'GOVERNED_WFP_OWNER_LOSS_UNVERIFIED';
+const wfpActiveLossSchemaVersion = 'clue-windows-governed-wfp-active-loss/1';
+const wfpActiveLossObserved = 'GOVERNED_WFP_ACTIVE_LOSS_OBSERVED';
+const wfpActiveLossUnverified = 'GOVERNED_WFP_ACTIVE_LOSS_UNVERIFIED';
 const evidencePrefix = 'CLU_E_GOVERNED_WORKLOAD ';
 const timeouts = { candidate: 360_000, baseline: 120_000 };
 const observed = 'clue-admission-observed-v1\n';
@@ -147,21 +150,28 @@ function exactObject(value, keys) {
     Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key));
 }
 
-function readWfpIntegration(requestDir, ownerLoss) {
+function readWfpIntegration(requestDir, mode) {
   try {
     const bytes = exactFile(join(requestDir, 'wfp-integration-result.json'), 4096);
     if (!bytes?.length) return null;
     const value = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+    const activeLoss = mode === 'active-loss';
+    const ownerLoss = mode === 'owner-loss' || activeLoss;
     const checks = ['identityVerified', 'leaseVerified', 'jobEmpty', 'removalVerified'];
     if (ownerLoss) checks.push('ownerExitVerified', 'nodeExited', 'releaseWithheld');
+    if (activeLoss) checks.push('backupSurvived');
+    const phases = activeLoss ? ['control', 'armed', 'active', 'fault'] : ['control', 'armed'];
+    const schema = activeLoss ? wfpActiveLossSchemaVersion : ownerLoss ? wfpOwnerLossSchemaVersion : wfpSchemaVersion;
+    const success = activeLoss ? wfpActiveLossObserved : ownerLoss ? wfpOwnerLossObserved : 'GOVERNED_WFP_LEASE_OBSERVED';
+    const unverified = activeLoss ? wfpActiveLossUnverified : ownerLoss ? wfpOwnerLossUnverified : 'GOVERNED_WFP_LEASE_UNVERIFIED';
     const validLanes = (lanes) => lanes === null || (Array.isArray(lanes) && lanes.length === 4 &&
       lanes.every((code) => code === 0 || code === 10013));
-    if (!exactObject(value, ['schemaVersion', 'state', 'proofAuthorization', ...checks, 'control', 'armed']) ||
-        value.schemaVersion !== (ownerLoss ? wfpOwnerLossSchemaVersion : wfpSchemaVersion) || value.proofAuthorization !== false ||
-        !checks.every((key) => typeof value[key] === 'boolean') || !validLanes(value.control) || !validLanes(value.armed)) return null;
-    if (value.state === (ownerLoss ? wfpOwnerLossUnverified : 'GOVERNED_WFP_LEASE_UNVERIFIED')) return value;
-    if (value.state !== (ownerLoss ? wfpOwnerLossObserved : 'GOVERNED_WFP_LEASE_OBSERVED') || !checks.every((key) => value[key] === true) ||
-        !value.control?.every((code) => code === 0) || !value.armed?.every((code) => code === 10013)) return null;
+    if (!exactObject(value, ['schemaVersion', 'state', 'proofAuthorization', ...checks, ...phases]) ||
+        value.schemaVersion !== schema || value.proofAuthorization !== false ||
+        !checks.every((key) => typeof value[key] === 'boolean') || !phases.every((phase) => validLanes(value[phase]))) return null;
+    if (value.state === unverified) return value;
+    if (value.state !== success || !checks.every((key) => value[key] === true) ||
+        !phases.every((phase) => value[phase]?.every((code) => code === (phase === 'control' ? 0 : 10013)))) return null;
     return value;
   } catch {
     return null;
@@ -306,7 +316,7 @@ function inspectBaselineWorkspace(workspace) {
 /** Run fixed native offline preparation followed by a clean-scope governed CLU-E CLI scenario. */
 export async function exerciseGovernedWorkload({
   repoRoot, stage, supervisor, node, systemRoot, script, approve,
-  integratedWfp = false, wfpPrelude, ownerLoss = false,
+  integratedWfp = false, wfpPrelude, ownerLoss = false, activeLoss = false,
   invoke = launchSupervisor, stageCache = stageGovernedOfflineCache, progress,
 }) {
   const report = {
@@ -315,9 +325,10 @@ export async function exerciseGovernedWorkload({
     brokerConformance: { state: 'NOT_RUN', stagedBootstrapSha256: null, refusals: {}, cases: {} },
   };
   try {
-    if (typeof ownerLoss !== 'boolean' || (ownerLoss && !integratedWfp)) throw new Error('GOVERNED_WFP_OWNER_LOSS_MODE_UNVERIFIED');
+    if (typeof ownerLoss !== 'boolean' || typeof activeLoss !== 'boolean' || (ownerLoss && activeLoss) ||
+        ((ownerLoss || activeLoss) && !integratedWfp)) throw new Error('GOVERNED_WFP_OWNER_LOSS_MODE_UNVERIFIED');
     if (typeof integratedWfp !== 'boolean' || (integratedWfp && (typeof wfpPrelude !== 'string' ||
-        wfpPrelude.length > 4096 || !/^[\x09\x0a\x0d\x20-\x7e]+$/u.test(wfpPrelude)))) {
+        wfpPrelude.length > 8 * 1024 || !/^[\x09\x0a\x0d\x20-\x7e]+$/u.test(wfpPrelude)))) {
       throw new Error('GOVERNED_WFP_PRELUDE_UNVERIFIED');
     }
     const trusted = join(stage, 'trusted-source');
@@ -358,7 +369,7 @@ export async function exerciseGovernedWorkload({
     report.state = 'GOVERNED_APPROVAL_REQUIRED';
     report.approval = 'NOT_GRANTED';
     if (await approve({ source: report.source, cache: report.cache, ...(integratedWfp ? { integratedWfp: true } : {}),
-      ...(ownerLoss ? { ownerLoss: true } : {}) }) !== true) return report;
+      ...(ownerLoss ? { ownerLoss: true } : {}), ...(activeLoss ? { activeLoss: true } : {}) }) !== true) return report;
     report.approval = 'OPERATOR_APPROVED_GOVERNED_HEAD';
 
     function protectedInputs() {
@@ -382,11 +393,11 @@ export async function exerciseGovernedWorkload({
       const nativeResult = await invoke({ supervisor, requestPath, systemRoot, timeoutMs: request.timeoutMs });
       const native = nativeEvidence(nativeResult);
       const preLaunchRefusal = native.exitCode === 125 && native.refusalPhase === 'REQUEST_READ';
-      const ownerLossExpected = wfpMode === 'owner-loss';
-      const wfpIntegration = wfpMode === null ? null : readWfpIntegration(requestDir, ownerLossExpected);
+      const ownerLossExpected = wfpMode === 'owner-loss' || wfpMode === 'active-loss';
+      const wfpIntegration = wfpMode === null ? null : readWfpIntegration(requestDir, wfpMode);
       if (wfpMode !== null) {
         const notes = nativeResult.stderr.split(/\r?\n/u).map((line) =>
-          /^\[CLU-E governed WFP\] (NodeStart|Control|Armed|Workload|Drain|OwnerLoss) (GOVERNED_WFP_[A-Z0-9_]{1,62}|WIN32_ERROR_[0-9]{1,10}|TIMEOUT|REFUSED)$/u.exec(line),
+          /^\[CLU-E governed WFP\] (NodeStart|Control|Armed|Workload|Drain|OwnerLoss|Active|ActiveFault|ActiveFaultSample) (GOVERNED_WFP_[A-Z0-9_]{1,62}|WIN32_ERROR_[0-9]{1,10}|TIMEOUT|REFUSED)$/u.exec(line),
         ).filter(Boolean);
         const lifecycleNotes = ownerLossExpected ? notes.filter((note) => note[1] !== 'Drain') : notes;
         native.wfpRefusal = lifecycleNotes.length === 1 ? { phase: lifecycleNotes[0][1], code: lifecycleNotes[0][2] } : null;
@@ -480,26 +491,39 @@ export async function exerciseGovernedWorkload({
       const started = join(paths.workspace, 'broker-started.txt');
       const checkoutMarker = join(paths.checkout, 'broker-checkout-write.txt');
       const release = join(paths.workspace, 'wfp-release-go.txt');
-      if (![started, checkoutMarker, release].every(absent) || !protectedInputs() || !prebuildIntact() ||
+      const activeMarkers = activeLoss ? [
+        ['activeGateVerified', join(paths.workspace, 'wfp-active-go.txt'), 'GO'],
+        ['faultGateVerified', join(paths.workspace, 'wfp-fault-go.txt'), 'GO'],
+        ['activeSampleVerified', join(paths.workspace, 'wfp-active-result.txt'), '10013 10013 10013 10013'],
+        ['faultSampleVerified', join(paths.workspace, 'wfp-fault-result.txt'), '10013 10013 10013 10013'],
+      ] : [];
+      if (![started, checkoutMarker, release, ...activeMarkers.map(([, path]) => path)].every(absent) ||
+          !protectedInputs() || !prebuildIntact() ||
           !verifyGovernedSource(paths.checkout, expectedSource, { allowBuildOutputs: true }) ||
           inspectGovernedBuild(paths.checkout).treeSha256 !== priorBuild.treeSha256) return false;
-      progress?.('broker-owner-loss');
-      const evidence = await send(request, paths, 'owner-loss');
+      const mode = activeLoss ? 'active-loss' : 'owner-loss';
+      progress?.(`broker-${mode}`);
+      const evidence = await send(request, paths, mode);
       const { native } = evidence;
+      const phase = activeLoss ? 'ActiveFaultSample' : 'OwnerLoss';
+      const code = activeLoss ? 'GOVERNED_WFP_ACTIVE_OWNER_LOSS_ABORT' : 'GOVERNED_WFP_GUARDIAN_LOST';
+      const success = activeLoss ? wfpActiveLossObserved : wfpOwnerLossObserved;
       const nativeVerified = native.exitCode === 125 && native.failure === 'NONZERO_EXIT' &&
-        native.refusalPhase === 'ENGINE_RUN' && native.wfpRefusal?.phase === 'OwnerLoss' &&
-        native.wfpRefusal.code === 'GOVERNED_WFP_GUARDIAN_LOST' && native.wfpDrainRefusal === null &&
-        evidence.wfpIntegration?.state === wfpOwnerLossObserved;
+        native.refusalPhase === 'ENGINE_RUN' && native.wfpRefusal?.phase === phase &&
+        native.wfpRefusal.code === code && native.wfpDrainRefusal === null && evidence.wfpIntegration?.state === success;
       const host = {
         startedMarkerVerified: false, checkoutWriteVerified: false, releaseMarkerAbsent: false,
         workloadEvidenceAbsent: evidence.workloadEvidenceAbsent, protectedInputsUnchanged: false, preparedTreeVerified: false,
       };
+      for (const [name] of activeMarkers) host[name] = false;
       let afterBuild = null;
       if (nativeVerified) {
         host.startedMarkerVerified = exactMarker(started, observed);
         host.checkoutWriteVerified = exactMarker(checkoutMarker, observed);
         host.releaseMarkerAbsent = absent(release);
-        if (host.checkoutWriteVerified && host.startedMarkerVerified && host.releaseMarkerAbsent && host.workloadEvidenceAbsent) {
+        for (const [name, path, value] of activeMarkers) host[name] = exactMarker(path, value);
+        if (host.checkoutWriteVerified && host.startedMarkerVerified && host.releaseMarkerAbsent && host.workloadEvidenceAbsent &&
+            activeMarkers.every(([name]) => host[name])) {
           unlinkSync(checkoutMarker);
           host.protectedInputsUnchanged = evidence.requestUnchanged && protectedInputs() && prebuildIntact() &&
             verifyGovernedSource(paths.checkout, expectedSource, { allowBuildOutputs: true });
@@ -513,7 +537,7 @@ export async function exerciseGovernedWorkload({
       const passed = evidence.cleanupBefore && nativeVerified && Object.values(host).every(Boolean);
       report.stageCleanupSafe = passed;
       report.brokerConformance.cases.candidate = {
-        ...native, state: passed ? wfpOwnerLossObserved : wfpOwnerLossUnverified, operation: 'broker-typecheck',
+        ...native, state: passed ? success : activeLoss ? wfpActiveLossUnverified : wfpOwnerLossUnverified, operation: 'broker-typecheck',
         requestSha256: sha256(JSON.stringify(request)), workload: null, host, workspace: null,
         wfpIntegration: evidence.wfpIntegration ?? { state: 'GOVERNED_WFP_RECEIPT_UNVERIFIED' },
         beforeTreeSha256: priorBuild.treeSha256, afterTreeSha256: afterBuild?.treeSha256 ?? null,
@@ -567,8 +591,8 @@ export async function exerciseGovernedWorkload({
     const directCandidate = { ...candidateRequest, args: [realpathSync.native(npmCliPath), 'run', 'typecheck'] };
     if (!await refusal('candidateAlteredArgs', { ...directCandidate, args: [...directCandidate.args, '--pretty'] },
       candidate, broker.refusals, 'broker-started.txt')) return report;
-    if (ownerLoss) {
-      report.state = 'GOVERNED_WORKLOAD_OWNER_LOSS_UNVERIFIED';
+    if (ownerLoss || activeLoss) {
+      report.state = activeLoss ? 'GOVERNED_WORKLOAD_ACTIVE_LOSS_UNVERIFIED' : 'GOVERNED_WORKLOAD_OWNER_LOSS_UNVERIFIED';
       if (!await runBrokerOwnerLoss(directCandidate, candidate, expected)) return report;
     } else if (!await runBroker(directCandidate, candidate, 'candidate', 'broker-typecheck', expected)) return report;
 
@@ -628,8 +652,9 @@ export async function exerciseGovernedWorkload({
     if (!await refusal('baselineAlteredArgs', { ...directBaseline, args: [cli, 'doctor'] },
       baseline, broker.refusals, 'broker-started.txt') ||
       !await runBroker(directBaseline, baseline, 'baseline', 'broker-doctor', verified, report.cases.baseline)) return report;
-    broker.state = ownerLoss ? 'BROKER_OWNER_LOSS_OBSERVED' : 'BROKER_CONFORMANCE_OBSERVED';
-    report.state = ownerLoss ? 'GOVERNED_WORKLOAD_OWNER_LOSS_OBSERVED' : 'GOVERNED_WORKLOAD_OBSERVED';
+    broker.state = activeLoss ? 'BROKER_ACTIVE_LOSS_OBSERVED' : ownerLoss ? 'BROKER_OWNER_LOSS_OBSERVED' : 'BROKER_CONFORMANCE_OBSERVED';
+    report.state = activeLoss ? 'GOVERNED_WORKLOAD_ACTIVE_LOSS_OBSERVED' :
+      ownerLoss ? 'GOVERNED_WORKLOAD_OWNER_LOSS_OBSERVED' : 'GOVERNED_WORKLOAD_OBSERVED';
   } catch (error) {
     if (typeof error?.message === 'string' && /^GOVERNED_[A-Z0-9_]{1,70}$/u.test(error.message)) report.inputBlocker = error.message;
   }

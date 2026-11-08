@@ -9,7 +9,8 @@ param(
     [Parameter(Mandatory)] [string] $OperatorSid,
     [Parameter(Mandatory)] [int] $OperatorSessionId,
     [Parameter(Mandatory)] [int] $OperatorPid,
-    [switch] $OwnerLoss
+    [switch] $OwnerLoss,
+    [switch] $ActiveLoss
 )
 
 Set-StrictMode -Version Latest
@@ -109,6 +110,7 @@ function Assert-ProtectedRoot([string] $Path, [string] $Dacl) {
 # Keep the parent receipt independent of elevated console output.
 $failureExitCode = 41
 try {
+    if ($OwnerLoss -and $ActiveLoss) { throw 'WFP_BUILD_DIAGNOSTIC_MODES_CONFLICT' }
     if (!$IsWindows -or $PSVersionTable.PSVersion.Major -lt 7 -or $OperatorSessionId -le 0 -or $OperatorPid -le 0 -or
         ![Environment]::UserInteractive) { throw 'WFP_BUILD_INTERACTIVE_WINDOWS_REQUIRED' }
     if ($OperatorSid.Length -gt 128 -or $OperatorSid -cnotmatch '\AS-1(?:-[0-9]{1,15}){2,16}\z' -or
@@ -196,18 +198,19 @@ public static class ClueGovernedWfpOperator
         Assert-Image $engine $EngineSha256 134217728 -Microsoft
         $failureExitCode = 45
         $sourcePins = [ordered]@{
-            'Supervisor.cs' = 'c1445035f33a21ab09179124e19925c3fba775f3d4899656a06c7593237c8ce2'
-            'Protocol.cs' = '5cb1fe80aa78cc8f8f0ecc9f6fa7a5a4c5de22bd82901d44e5525794f2f9194a'
+            'Supervisor.cs' = '55d379eb6f13e848639663c2c58cb6c62547ab6658c99a5c06384015828e0068'
+            'Protocol.cs' = '11a2727d811b6963782b3dc2600d3ef5476b3b4ef2e1b4d7fad81076df806118'
             'NativeJob.cs' = '11db6d635accb80083b198aa2c78a49fb6b3f7952011946e4fda430e95e2618d'
             'WfpBootstrapRun.cs' = '92bfb701d33f672bc3788c3d67a74d0bc7baf96d11f41597989e4c869e74f990'
             'WfpContainerIdentity.cs' = 'adf701f021cba2cf6de73660e8f890ce18fa1de690cbf227059154e41442bb34'
             'WfpLoopbackLease.cs' = '22f6da4c0a380763e00c17892b10452c3746a42c346e63467e997d077e60c9d0'
             'WfpDropObservation.cs' = 'f9131d325ce6f30d77840d2f786b1ca2898e82338156aa98b7cb3f8c0946510b'
             'WfpBfeWatch.cs' = '6fa8d9c9f7865a35783082f11fb210a64f28705b8f63431c016288a34fc5ab4c'
-            'WfpIntegratedRun.cs' = '2bfe14573abb306bda46b4c61c6df0271619b0f42fbd94395ac043f4521895eb'
-            'WfpIntegratedGuardian.cs' = 'dc5cc80ceb0cc9929ff883aaffeb9e24394f2367695c06b93175e6c7288b4400'
+            'WfpIntegratedRun.cs' = 'a73e7bb66c2b6e6dd02ccb30186af3d42b2c750b76c740c97a1de897585676fd'
+            'WfpIntegratedGuardian.cs' = 'bcef987d117d2074ebc18a115eba5a4883fb1e502dad0becdfffb28bb94e8bbe'
+            'WfpIntegratedActiveBackup.cs' = 'c68ea89c196acbb9644664ba5d3985ddfa421d1c83a33694ffbdbafe440573eb'
             'GovernedWorkloadBootstrap.cjs' = '1350631e94c3fa7ce45a74ca298d5e8bea6b983fab1c0c465be97b90bf871ae6'
-            'GovernedWfpBindPrelude.cjs' = '2951a6d40a48426c31dd678c74d0d89627f7ea1638898cf1e1c7c3161d907f65'
+            'GovernedWfpBindPrelude.cjs' = '334ca86fb237c565f38b17a7b84485c5fc1b603d1b16e07a68a3278cf42a37e9'
         }
         $sources = foreach ($source in $sourcePins.Keys) {
             if ($source.EndsWith('.cs', [StringComparison]::Ordinal)) {
@@ -219,6 +222,7 @@ public static class ClueGovernedWfpOperator
         $preludeHash = Copy-PinnedSource 'GovernedWfpBindPrelude.cjs' $sourcePins['GovernedWfpBindPrelude.cjs'] $sourceDir
         $pinSource = Join-Path $sourceDir 'MxcPin.cs'
         $ownerLossPin = if ($OwnerLoss) { 'true' } else { 'false' }
+        $activeLossPin = if ($ActiveLoss) { 'true' } else { 'false' }
         $generatedPin = @"
 internal static class MxcPin {
     internal const string Sha256 = "$EngineSha256";
@@ -231,6 +235,7 @@ internal static class MxcPin {
     internal const string ProofAdmissionNpmCliSha256 = "$NpmCliSha256";
     internal const bool GovernedWfpIntegration = true;
     internal const bool GovernedWfpOwnerLoss = $ownerLossPin;
+    internal const bool GovernedWfpActiveLoss = $activeLossPin;
     internal const string GovernedWfpPreludeSha256 = "$preludeHash";
     internal const int GovernedWfpOperatorPid = $OperatorPid;
 }
@@ -314,7 +319,9 @@ internal static class MxcPin {
             }
             $failureExitCode = 50
             $receipt = [ordered]@{
-                schemaVersion = if ($OwnerLoss) {
+                schemaVersion = if ($ActiveLoss) {
+                    'clue-governed-wfp-active-loss-installed-image/1'
+                } elseif ($OwnerLoss) {
                     'clue-governed-wfp-owner-loss-installed-image/1'
                 } else { 'clue-governed-wfp-installed-image/1' }
                 wrapperSha256 = $wrapperHash

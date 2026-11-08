@@ -13,8 +13,8 @@ using System.Text.RegularExpressions;
 using System.Threading;
 using Microsoft.Win32.SafeHandles;
 
-// The elevated half owns one WFP lease. The standard supervisor owns the job and workload.
-internal static class WfpIntegratedGuardian
+// The elevated primary owns its WFP lease. The standard supervisor runs the workload.
+internal static partial class WfpIntegratedGuardian
 {
     private const int ConnectTimeoutMs = 1200000;
     private const int HandshakeTimeoutMs = 20000;
@@ -60,6 +60,7 @@ internal static class WfpIntegratedGuardian
         OwnedHandle client = null;
         WfpContainerIdentity.OwnedHandle node = null;
         WfpLoopbackLease lease = null;
+        ActiveBackupScope activeBackup = null;
         WfpBfeWatch bfe = null;
         IntPtr sourceJob = IntPtr.Zero;
         bool removed = false;
@@ -114,6 +115,8 @@ internal static class WfpIntegratedGuardian
                 lease = WfpLoopbackLease.Install(sid, out installationCleanupVerified, LeaseSublayerWeight);
                 bfe.RequireHealthy();
                 VerifyLiveScope(client, sourceJob, node, expectedNode, sid, lease);
+                if (MxcPin.GovernedWfpActiveLoss)
+                    activeBackup = StartActiveBackup(image, self.Id, client, sourceJob, nodePid, sid, lease, bfe);
                 WriteLine(pipe, "ARMED", client, bfe);
 
                 bool checkedOnce = false;
@@ -127,22 +130,27 @@ internal static class WfpIntegratedGuardian
                         if (checkedOnce) throw new InvalidDataException("GUARDIAN_DUPLICATE_CHECK");
                         phase = "CHECK";
                         VerifyLiveScope(client, sourceJob, node, expectedNode, sid, lease);
+                        if (activeBackup != null) VerifyActiveBackup(activeBackup, sid);
                         WriteLine(pipe, "CHECKED", client, bfe);
                         checkedOnce = true;
                         continue;
                     }
-                    if (command == "FAULT" && checkedOnce && MxcPin.GovernedWfpOwnerLoss)
+                    if (command == "FAULT" && checkedOnce && (MxcPin.GovernedWfpOwnerLoss || MxcPin.GovernedWfpActiveLoss))
                     {
                         phase = "OWNER_LOSS";
                         VerifyLiveScope(client, sourceJob, node, expectedNode, sid, lease);
-                        string keys = lease.SublayerKey.ToString("D") + " " +
-                            String.Join(" ", Array.ConvertAll(lease.FilterKeys, key => key.ToString("D")));
-                        PublishProtectedMarker(image, OwnerLossKeysFile, keys);
+                        if (activeBackup != null) VerifyActiveBackup(activeBackup, sid);
+                        else
+                        {
+                            string keys = lease.SublayerKey.ToString("D") + " " +
+                                String.Join(" ", Array.ConvertAll(lease.FilterKeys, key => key.ToString("D")));
+                            PublishProtectedMarker(image, OwnerLossKeysFile, keys);
+                        }
                         bfe.RequireHealthy();
                         if (!TerminateProcess(GetCurrentProcess(), OwnerLossExitCode)) throw LastError();
                         throw new InvalidOperationException("GUARDIAN_SELF_TERMINATION_RETURNED");
                     }
-                    if (command != "DRAIN" || !checkedOnce || MxcPin.GovernedWfpOwnerLoss)
+                    if (command != "DRAIN" || !checkedOnce || MxcPin.GovernedWfpOwnerLoss || MxcPin.GovernedWfpActiveLoss)
                         throw new InvalidDataException("GUARDIAN_COMMAND_INVALID");
                     phase = "DRAIN";
                     using (var query = DuplicateJob(client, sourceJob))
@@ -187,6 +195,7 @@ internal static class WfpIntegratedGuardian
                 if (!removed) Console.Error.WriteLine("[CLU-E WFP guardian] ABORT_DRAIN_UNVERIFIED");
             }
             if (node != null) node.Dispose();
+            if (activeBackup != null) activeBackup.Process.Dispose();
             if (client != null) client.Dispose();
             if (operatorProcess != null) operatorProcess.Dispose();
             if (bfe != null) bfe.Dispose();
@@ -426,6 +435,11 @@ internal static class WfpIntegratedGuardian
 
     private static void RequireStandardToken(OwnedHandle process, SecurityIdentifier operatorSid, int session)
     {
+        RequireScopedToken(process, operatorSid, session, false);
+    }
+
+    private static void RequireScopedToken(OwnedHandle process, SecurityIdentifier operatorSid, int session, bool elevated)
+    {
         OwnedHandle token;
         if (!OpenProcessToken(process, TokenQuery, out token)) throw LastError();
         using (token)
@@ -433,16 +447,16 @@ internal static class WfpIntegratedGuardian
         {
             IntPtr raw = token.DangerousGetHandle();
             if (!operatorSid.Equals(identity.User) || TokenValue(raw, TokenSessionId) != (uint)session ||
-                TokenValue(raw, TokenElevation) != 0 || TokenValue(raw, TokenIsAppContainer) != 0)
-                throw new InvalidDataException("GUARDIAN_STANDARD_TOKEN_INVALID");
+                TokenValue(raw, TokenElevation) != (elevated ? 1u : 0u) || TokenValue(raw, TokenIsAppContainer) != 0)
+                throw new InvalidDataException(elevated ? "GUARDIAN_ELEVATED_TOKEN_INVALID" : "GUARDIAN_STANDARD_TOKEN_INVALID");
         }
     }
 
-    private static OwnedHandle DuplicateJob(OwnedHandle client, IntPtr sourceJob)
+    private static OwnedHandle DuplicateJob(OwnedHandle client, IntPtr sourceJob, uint access = JobQuery)
     {
         RequireLive(client);
         OwnedHandle duplicate;
-        if (!DuplicateHandle(client, sourceJob, GetCurrentProcess(), out duplicate, JobQuery, false, 0)) throw LastError();
+        if (!DuplicateHandle(client, sourceJob, GetCurrentProcess(), out duplicate, access, false, 0)) throw LastError();
         if (duplicate.IsInvalid)
         {
             duplicate.Dispose();

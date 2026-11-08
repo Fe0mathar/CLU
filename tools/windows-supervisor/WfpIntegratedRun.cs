@@ -16,6 +16,7 @@ using Microsoft.Win32.SafeHandles;
 internal sealed class WfpIntegratedRun : IDisposable
 {
     private const int PipeTimeoutMs = 4000;
+    private const int ActivePipeTimeoutMs = 12000;
     private const int MarkerTimeoutMs = 15000;
     private const uint OwnerLossNodeExitTimeoutMs = 5000;
     private const int OwnerLossCleanupTimeoutMs = 25000;
@@ -36,17 +37,19 @@ internal sealed class WfpIntegratedRun : IDisposable
     private readonly Stopwatch stageClock = Stopwatch.StartNew();
     private readonly byte[] responseByte = new byte[1];
 
-    private enum Phase { NodeStart, Control, Armed, Workload, OwnerLoss }
+    private enum Phase { NodeStart, Control, Armed, Workload, OwnerLoss, Active, ActiveFault, ActiveFaultSample }
     private Phase phase;
     private int nodePid;
-    private int[] control, armed;
+    private int[] control, armed, active, fault;
     private byte[] packageSid;
     private WfpContainerIdentity.OwnedHandle node;
     private WfpContainerIdentity.OwnedHandle guardian;
+    private WfpContainerIdentity.OwnedHandle backup;
     private NamedPipeClientStream pipe;
     private IAsyncResult pendingResponse;
     private bool identityVerified, leaseVerified, removalVerified, failed, finished, passed;
     private bool guardianLossDetected, ownerExitVerified, nodeExited, releaseWithheld, ownerLossObserved;
+    private bool backupSurvived;
 
     internal WfpIntegratedRun(Request request)
     {
@@ -104,6 +107,14 @@ internal sealed class WfpIntegratedRun : IDisposable
                     leaseVerified = true;
                     pendingResponse = BeginReadResponse();
                     RequireGuardian();
+                    if (MxcPin.GovernedWfpActiveLoss)
+                    {
+                        RequireReleaseAbsent();
+                        ConnectBackup();
+                        Release("wfp-active-go.txt");
+                        phase = Phase.Active;
+                        break;
+                    }
                     if (MxcPin.GovernedWfpOwnerLoss)
                     {
                         RequireReleaseAbsent();
@@ -118,14 +129,52 @@ internal sealed class WfpIntegratedRun : IDisposable
                 case Phase.OwnerLoss:
                     RequireGuardian();
                     return;
+                case Phase.Active:
+                    RequireGuardian();
+                    RequireBackup();
+                    active = ReadBinds("wfp-active-result.txt");
+                    if (active == null) return;
+                    RequireBinds(active, 10013);
+                    RequireSameNode(job);
+                    RequireReleaseAbsent();
+                    WriteLine("FAULT");
+                    phase = Phase.ActiveFault;
+                    break;
+                case Phase.ActiveFault:
+                    RequireBackup();
+                    uint wait = WaitForSingleObject(guardian, 0);
+                    if (wait == WaitTimeout) return;
+                    if (wait == WaitFailed) throw LastError();
+                    if (wait != WaitObject || !ExactGuardianExit())
+                        throw new InvalidDataException("GOVERNED_WFP_OWNER_LOSS_EXIT_UNVERIFIED");
+                    ownerExitVerified = true;
+                    string survived = ReadProtectedMarker("active-backup-survived.txt");
+                    if (survived == null) return;
+                    if (survived != "SURVIVED")
+                        throw new InvalidDataException("GOVERNED_WFP_ACTIVE_BACKUP_READBACK_INVALID");
+                    RequireBackup();
+                    RequireSameNode(job);
+                    backupSurvived = true;
+                    Release("wfp-fault-go.txt");
+                    phase = Phase.ActiveFaultSample;
+                    break;
+                case Phase.ActiveFaultSample:
+                    RequireBackup();
+                    fault = ReadBinds("wfp-fault-result.txt");
+                    if (fault == null) return;
+                    RequireBinds(fault, 10013);
+                    RequireSameNode(job);
+                    RequireReleaseAbsent();
+                    guardianLossDetected = true;
+                    throw new InvalidDataException("GOVERNED_WFP_ACTIVE_OWNER_LOSS_ABORT");
             }
             stageClock.Restart();
         }
         catch (Exception failure)
         {
             failed = true;
-            guardianLossDetected = phase == Phase.OwnerLoss && failure is InvalidDataException &&
-                failure.Message == "GOVERNED_WFP_GUARDIAN_LOST";
+            if (phase == Phase.OwnerLoss)
+                guardianLossDetected = failure is InvalidDataException && failure.Message == "GOVERNED_WFP_GUARDIAN_LOST";
             ReportFailure(phase.ToString(), failure);
             throw;
         }
@@ -138,7 +187,7 @@ internal sealed class WfpIntegratedRun : IDisposable
         finished = true;
         try
         {
-            if (MxcPin.GovernedWfpOwnerLoss)
+            if (MxcPin.GovernedWfpOwnerLoss || MxcPin.GovernedWfpActiveLoss)
             {
                 if (guardianLossDetected && jobEmpty) VerifyOwnerLoss();
             }
@@ -167,9 +216,7 @@ internal sealed class WfpIntegratedRun : IDisposable
 
     private void VerifyOwnerLoss()
     {
-        uint exit;
-        ownerExitVerified = WaitForSingleObject(guardian, PipeTimeoutMs) == WaitObject &&
-            GetExitCodeProcess(guardian, out exit) && exit == WfpIntegratedGuardian.OwnerLossExitCode;
+        ownerExitVerified = WaitForSingleObject(guardian, PipeTimeoutMs) == WaitObject && ExactGuardianExit();
         // Job accounting and the retained process handle provide separate exit evidence.
         uint nodeWait = WaitForSingleObject(node, OwnerLossNodeExitTimeoutMs);
         int nodeWaitError = nodeWait == WaitFailed ? Marshal.GetLastWin32Error() : 0;
@@ -179,28 +226,50 @@ internal sealed class WfpIntegratedRun : IDisposable
         if (!ownerExitVerified)
             throw new InvalidDataException("GOVERNED_WFP_OWNER_LOSS_EXIT_UNVERIFIED");
 
-        string imageDirectory = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
-        string root = Protocol.CanonicalPath(Path.GetDirectoryName(imageDirectory), true);
-        string marker = Path.Combine(root, "owner-loss-cleanup.txt");
+        string name = MxcPin.GovernedWfpActiveLoss ? "active-backup-cleanup.txt" : "owner-loss-cleanup.txt";
         var clock = Stopwatch.StartNew();
-        while (!File.Exists(marker) && clock.ElapsedMilliseconds < OwnerLossCleanupTimeoutMs)
-            Thread.Sleep(30);
-        if (!File.Exists(marker)) throw new TimeoutException("GOVERNED_WFP_OWNER_LOSS_CLEANUP_TIMEOUT");
-        using (var input = new FileStream(Protocol.CanonicalPath(marker, false), FileMode.Open, FileAccess.Read, FileShare.Read))
+        string marker = ReadProtectedMarker(name);
+        while (marker == null && clock.ElapsedMilliseconds < OwnerLossCleanupTimeoutMs)
         {
-            const string expected = "REMOVED";
-            if (input.Length != expected.Length)
-                throw new InvalidDataException("GOVERNED_WFP_OWNER_LOSS_CLEANUP_INVALID");
-            foreach (char value in expected)
-                if (input.ReadByte() != value)
-                    throw new InvalidDataException("GOVERNED_WFP_OWNER_LOSS_CLEANUP_INVALID");
+            Thread.Sleep(30);
+            marker = ReadProtectedMarker(name);
         }
+        if (marker == null) throw new TimeoutException("GOVERNED_WFP_OWNER_LOSS_CLEANUP_TIMEOUT");
+        if (marker != "REMOVED") throw new InvalidDataException("GOVERNED_WFP_OWNER_LOSS_CLEANUP_INVALID");
         removalVerified = true;
         if (nodeWait == WaitFailed) throw new Win32Exception(nodeWaitError);
         if (!nodeExited)
             throw new InvalidDataException(nodeWait == WaitTimeout
                 ? "GOVERNED_WFP_OWNER_LOSS_NODE_EXIT_TIMEOUT" : "GOVERNED_WFP_OWNER_LOSS_NODE_EXIT_UNVERIFIED");
         ownerLossObserved = true;
+    }
+
+    private bool ExactGuardianExit()
+    {
+        uint exit;
+        return GetExitCodeProcess(guardian, out exit) && exit == WfpIntegratedGuardian.OwnerLossExitCode;
+    }
+
+    private static string ReadProtectedMarker(string name)
+    {
+        string imageDirectory = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
+        string root = Path.GetDirectoryName(imageDirectory);
+        string marker = Path.Combine(root, name);
+        if (!File.Exists(marker)) return null;
+        using (var input = new FileStream(Protocol.CanonicalPath(marker, false), FileMode.Open, FileAccess.Read, FileShare.Read))
+        {
+            if (input.Length < 1 || input.Length > 16)
+                throw new InvalidDataException("GOVERNED_WFP_PROTECTED_MARKER_INVALID");
+            var text = new StringBuilder((int)input.Length);
+            for (int i = 0; i < input.Length; i++)
+            {
+                int value = input.ReadByte();
+                if (value < 32 || value > 126)
+                    throw new InvalidDataException("GOVERNED_WFP_PROTECTED_MARKER_INVALID");
+                text.Append((char)value);
+            }
+            return text.ToString();
+        }
     }
 
     private void RequireReleaseAbsent()
@@ -215,6 +284,7 @@ internal sealed class WfpIntegratedRun : IDisposable
     {
         if (pipe != null) { pipe.Dispose(); pipe = null; }
         if (guardian != null) { guardian.Dispose(); guardian = null; }
+        if (backup != null) { backup.Dispose(); backup = null; }
         if (node != null) { node.Dispose(); node = null; }
     }
 
@@ -243,22 +313,54 @@ internal sealed class WfpIntegratedRun : IDisposable
         uint clientPid = GetCurrentProcessId();
         if (!GetNamedPipeServerProcessId(pipe.SafePipeHandle, out pid) || pid == 0 || pid == clientPid)
             throw new InvalidDataException("GOVERNED_WFP_GUARDIAN_PID_UNVERIFIED");
-        guardian = OpenProcess(ProcessQueryLimitedInformation | Synchronize, false, pid);
-        if (guardian.IsInvalid) throw LastError();
+        guardian = OpenElevatedPeer(pid);
         RequireGuardian();
-        var image = new StringBuilder(4096);
-        uint length = (uint)image.Capacity;
-        if (!QueryFullProcessImageNameW(guardian, 0, image, ref length)) throw LastError();
-        string expected = Protocol.CanonicalPath(Assembly.GetExecutingAssembly().Location, false);
-        var identity = ReadProcessIdentity(guardian);
-        if (!String.Equals(expected, Protocol.CanonicalPath(image.ToString(), false), StringComparison.OrdinalIgnoreCase) ||
-            !identity.Elevated || identity.Session != operatorIdentity.Session || !operatorIdentity.User.Equals(identity.User))
-            throw new InvalidDataException("GOVERNED_WFP_GUARDIAN_IDENTITY_UNVERIFIED");
         // The held handle prevents a recycled PID from becoming the verified peer.
         uint confirmedPid;
         if (!GetNamedPipeServerProcessId(pipe.SafePipeHandle, out confirmedPid) || confirmedPid != pid)
             throw new InvalidDataException("GOVERNED_WFP_GUARDIAN_IDENTITY_CHANGED");
         RequireGuardian();
+    }
+
+    private void ConnectBackup()
+    {
+        uint pid, primaryPid;
+        string value = ReadProtectedMarker("active-backup-pid.txt");
+        if (!UInt32.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out pid) ||
+            pid == 0 || pid == GetCurrentProcessId() ||
+            !GetNamedPipeServerProcessId(pipe.SafePipeHandle, out primaryPid) || pid == primaryPid)
+            throw new InvalidDataException("GOVERNED_WFP_ACTIVE_BACKUP_PID_INVALID");
+        backup = OpenElevatedPeer(pid);
+        RequireBackup();
+    }
+
+    private WfpContainerIdentity.OwnedHandle OpenElevatedPeer(uint pid)
+    {
+        var process = OpenProcess(ProcessQueryLimitedInformation | Synchronize, false, pid);
+        try
+        {
+            if (process.IsInvalid) throw LastError();
+            var image = new StringBuilder(4096);
+            uint length = (uint)image.Capacity;
+            if (!QueryFullProcessImageNameW(process, 0, image, ref length)) throw LastError();
+            string expected = Protocol.CanonicalPath(Assembly.GetExecutingAssembly().Location, false);
+            var identity = ReadProcessIdentity(process);
+            if (!String.Equals(expected, Protocol.CanonicalPath(image.ToString(), false), StringComparison.OrdinalIgnoreCase) ||
+                !identity.Elevated || identity.Session != operatorIdentity.Session || !operatorIdentity.User.Equals(identity.User))
+                throw new InvalidDataException("GOVERNED_WFP_GUARDIAN_IDENTITY_UNVERIFIED");
+            return process;
+        }
+        catch
+        {
+            process.Dispose();
+            throw;
+        }
+    }
+
+    private void RequireBackup()
+    {
+        if (backup == null || backup.IsInvalid || WaitForSingleObject(backup, 0) != WaitTimeout)
+            throw new InvalidDataException("GOVERNED_WFP_ACTIVE_BACKUP_LOST");
     }
 
     private void RequireGuardian()
@@ -309,9 +411,10 @@ internal sealed class WfpIntegratedRun : IDisposable
 
     private static void Await(IAsyncResult pending, Stopwatch timeout)
     {
+        int limit = MxcPin.GovernedWfpActiveLoss ? ActivePipeTimeoutMs : PipeTimeoutMs;
         while (!pending.IsCompleted)
         {
-            if (timeout.ElapsedMilliseconds >= PipeTimeoutMs)
+            if (timeout.ElapsedMilliseconds >= limit)
                 throw new TimeoutException("GOVERNED_WFP_GUARDIAN_PIPE_TIMEOUT");
             Thread.Sleep(5);
         }
@@ -378,6 +481,16 @@ internal sealed class WfpIntegratedRun : IDisposable
         string directory = Protocol.CanonicalPath(Path.GetDirectoryName(request.requestPath), true);
         string path = Path.Combine(directory, "wfp-integration-result.json");
         var serializer = new JavaScriptSerializer { MaxJsonLength = 4096 };
+        if (MxcPin.GovernedWfpActiveLoss)
+        {
+            WriteNew(path, serializer.Serialize(new {
+                schemaVersion = "clue-windows-governed-wfp-active-loss/1",
+                state = ownerLossObserved ? "GOVERNED_WFP_ACTIVE_LOSS_OBSERVED" : "GOVERNED_WFP_ACTIVE_LOSS_UNVERIFIED",
+                identityVerified, leaseVerified, jobEmpty, removalVerified, control, armed, proofAuthorization = false,
+                ownerExitVerified, nodeExited, releaseWithheld, backupSurvived, active, fault,
+            }));
+            return;
+        }
         if (MxcPin.GovernedWfpOwnerLoss)
         {
             WriteNew(path, serializer.Serialize(new {

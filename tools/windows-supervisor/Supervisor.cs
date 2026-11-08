@@ -15,8 +15,12 @@ internal static class Supervisor
         string phase = "REQUEST_READ";
         try
         {
+            if (MxcPin.GovernedWfpActiveLoss && (!MxcPin.GovernedWfpIntegration || MxcPin.GovernedWfpOwnerLoss))
+                return Refuse("GOVERNED_WFP_ACTIVE_MODE_CONFLICT");
             if (MxcPin.GovernedWfpIntegration && args.Length == 1 && args[0] == "--governed-wfp-guardian")
                 return WfpIntegratedGuardian.Run();
+            if (MxcPin.GovernedWfpActiveLoss && args.Length == 1 && args[0] == "--governed-wfp-active-backup")
+                return WfpIntegratedGuardian.RunActiveBackup();
             if (MxcPin.GovernedWfpIntegration && MxcPin.GovernedWfpOwnerLoss && args.Length == 1 &&
                 args[0] == "--governed-wfp-owner-loss-readback")
                 return WfpIntegratedGuardian.ReadBackOwnerLoss();
