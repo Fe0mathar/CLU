@@ -28,6 +28,8 @@ internal sealed class WfpPairedSupervisor
     private int[] staticJobMembers;
     private WfpLoopbackLease lease;
     private WfpDropObservation dropObservation;
+    private WfpBfeWatch bfeWatch;
+    private bool bfeAbortObserved, bfeLatched, bfePolicyRetainedAtCleanup;
     private object dropEvidence;
     private string filteredStartedAt, filteredFinishedAt, error;
     private int? engineExitCode;
@@ -53,6 +55,7 @@ internal sealed class WfpPairedSupervisor
         {
             if (args.Length == 1 && args[0] == "paired") return new WfpPairedSupervisor("paired").Run();
             if (args.Length == 1 && args[0] == "host-net") return new WfpPairedSupervisor("host-net").Run();
+            if (args.Length == 1 && args[0] == "bfe-guard") return new WfpPairedSupervisor("bfe-guard").Run();
             if (args.Length == 1 && (args[0] == "crash" || args[0] == "static-crash" || args[0] == "static-double"))
                 return StartGuardian(args[0]);
             if (args.Length == 1 && args[0] == "recover-retained")
@@ -82,7 +85,7 @@ internal sealed class WfpPairedSupervisor
         }
         catch (Exception)
         {
-            Console.Error.WriteLine("[CLU-E 05Q] CONTROLLER_STARTUP_REFUSED");
+            Console.Error.WriteLine("[CLU-E 05R] CONTROLLER_STARTUP_REFUSED");
             return 125;
         }
     }
@@ -152,6 +155,12 @@ internal sealed class WfpPairedSupervisor
                 Action<IntPtr> observe = ObserveCrash;
                 if (mode == "paired") observe = ObservePaired;
                 if (mode == "host-net") observe = ObserveHostLoopback;
+                if (mode == "bfe-guard")
+                {
+                    bfeWatch = new WfpBfeWatch();
+                    RequireBfeHealthy();
+                    observe = ObserveBfeGuard;
+                }
                 int exit = NativeJob.Run(engine, log, config, request.systemRoot, DeadlineMs, out expired,
                     observe, () => jobEmpty = true, jobName);
                 engineExitCode = exit;
@@ -169,12 +178,31 @@ internal sealed class WfpPairedSupervisor
                     state = completed ? "HOST_LOOPBACK_FIXTURE_COMPLETED" : "HOST_LOOPBACK_FIXTURE_UNVERIFIED";
                     result = completed ? 0 : expired ? 124 : 1;
                 }
+                else if (mode == "bfe-guard")
+                {
+                    state = "BFE_GUARD_CANCELLATION_UNVERIFIED";
+                    result = expired ? 124 : 125;
+                }
                 else
                 {
                     state = expired && !crashReady ? "CRASH_READY_TIMEOUT" : "CRASH_FIXTURE_EXITED_WITHOUT_INJECTION";
                     result = expired ? 124 : 1;
                 }
             }
+        }
+        catch (BfeGuardAbortException)
+        {
+            bfeAbortObserved = true;
+            string fault = bfeWatch.State;
+            try { bfeWatch.RequireHealthy(); }
+            catch (InvalidOperationException) { bfeLatched = bfeWatch.State == fault; }
+            if (jobEmpty && crashReady && lease != null)
+            {
+                try { lease.VerifyInstalled(packageSid); bfePolicyRetainedAtCleanup = true; }
+                catch (Exception) { }
+            }
+            state = "BFE_GUARD_CANCELLATION_UNVERIFIED";
+            error = fault;
         }
         catch (SupervisorLostException)
         {
@@ -209,10 +237,27 @@ internal sealed class WfpPairedSupervisor
             if (processes != null)
                 foreach (var process in processes)
                     if (process != null) process.Dispose();
+            var bfeGuard = bfeWatch == null ? null : new {
+                initialRunning = bfeWatch.InitialRunning, state = bfeWatch.State, samples = bfeWatch.Samples,
+                syntheticFaultObserved = bfeWatch.SyntheticFaultObserved, latched = bfeLatched,
+                gateReleased = step > 0, fixtureBindDenied = crashReady,
+                terminationVerified = bfeAbortObserved && jobEmpty && crashReady,
+                policyRetainedAtCleanup = bfePolicyRetainedAtCleanup,
+            };
+            if (bfeWatch != null)
+            {
+                if (bfeWatch.InitialRunning && bfeWatch.SyntheticFaultObserved && bfeLatched && crashReady &&
+                    identityVerified && jobEmpty && bfeAbortObserved && bfePolicyRetainedAtCleanup && removalVerified)
+                {
+                    state = "BFE_GUARD_CANCELLATION_OBSERVED";
+                    error = null;
+                }
+                bfeWatch.Dispose();
+            }
             WriteNew(Path.Combine(privateRoot, "result.json"), json.Serialize(new {
                 state, error, engineExitCode, phases, filteredStartedAt, filteredFinishedAt, dropEvidence,
                 identityVerified, independentRemovalVerified = removalVerified, jobEmpty,
-                supervisorLossObserved, observerAcknowledged,
+                supervisorLossObserved, observerAcknowledged, bfeGuard,
             }));
         }
         return result;
@@ -226,7 +271,7 @@ internal sealed class WfpPairedSupervisor
         return new Request {
             requestPath = Path.Combine(privateRoot, "request.json"),
             command = fixture,
-            args = new[] { jobName == null ? mode : "crash", workspace },
+            args = new[] { jobName == null && mode != "bfe-guard" ? mode : "crash", workspace },
             cwd = workspace,
             readOnlyRoots = new[] { runtimeDirectory, system },
             writableRoots = new[] { workspace },
@@ -299,34 +344,8 @@ internal sealed class WfpPairedSupervisor
             throw new SupervisorLostException();
         }
         if (crashReady) return;
-        var pids = Array.ConvertAll(CrashRoles, ReadPid);
-        if (Array.IndexOf(pids, 0) >= 0) return;
-        if (step == 0)
-        {
-            PinProcesses(job, pids);
-            if (jobName == null) Install();
-            else
-            {
-                staticJobMembers = NativeJob.ReadJobProcessIds(job);
-                var memberSet = new HashSet<int>(staticJobMembers);
-                foreach (int pid in pids)
-                    if (!memberSet.Contains(pid)) throw new InvalidDataException("STATIC_FIXTURE_JOB_MEMBERSHIP_INVALID");
-                bool installCleanupVerified;
-                lease = WfpLoopbackLease.InstallStatic(packageSid,
-                    (sublayer, keys) => WfpStaticRecovery.Publish(privateRoot, jobName, supervisor, packageSid,
-                        sublayer, keys, staticJobMembers), out installCleanupVerified);
-            }
-            ReleaseGate("crash");
-            step++;
-        }
-        foreach (string role in CrashRoles)
-        {
-            int[] codes = ReadCodes(role);
-            if (codes == null) return;
-            if (!All(codes, AccessDenied)) throw new InvalidDataException("CRASH_DESCENDANT_BIND_NOT_DENIED");
-        }
-        VerifyIdentity(job);
-        identityVerified = true;
+        int[] pids = PrepareCrashFixture(job);
+        if (pids == null) return;
         using (var guardian = Process.GetCurrentProcess())
         {
             var ready = new Dictionary<string, object> {
@@ -343,6 +362,78 @@ internal sealed class WfpPairedSupervisor
         }
         crashReady = true;
     }
+
+    private int[] PrepareCrashFixture(IntPtr job, Action beforeRelease = null)
+    {
+        var pids = Array.ConvertAll(CrashRoles, ReadPid);
+        if (Array.IndexOf(pids, 0) >= 0) return null;
+        if (step == 0)
+        {
+            PinProcesses(job, pids);
+            if (jobName == null) Install();
+            else
+            {
+                staticJobMembers = NativeJob.ReadJobProcessIds(job);
+                var memberSet = new HashSet<int>(staticJobMembers);
+                foreach (int pid in pids)
+                    if (!memberSet.Contains(pid)) throw new InvalidDataException("STATIC_FIXTURE_JOB_MEMBERSHIP_INVALID");
+                bool installCleanupVerified;
+                lease = WfpLoopbackLease.InstallStatic(packageSid,
+                    (sublayer, keys) => WfpStaticRecovery.Publish(privateRoot, jobName, supervisor, packageSid,
+                        sublayer, keys, staticJobMembers), out installCleanupVerified);
+            }
+            if (beforeRelease != null) beforeRelease();
+            ReleaseGate("crash");
+            step++;
+        }
+        foreach (string role in CrashRoles)
+        {
+            int[] codes = ReadCodes(role);
+            if (codes == null) return null;
+            if (!All(codes, AccessDenied)) throw new InvalidDataException("CRASH_DESCENDANT_BIND_NOT_DENIED");
+        }
+        VerifyIdentity(job);
+        identityVerified = true;
+        return pids;
+    }
+
+    private void ObserveBfeGuard(IntPtr job)
+    {
+        bool inject = false;
+        if (crashReady)
+        {
+            string marker = Path.Combine(privateRoot, "bfe-inject.txt");
+            if (File.Exists(marker))
+            {
+                using (var file = new FileStream(Protocol.CanonicalPath(marker, false), FileMode.Open, FileAccess.Read, FileShare.Read))
+                {
+                    const string expected = "INJECT";
+                    if (file.Length != expected.Length) throw new InvalidDataException("BFE_INJECTION_MARKER_INVALID");
+                    foreach (char character in expected)
+                        if (file.ReadByte() != character) throw new InvalidDataException("BFE_INJECTION_MARKER_INVALID");
+                    inject = true;
+                }
+            }
+        }
+        RequireBfeHealthy(inject);
+        if (crashReady) return;
+        if (PrepareCrashFixture(job, () => {
+            lease.VerifyInstalled(packageSid);
+            RequireBfeHealthy();
+        }) == null) return;
+        lease.VerifyInstalled(packageSid);
+        RequireBfeHealthy();
+        crashReady = true;
+        WriteNew(Path.Combine(privateRoot, "bfe-ready.txt"), "READY");
+    }
+
+    private void RequireBfeHealthy(bool inject = false)
+    {
+        try { bfeWatch.RequireHealthy(inject); }
+        catch (InvalidOperationException) { throw new BfeGuardAbortException(); }
+    }
+
+    private sealed class BfeGuardAbortException : Exception { }
 
     private void ObserveHostLoopback(IntPtr job)
     {

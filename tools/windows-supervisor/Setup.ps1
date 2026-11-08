@@ -427,17 +427,19 @@ try {
         $setupStage = 'PAIRED_DIAGNOSTIC_BUILD'
         foreach ($directory in @('fixture', 'paired\private', 'paired\workspace', 'crash\private', 'crash\workspace',
             'static-crash\private', 'static-crash\workspace', 'static-double\private', 'static-double\workspace',
-            'host-net\private', 'host-net\workspace')) {
+            'host-net\private', 'host-net\workspace', 'bfe-guard\private', 'bfe-guard\workspace')) {
             Assert-NoReparsePath (Join-Path $stage $directory) -CreateDirectory
         }
         $fixtureSource = Join-Path $PSScriptRoot 'WfpPairedFixture.cs'
         $hostLoopbackFixtureSource = Join-Path $PSScriptRoot 'WfpHostLoopbackFixture.cs'
         $controllerSource = Join-Path $PSScriptRoot 'WfpPairedSupervisor.cs'
         $staticRecoverySource = Join-Path $PSScriptRoot 'WfpStaticRecovery.cs'
+        $bfeWatchSource = Join-Path $PSScriptRoot 'WfpBfeWatch.cs'
         Assert-NoReparsePath $fixtureSource
         Assert-NoReparsePath $hostLoopbackFixtureSource
         Assert-NoReparsePath $controllerSource
         Assert-NoReparsePath $staticRecoverySource
+        Assert-NoReparsePath $bfeWatchSource
         $fixture = Join-Path $stage 'fixture\WfpPairedFixture.exe'
         $fixtureArgs = $compilerBase + @('/platform:x64', "/out:$fixture") +
             $frameworkReferences + $fixtureSource + $hostLoopbackFixtureSource
@@ -462,7 +464,7 @@ $diagnosticPins
     if ($WfpPairedDiagnostic) {
         $controller = Join-Path $bin 'CLU-E-WfpPairedDiagnostic.exe'
         $controllerArgs = $compilerBase + @('/platform:x64', '/main:WfpPairedSupervisor', "/out:$controller", "/reference:$web") +
-            $frameworkReferences + $sources + $pinSource + $controllerSource + $staticRecoverySource
+            $frameworkReferences + $sources + $pinSource + $controllerSource + $staticRecoverySource + $bfeWatchSource
         if ((Invoke-ExactExecutable $csc $controllerArgs $stage 60) -ne 0) { throw 'Native paired diagnostic compilation failed.' }
         Assert-NoReparsePath $controller
         $staticReader = Join-Path $PSScriptRoot 'WfpStaticSetup.ps1'
@@ -471,9 +473,12 @@ $diagnosticPins
         $hostReader = Join-Path $PSScriptRoot 'WfpHostLoopbackSetup.ps1'
         Assert-NoReparsePath $hostReader
         . $hostReader
+        $bfeReader = Join-Path $PSScriptRoot 'WfpBfeGuardSetup.ps1'
+        Assert-NoReparsePath $bfeReader
+        . $bfeReader
 
         $setupStage = 'PAIRED_DIAGNOSTIC_EXECUTION'
-        Write-Host '[3/4] Running paired native binds, crash recovery and bidirectional host loopback checks.'
+        Write-Host '[3/4] Running native isolation regressions and the BFE health-loss simulation.'
         $stageCleanupSafe = $false
         $experiment = Invoke-WfpPairedSetup $controller $stage $fixture
         $stageCleanupSafe = $experiment.stageCleanupSafe
@@ -497,6 +502,13 @@ $diagnosticPins
             $hostExperiment = Invoke-WfpHostLoopbackSetup $controller $stage $fixture
             $stageCleanupSafe = $hostExperiment.stageCleanupSafe
             $hostResult = $hostExperiment.result
+        }
+        $bfeResult = [ordered]@{ state = 'BFE_GUARD_SKIPPED_PRIOR_CLEANUP_UNVERIFIED' }
+        if ($stageCleanupSafe) {
+            $stageCleanupSafe = $false
+            $bfeExperiment = Invoke-WfpBfeGuardSetup $controller $stage
+            $stageCleanupSafe = $bfeExperiment.stageCleanupSafe
+            $bfeResult = $bfeExperiment.result
         }
         $payload = [ordered]@{
             schemaVersion = 'clue-mxc-supervisor-diagnostic/1'
@@ -524,6 +536,8 @@ $diagnosticPins
             wfpStaticGuardianLoss = $staticResult
             wfpStaticDoubleLoss = $doubleResult
             wfpHostLoopback = $hostResult
+            wfpBfeGuard = $bfeResult
+            bfeRestartQualified = $false
         }
         Write-DiagnosticFile $report $payload
         Write-Host ('[CLU-E paired binds] ' + $experiment.paired.state)
@@ -532,6 +546,7 @@ $diagnosticPins
         Write-Host ('[CLU-E static guardian loss] ' + $staticResult.state)
         Write-Host ('[CLU-E static double loss] ' + $doubleResult.state)
         Write-Host ('[CLU-E host loopback] ' + $hostResult.state)
+        Write-Host ('[CLU-E BFE health guard] ' + $bfeResult.state)
         if (!$stageCleanupSafe) {
             Write-Host 'The diagnostic stage was retained because cleanup is unverified.'
             foreach ($case in @(

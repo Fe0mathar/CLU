@@ -52,6 +52,19 @@ internal sealed class WfpLoopbackLease : IDisposable
     internal Guid SublayerKey { get { return sublayerKey; } }
     internal ushort VerifiedSublayerWeight { get; private set; }
 
+    internal void VerifyInstalled(byte[] packageSid)
+    {
+        if (engine == IntPtr.Zero || engine == new IntPtr(-1))
+            throw new InvalidOperationException("WFP_LEASE_ENGINE_NOT_OPEN");
+        byte[] expectedSid = ValidatePackageSid(packageSid);
+        string staticName = staticPackageSid == null ? null : StaticObjectName(sublayerKey);
+        ushort weight = ReadSublayer(engine, sublayerKey, staticName, false).Value;
+        for (int index = 0; index < Layers.Length; index++)
+            ReadFilter(engine, filterKeys[index], filterIds[index], Layers[index], sublayerKey,
+                expectedSid, staticName, false);
+        VerifiedSublayerWeight = weight;
+    }
+
     internal static WfpLoopbackLease Install(byte[] packageSid, out bool failureCleanupVerified)
     {
         return Install(packageSid, null, out failureCleanupVerified);
@@ -119,10 +132,7 @@ internal sealed class WfpLoopbackLease : IDisposable
             Check(FwpmTransactionCommit0(engine), "WFP_TRANSACTION_COMMIT");
             transaction = false;
 
-            lease.VerifiedSublayerWeight = ReadSublayer(engine, sublayerKey, staticName, false).Value;
-            for (int index = 0; index < Layers.Length; index++)
-                ReadFilter(engine, filterKeys[index], filterIds[index], Layers[index], sublayerKey,
-                    expectedSid, staticName, false);
+            lease.VerifyInstalled(expectedSid);
             return lease;
         }
         catch
