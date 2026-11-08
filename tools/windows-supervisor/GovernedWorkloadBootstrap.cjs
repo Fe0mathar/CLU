@@ -259,9 +259,11 @@ function readDoctorEvidence(stdout) {
   return evidence;
 }
 
-function run() {
+async function run() {
   if (process.argv.length !== (brokerOperation ? 3 : 2) || result.side === 'unverified' ||
       path.basename(cwd) !== 'checkout' || path.basename(root) !== side || path.basename(admission) !== 'admission') return;
+  const integratedWfp = typeof runGovernedWfpBindPrelude === 'function';
+  if (integratedWfp && brokerOperation !== 'broker-typecheck') return;
   if (!exactDirectory(workspace)) return;
   writeMarker(path.join(workspace, brokerOperation ? 'broker-started.txt' : 'started.txt'));
   result.hostEnvironmentAbsent = hostEnvironmentAbsent();
@@ -298,9 +300,10 @@ function run() {
     ['doctorDeep', [cli, 'doctor', '--deep'], () => result.doctorEvidence.eventLogState === 'VERIFIED' &&
       result.doctorEvidence.artifactState === 'VERIFIED'],
   ];
+  const deadline = performance.now() + (side === 'candidate' ? 350_000 : 112_000);
+  if (integratedWfp) await runGovernedWfpBindPrelude(workspace);
   result.state = 'GOVERNED_FAILED';
   result.exitCode = 1;
-  const deadline = performance.now() + (side === 'candidate' ? 350_000 : 112_000);
   const brokerStage = brokerOperation === 'broker-typecheck' ? 'typecheck' : 'doctorDeep';
   for (const [name, args, verify] of steps) {
     if (brokerOperation && name !== brokerStage) continue;
@@ -319,10 +322,14 @@ function run() {
   result.exitCode = 0;
 }
 
-try {
-  run();
-} catch {
-  // Keep only bounded status evidence even when filesystem access is refused.
+async function main() {
+  try {
+    await run();
+  } catch {
+    // Keep only bounded status evidence even when filesystem access is refused.
+  }
+  console.log('CLU_E_GOVERNED_WORKLOAD ' + JSON.stringify(result));
+  process.exitCode = result.state === 'GOVERNED_PASSED' ? 0 : 1;
 }
-console.log('CLU_E_GOVERNED_WORKLOAD ' + JSON.stringify(result));
-process.exitCode = result.state === 'GOVERNED_PASSED' ? 0 : 1;
+
+void main();

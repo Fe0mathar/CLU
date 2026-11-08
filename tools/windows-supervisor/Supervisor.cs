@@ -15,6 +15,8 @@ internal static class Supervisor
         string phase = "REQUEST_READ";
         try
         {
+            if (MxcPin.GovernedWfpIntegration && args.Length == 1 && args[0] == "--governed-wfp-guardian")
+                return WfpIntegratedGuardian.Run();
             if (args.Length != 2 || args[0] != "--request-file")
                 return Refuse("REQUEST_ARGUMENTS_INVALID");
 
@@ -47,7 +49,19 @@ internal static class Supervisor
                     bool deadlineExpired;
                     phase = "ENGINE_RUN";
                     int exit;
-                    if (request.wfpMode == null)
+                    if (request.integratedWfp)
+                    {
+                        var integrated = new WfpIntegratedRun(request);
+                        bool lifecycleComplete = false;
+                        try
+                        {
+                            exit = NativeJob.Run(engine, log, config, request.systemRoot, remaining,
+                                out deadlineExpired, integrated.Observe, () => lifecycleComplete = integrated.Finish(true));
+                        }
+                        finally { integrated.Dispose(); }
+                        if (!lifecycleComplete) return Refuse("GOVERNED_WFP_INTEGRATION_INCOMPLETE");
+                    }
+                    else if (request.wfpMode == null)
                         exit = NativeJob.Run(engine, log, config, request.systemRoot, remaining, out deadlineExpired);
                     else
                     {

@@ -8,6 +8,7 @@ import { stageGovernedOfflineCache } from './governedOfflineCache.mjs';
 import { inspectGovernedBuild, stageGovernedSource, verifyGovernedSource } from './governedWorkloadInputs.mjs';
 
 const schemaVersion = 'clue-windows-governed-workload/1';
+const wfpSchemaVersion = 'clue-windows-governed-wfp-integration/1';
 const evidencePrefix = 'CLU_E_GOVERNED_WORKLOAD ';
 const timeouts = { candidate: 360_000, baseline: 120_000 };
 const observed = 'clue-admission-observed-v1\n';
@@ -141,6 +142,26 @@ function nativeEvidence({ code, failure, stderr }) {
 function exactObject(value, keys) {
   return value !== null && typeof value === 'object' && !Array.isArray(value) &&
     Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key));
+}
+
+function readWfpIntegration(requestDir) {
+  try {
+    const bytes = exactFile(join(requestDir, 'wfp-integration-result.json'), 4096);
+    if (!bytes?.length) return null;
+    const value = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+    const checks = ['identityVerified', 'leaseVerified', 'jobEmpty', 'removalVerified'];
+    const validLanes = (lanes) => lanes === null || (Array.isArray(lanes) && lanes.length === 4 &&
+      lanes.every((code) => code === 0 || code === 10013));
+    if (!exactObject(value, ['schemaVersion', 'state', 'proofAuthorization', ...checks, 'control', 'armed']) ||
+        value.schemaVersion !== wfpSchemaVersion || value.proofAuthorization !== false ||
+        !checks.every((key) => typeof value[key] === 'boolean') || !validLanes(value.control) || !validLanes(value.armed)) return null;
+    if (value.state === 'GOVERNED_WFP_LEASE_UNVERIFIED') return value;
+    if (value.state !== 'GOVERNED_WFP_LEASE_OBSERVED' || !checks.every((key) => value[key] === true) ||
+        !value.control?.every((code) => code === 0) || !value.armed?.every((code) => code === 10013)) return null;
+    return value;
+  } catch {
+    return null;
+  }
 }
 
 function stageEvidence(value) {
@@ -281,6 +302,7 @@ function inspectBaselineWorkspace(workspace) {
 /** Run fixed native offline preparation followed by a clean-scope governed CLU-E CLI scenario. */
 export async function exerciseGovernedWorkload({
   repoRoot, stage, supervisor, node, systemRoot, script, approve,
+  integratedWfp = false, wfpPrelude,
   invoke = launchSupervisor, stageCache = stageGovernedOfflineCache, progress,
 }) {
   const report = {
@@ -289,12 +311,21 @@ export async function exerciseGovernedWorkload({
     brokerConformance: { state: 'NOT_RUN', stagedBootstrapSha256: null, refusals: {}, cases: {} },
   };
   try {
+    if (typeof integratedWfp !== 'boolean' || (integratedWfp && (typeof wfpPrelude !== 'string' ||
+        wfpPrelude.length > 4096 || !/^[\x09\x0a\x0d\x20-\x7e]+$/u.test(wfpPrelude)))) {
+      throw new Error('GOVERNED_WFP_PRELUDE_UNVERIFIED');
+    }
     const trusted = join(stage, 'trusted-source');
     mkdirSync(trusted);
     createFile(join(trusted, 'trusted.txt'), trustedMarker);
     const brokerBootstrapPath = join(trusted, 'governed-bootstrap.cjs');
     createFile(brokerBootstrapPath, script);
     report.brokerConformance.stagedBootstrapSha256 = sha256(script);
+    const wfpPreludePath = integratedWfp ? join(trusted, 'governed-wfp-prelude.cjs') : null;
+    if (wfpPreludePath !== null) {
+      createFile(wfpPreludePath, wfpPrelude);
+      report.brokerConformance.stagedWfpPreludeSha256 = sha256(wfpPrelude);
+    }
     const candidate = makeSide(stage, 'candidate');
     const baseline = makeSide(stage, 'baseline');
     const input = stageGovernedSource(repoRoot, [candidate.checkout]);
@@ -321,20 +352,21 @@ export async function exerciseGovernedWorkload({
 
     report.state = 'GOVERNED_APPROVAL_REQUIRED';
     report.approval = 'NOT_GRANTED';
-    if (await approve({ source: report.source, cache: report.cache }) !== true) return report;
+    if (await approve({ source: report.source, cache: report.cache, ...(integratedWfp ? { integratedWfp: true } : {}) }) !== true) return report;
     report.approval = 'OPERATOR_APPROVED_GOVERNED_HEAD';
 
     function protectedInputs() {
       const cli = exactFile(npmCliPath, 1024 * 1024);
       return cli?.equals(npmCli) === true && exactMarker(join(trusted, 'trusted.txt'), trustedMarker) &&
         exactMarker(brokerBootstrapPath, script) &&
+        (wfpPreludePath === null || exactMarker(wfpPreludePath, wfpPrelude)) &&
         [candidate, baseline].every((paths) =>
           exactMarker(join(paths.outside, 'forbidden.txt'), outsideMarker) &&
           exactMarker(join(paths.private, 'sealed.txt'), privateMarker) &&
           exactMarker(join(paths.home, 'user.npmrc'), '') && exactMarker(join(paths.home, 'global.npmrc'), ''));
     }
 
-    async function send(request, paths) {
+    async function send(request, paths, wfpExpected = false) {
       const requestDir = mkdtempSync(join(paths.private, 'request-'));
       const requestPath = join(requestDir, 'request.json');
       const bytes = JSON.stringify(request);
@@ -344,10 +376,18 @@ export async function exerciseGovernedWorkload({
       const nativeResult = await invoke({ supervisor, requestPath, systemRoot, timeoutMs: request.timeoutMs });
       const native = nativeEvidence(nativeResult);
       const preLaunchRefusal = native.exitCode === 125 && native.refusalPhase === 'REQUEST_READ';
+      const wfpIntegration = wfpExpected ? readWfpIntegration(requestDir) : null;
+      if (wfpExpected) {
+        const notes = nativeResult.stderr.split(/\r?\n/u).map((line) =>
+          /^\[CLU-E governed WFP\] (NodeStart|Control|Armed|Workload|Drain) (GOVERNED_WFP_[A-Z0-9_]{1,62}|WIN32_ERROR_[0-9]{1,10}|TIMEOUT|REFUSED)$/u.exec(line),
+        ).filter(Boolean);
+        native.wfpRefusal = notes.length === 1 ? { phase: notes[0][1], code: notes[0][2] } : null;
+      }
       const settled = preLaunchRefusal || native.exitCode === 0 ||
         (native.exitCode !== null && native.exitCode !== 124 && native.exitCode !== 125 && native.workloadExitVerified);
-      report.stageCleanupSafe = cleanupBefore && settled;
-      return { native, preLaunchRefusal, stdout: nativeResult.stdout, requestUnchanged: exactMarker(requestPath, bytes) };
+      report.stageCleanupSafe = cleanupBefore && settled && (!wfpExpected || preLaunchRefusal ||
+        (wfpIntegration?.jobEmpty === true && wfpIntegration.removalVerified === true));
+      return { native, preLaunchRefusal, stdout: nativeResult.stdout, wfpIntegration, requestUnchanged: exactMarker(requestPath, bytes) };
     }
 
     async function refusal(id, request, paths, destination = report.refusals, marker = 'started.txt') {
@@ -368,7 +408,8 @@ export async function exerciseGovernedWorkload({
       if (!protectedInputs() || !verifyGovernedSource(paths.checkout, expectedSource, { allowBuildOutputs: true }) ||
           inspectGovernedBuild(paths.checkout).treeSha256 !== priorBuild.treeSha256) return false;
       progress?.(operation);
-      const evidence = await send(request, paths);
+      const wfpExpected = integratedWfp && candidate && operation === 'broker-typecheck';
+      const evidence = await send(request, paths, wfpExpected);
       const workload = workloadEvidence(evidence.stdout, side, operation);
       const host = {
         startedMarkerVerified: false, checkoutWriteVerified: false, protectedInputsUnchanged: false,
@@ -402,10 +443,12 @@ export async function exerciseGovernedWorkload({
       }
       const passed = evidence.native.exitCode === 0 && workload?.state === 'GOVERNED_PASSED' &&
         host.startedMarkerVerified && host.checkoutWriteVerified && host.protectedInputsUnchanged &&
-        host.preparedTreeVerified && (candidate || host.missionWorkspaceVerified);
+        host.preparedTreeVerified && (candidate || host.missionWorkspaceVerified) &&
+        (!wfpExpected || evidence.wfpIntegration?.state === 'GOVERNED_WFP_LEASE_OBSERVED');
       report.brokerConformance.cases[side] = {
         ...evidence.native, state: passed ? 'ADMITTED_AND_OBSERVED' : 'UNVERIFIED', operation,
         requestSha256: sha256(JSON.stringify(request)), workload, host, workspace,
+        ...(wfpExpected ? { wfpIntegration: evidence.wfpIntegration ?? { state: 'GOVERNED_WFP_RECEIPT_UNVERIFIED' } } : {}),
         beforeTreeSha256: priorBuild.treeSha256, afterTreeSha256: afterBuild?.treeSha256 ?? null,
         beforeBuildInfoSha256: priorBuild.buildInfoSha256, afterBuildInfoSha256: afterBuild?.buildInfoSha256 ?? null,
       };

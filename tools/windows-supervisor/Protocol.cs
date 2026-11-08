@@ -27,6 +27,7 @@ public sealed class Request
     public string fixtureRoot;
     public string wfpMode;
     public string wfpContainerId;
+    public bool integratedWfp;
 }
 
 public static class Protocol
@@ -34,6 +35,7 @@ public static class Protocol
     private const int MaxRequestBytes = 1024 * 1024;
     private const int MaxNpmCliBytes = 1024 * 1024;
     private const int MaxGovernedBootstrapBytes = 16 * 1024;
+    private const int MaxGovernedWfpPreludeBytes = 8 * 1024;
     private const int MaxReviewedWorkloadBytes = 4096;
     private const int MaxReviewedWorkloadTests = 64;
     private static readonly Regex ReviewedTestPath = new Regex(
@@ -336,8 +338,39 @@ public static class Protocol
             Check((value >= 32 && value <= 126) || value == 9 || value == 10 || value == 13,
                 "Governed bootstrap must contain plain ASCII source.");
         EnsureProofAdmissionScriptPin(bytes);
-        r.args = new[] { "-e", Encoding.ASCII.GetString(bytes), side, operation };
+        string script = Encoding.ASCII.GetString(bytes);
+        if (MxcPin.GovernedWfpIntegration && candidate && operation == "broker-typecheck")
+        {
+            r.integratedWfp = true;
+            r.wfpContainerId = "sandbox-" + Guid.NewGuid().ToString("N").Substring(0, 16);
+            script = ReadGovernedWfpPrelude(trusted) + "\n" + script;
+        }
+        r.args = new[] { "-e", script, side, operation };
         EnsureCommandLineLength(r);
+    }
+
+    private static string ReadGovernedWfpPrelude(string trusted)
+    {
+        string file = CanonicalPath(Path.Combine(trusted, "governed-wfp-prelude.cjs"), false);
+        byte[] bytes;
+        using (var stream = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.Read))
+        using (var reader = new BinaryReader(stream))
+        {
+            Check(IsSingleLink(stream) && stream.Length > 0 && stream.Length <= MaxGovernedWfpPreludeBytes,
+                "Invalid governed WFP prelude file.");
+            int size = (int)stream.Length;
+            bytes = reader.ReadBytes(size);
+            Check(bytes.Length == size, "Incomplete governed WFP prelude file.");
+        }
+        foreach (byte value in bytes)
+            Check((value >= 32 && value <= 126) || value == 9 || value == 10 || value == 13,
+                "Governed WFP prelude must contain plain ASCII source.");
+        using (var sha = SHA256.Create())
+        {
+            var hash = BitConverter.ToString(sha.ComputeHash(bytes)).Replace("-", "").ToLowerInvariant();
+            Check(hash == MxcPin.GovernedWfpPreludeSha256, "Governed WFP prelude pin mismatch.");
+        }
+        return Encoding.ASCII.GetString(bytes);
     }
 
     private static void EnsureProofAdmissionScriptPin(byte[] bytes)

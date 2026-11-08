@@ -90,6 +90,7 @@ const REQUIRED_OPERATOR_PATHS = [
   'CLUE-Windows-Reviewed-Workload.bat',
   'CLUE-Windows-Governed-Workload.bat',
   'CLUE-Windows-Installed-Governed-Workload.bat',
+  'CLUE-Windows-Governed-WFP.bat',
   'CONFIG-EDIT.md',
   'MANIFEST.txt',
   'clue-status.md',

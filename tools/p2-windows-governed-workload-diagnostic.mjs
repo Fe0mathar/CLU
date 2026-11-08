@@ -9,7 +9,7 @@ import { externalReportPath, writeExternalReport } from './verification-support.
 import { exerciseGovernedWorkload } from './windows-supervisor/governedWorkloadHarness.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const usage = 'Usage: node tools/p2-windows-governed-workload-diagnostic.mjs --stage <staged admission dir> --supervisor <supervisor> --output <staged report> [--installed <wrapper SHA-256> <engine SHA-256>]';
+const usage = 'Usage: node tools/p2-windows-governed-workload-diagnostic.mjs --stage <staged admission dir> --supervisor <supervisor> --output <staged report> [--installed|--installed-wfp <wrapper SHA-256> <engine SHA-256>]';
 const sha256Pattern = /^[0-9a-f]{64}$/u;
 const supervisorName = 'CLU-E-Windows-Supervisor.exe';
 const engineName = 'wxc-exec.exe';
@@ -69,12 +69,13 @@ function verifyInstalledPair(supervisor, wrapperSha256, engineSha256) {
   verifyInstalledImage(join(directory, engineName), engineSha256);
 }
 
-async function approve({ source, cache }) {
+async function approve({ source, cache, integratedWfp = false }) {
   console.log(`Committed Git HEAD ${source.head.slice(0, 12)} | ${source.scopeSha256}`);
   console.log(`Dependency lock | ${source.lockSha256}`);
   console.log(`Master Benchmark contract | ${source.benchmarkSha256}`);
   console.log(`Installed npm CLI | ${source.npmCliSha256}`);
   console.log(`Native SQLite cache archive | ${cache.prebuild.sha256}`);
+  if (integratedWfp) console.log('The direct npm typecheck runs with the scoped WFP lease after the control and deny checks.');
   if (!process.stdin.isTTY || !process.stdout.isTTY) return false;
   const consoleInput = createInterface({ input: process.stdin, output: process.stdout });
   const cancel = new AbortController();
@@ -102,7 +103,8 @@ function progress(phase) {
 }
 
 const args = process.argv.slice(2);
-const installed = args.length === 9 && args[6] === '--installed' &&
+const integratedWfp = args[6] === '--installed-wfp';
+const installed = args.length === 9 && (args[6] === '--installed' || integratedWfp) &&
   args[7].length === 64 && args[8].length === 64 && sha256Pattern.test(args[7]) && sha256Pattern.test(args[8]);
 if (args.length === 1 && args[0] === '--help') {
   console.log(usage);
@@ -114,9 +116,15 @@ if (args.length === 1 && args[0] === '--help') {
     const stage = checkedPath(args[1], true);
     const outer = dirname(stage);
     const physicalRoot = realpathSync.native(root);
-    const expectedExe = installed
+    let expectedExe = installed
       ? join(dirname(outer), 'installed-diagnostics', args[7], supervisorName)
       : join(outer, 'bin', supervisorName);
+    if (integratedWfp) {
+      if (process.platform !== 'win32' || !process.env.ProgramFiles) throw new Error('PROTECTED_INSTALL_ROOT_UNAVAILABLE');
+      const programFiles = checkedPath(process.env.ProgramFiles, true);
+      const id = basename(outer).slice('.setup-'.length);
+      expectedExe = join(programFiles, `.clue-governed-wfp-${id}`, args[7], supervisorName);
+    }
     const expectedOutput = join(outer, 'admission-result.json');
     if (basename(stage) !== 'admission' || !/^\.setup-[0-9a-f]{32}$/u.test(basename(outer)) ||
         !isAbsolute(args[3]) || (installed ? args[3] !== expectedExe : relative(expectedExe, args[3]) !== '') ||
@@ -139,8 +147,19 @@ if (args.length === 1 && args[0] === '--help') {
       const bytes = readFileSync(fixture);
       if (bytes.length < 1 || bytes.length > 16 * 1024 || bytes.some((byte) => byte === 0 || byte > 127)) throw new Error('BOOTSTRAP_BYTES_UNVERIFIED');
       if (installed) verifyInstalledPair(supervisor, args[7], args[8]);
+      let wfpPrelude;
+      if (integratedWfp) {
+        const prelude = checkedPath(join(physicalRoot, 'tools', 'windows-supervisor', 'GovernedWfpBindPrelude.cjs'), false);
+        const preludeBytes = readFileSync(prelude);
+        if (preludeBytes.length < 1 || preludeBytes.length > 4096 ||
+            preludeBytes.some((byte) => byte !== 9 && byte !== 10 && byte !== 13 && (byte < 32 || byte > 126))) {
+          throw new Error('GOVERNED_WFP_PRELUDE_UNVERIFIED');
+        }
+        wfpPrelude = preludeBytes.toString('ascii');
+      }
       report = await exerciseGovernedWorkload({
         repoRoot: physicalRoot, stage, supervisor, node, systemRoot, script: bytes.toString('ascii'), approve, progress,
+        ...(integratedWfp ? { integratedWfp, wfpPrelude } : {}),
       });
       if (installed) {
         verifyInstalledPair(supervisor, args[7], args[8]);
