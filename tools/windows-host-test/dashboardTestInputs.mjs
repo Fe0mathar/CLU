@@ -12,6 +12,7 @@ const DEVICE = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/iu;
 const MAX_FILES = 512;
 const MAX_FILE_BYTES = 4 * 1024 * 1024;
 const MAX_SCOPE_BYTES = 32 * 1024 * 1024;
+const exactStats = { bigint: true };
 
 function inside(root, file) {
   const delta = relative(root, file);
@@ -77,31 +78,47 @@ function listPaths(bytes) {
   return paths.sort();
 }
 
+function sameFileMetadata(before, after) {
+  return after.isFile() && after.nlink === 1n && before.dev === after.dev && before.ino === after.ino &&
+    before.size === after.size && before.mtimeNs === after.mtimeNs && before.ctimeNs === after.ctimeNs;
+}
+
 function readLocalFile(root, path, remaining) {
   const file = join(root, path);
   try {
-    const before = lstatSync(file);
-    if (!before.isFile() || before.nlink !== 1 || relative(file, realpathSync.native(file)) !== '') {
+    const before = lstatSync(file, exactStats);
+    const isCanonical = () => relative(file, realpathSync.native(file)) === '';
+    if (!before.isFile() || before.nlink !== 1n || !isCanonical()) {
       throw new Error('HOST_TEST_SCOPE_FILE_UNSAFE');
     }
-    if (before.size > MAX_FILE_BYTES || before.size > remaining) throw new Error('HOST_TEST_SCOPE_TOO_LARGE');
+    if (before.size > BigInt(Math.min(MAX_FILE_BYTES, remaining))) throw new Error('HOST_TEST_SCOPE_TOO_LARGE');
 
     const fd = openSync(file, 'r');
     try {
-      const sameFile = () => {
-        const stat = fstatSync(fd);
-        return stat.isFile() && stat.dev === before.dev && stat.ino === before.ino && stat.size === before.size &&
-          stat.nlink === before.nlink && stat.mtimeMs === before.mtimeMs && stat.ctimeMs === before.ctimeMs;
-      };
-      if (!sameFile()) throw new Error('HOST_TEST_SCOPE_CHANGED_DURING_READ');
-      const bytes = Buffer.alloc(before.size);
+      // Older Windows libuv can report different device IDs for path and handle stats.
+      // Compare each kind with itself, and verify the path's final opened handle below.
+      const opened = fstatSync(fd, exactStats);
+      const pathUnchanged = () => isCanonical() && sameFileMetadata(before, lstatSync(file, exactStats));
+      if (!opened.isFile() || opened.nlink !== 1n || opened.size !== before.size || !pathUnchanged()) {
+        throw new Error('HOST_TEST_SCOPE_CHANGED_DURING_READ');
+      }
+      const bytes = Buffer.alloc(Number(opened.size));
       let offset = 0;
       while (offset < bytes.length) {
         const count = readSync(fd, bytes, offset, bytes.length - offset, offset);
         if (count === 0) throw new Error('HOST_TEST_SCOPE_CHANGED_DURING_READ');
         offset += count;
       }
-      if (!sameFile()) throw new Error('HOST_TEST_SCOPE_CHANGED_DURING_READ');
+      if (!pathUnchanged()) throw new Error('HOST_TEST_SCOPE_CHANGED_DURING_READ');
+      const finalFd = openSync(file, 'r');
+      try {
+        if (!sameFileMetadata(opened, fstatSync(finalFd, exactStats)) ||
+            !sameFileMetadata(opened, fstatSync(fd, exactStats)) || !pathUnchanged()) {
+          throw new Error('HOST_TEST_SCOPE_CHANGED_DURING_READ');
+        }
+      } finally {
+        closeSync(finalFd);
+      }
       return bytes;
     } finally {
       closeSync(fd);
