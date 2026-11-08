@@ -87,6 +87,7 @@ const REQUIRED_OPERATOR_PATHS = [
   'CLUE-Windows-Candidate-Comparison.bat',
   'CLUE-Windows-Proof-Admission-Diagnostic.bat',
   'CLUE-Windows-Reviewed-Workload.bat',
+  'CLUE-Windows-Governed-Workload.bat',
   'CONFIG-EDIT.md',
   'MANIFEST.txt',
   'clue-status.md',

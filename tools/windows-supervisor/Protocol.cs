@@ -32,6 +32,7 @@ public sealed class Request
 public static class Protocol
 {
     private const int MaxRequestBytes = 1024 * 1024;
+    private const int MaxNpmCliBytes = 1024 * 1024;
     private const int MaxReviewedWorkloadBytes = 4096;
     private const int MaxReviewedWorkloadTests = 64;
     private static readonly Regex ReviewedTestPath = new Regex(
@@ -52,7 +53,9 @@ public static class Protocol
         r.requestPath = LocalPath(path, false, false);
         bool proofAdmission = !String.IsNullOrEmpty(MxcPin.ProofAdmissionStage);
         bool reviewedWorkload = MxcPin.ProofAdmissionReviewedWorkload;
-        Check(!reviewedWorkload || proofAdmission, "A reviewed workload requires a pinned proof admission stage.");
+        bool governedWorkload = MxcPin.ProofAdmissionGovernedWorkload;
+        Check(!(reviewedWorkload && governedWorkload), "Conflicting pinned proof admission modes.");
+        Check(proofAdmission || !(reviewedWorkload || governedWorkload), "Missing pinned proof admission stage.");
         if (proofAdmission)
             r.fixtureRoot = ProofAdmissionCaseRoot(r.requestPath);
         var serializer = Serializer();
@@ -73,7 +76,12 @@ public static class Protocol
         Check(fields["timeoutMs"] is int, "Invalid timeout type.");
         r.timeoutMs = (int)fields["timeoutMs"];
         if (proofAdmission)
-            Check(r.timeoutMs == (reviewedWorkload ? 90000 : 20000), "Invalid proof admission timeout.");
+        {
+            int deadline = reviewedWorkload ? 90000 : 20000;
+            if (governedWorkload)
+                deadline = IsCandidateCase(r) ? 360000 : 120000;
+            Check(r.timeoutMs == deadline, "Invalid proof admission timeout.");
+        }
         else
             Check(r.timeoutMs == 5000 || r.timeoutMs == 12000, "Invalid qualification timeout.");
         r.readOnlyRoots = ReadRoots(fields["readOnlyRoots"]);
@@ -98,7 +106,7 @@ public static class Protocol
             "Working directory is outside the declared roots.");
         if (proofAdmission)
         {
-            ReadProofAdmissionFixture(r, fields["env"], reviewedWorkload);
+            ReadProofAdmissionFixture(r, fields["env"], reviewedWorkload, governedWorkload);
             return r;
         }
         EnsureQualificationFixture(r);
@@ -186,9 +194,14 @@ public static class Protocol
         return caseRoot;
     }
 
-    private static void ReadProofAdmissionFixture(Request r, object environment, bool reviewedWorkload)
+    private static bool IsCandidateCase(Request r)
     {
-        bool candidate = Same(Path.GetFileName(r.fixtureRoot), "candidate");
+        return Same(Path.GetFileName(r.fixtureRoot), "candidate");
+    }
+
+    private static void ReadProofAdmissionFixture(Request r, object environment, bool reviewedWorkload, bool governedWorkload)
+    {
+        bool candidate = IsCandidateCase(r);
         bool writableCheckout = candidate && !reviewedWorkload;
         var stage = Path.GetDirectoryName(r.fixtureRoot);
         var checkout = Path.Combine(r.fixtureRoot, "checkout");
@@ -221,12 +234,15 @@ public static class Protocol
             Check(hash == MxcPin.ProofAdmissionScriptSha256, "Proof admission script pin mismatch.");
         }
         Check(IsSyntheticFile(Path.Combine(trusted, "trusted.txt"), "clue-admission-source-v1\n") &&
-            (reviewedWorkload || IsSyntheticFile(Path.Combine(checkout, "input.txt"), "clue-admission-checkout-v1\n")) &&
+            (reviewedWorkload || governedWorkload ||
+                IsSyntheticFile(Path.Combine(checkout, "input.txt"), "clue-admission-checkout-v1\n")) &&
             IsSyntheticFile(Path.Combine(r.fixtureRoot, "outside", "forbidden.txt"), "clue-admission-outside-v1\n") &&
             IsSyntheticFile(Path.Combine(home, "user.npmrc"), "") &&
             IsSyntheticFile(Path.Combine(home, "global.npmrc"), ""), "Proof admission fixture inputs do not match.");
         if (reviewedWorkload)
             EnsureReviewedWorkload(checkout, trusted);
+        if (governedWorkload)
+            EnsureGovernedWorkload(checkout, nodeRoot, candidate);
 
         var cache = CanonicalPath(Path.Combine(home, "npm-cache"), true);
         var interpreter = CanonicalPath(Path.Combine(systemDirectory, "cmd.exe"), false);
@@ -299,18 +315,38 @@ public static class Protocol
         foreach (var test in tests)
         {
             Check(ReviewedTestPath.IsMatch(test) && seen.Add(test), "Invalid reviewed workload test path.");
-            EnsureReviewedFile(checkout, test);
+            EnsureWorkloadFile(checkout, test);
         }
-        EnsureReviewedFile(checkout, "package.json");
-        EnsureReviewedFile(checkout, "ui/clue-dashboard/index.html");
-        EnsureReviewedFile(checkout, "ui/clue-dashboard/app.js");
+        EnsureWorkloadFile(checkout, "package.json");
+        EnsureWorkloadFile(checkout, "ui/clue-dashboard/index.html");
+        EnsureWorkloadFile(checkout, "ui/clue-dashboard/app.js");
     }
 
-    private static void EnsureReviewedFile(string checkout, string relativePath)
+    private static void EnsureWorkloadFile(string checkout, string relativePath)
     {
         var path = CanonicalPath(Path.Combine(checkout, relativePath.Replace('/', '\\')), false);
         using (var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
-            Check(IsSingleLink(stream), "Reviewed workload input must be a single-link file.");
+            Check(IsSingleLink(stream), "Workload input must be a single-link file.");
+    }
+
+    private static void EnsureGovernedWorkload(string checkout, string nodeRoot, bool candidate)
+    {
+        EnsureWorkloadFile(checkout, "package.json");
+        EnsureWorkloadFile(checkout, "package-lock.json");
+        EnsureWorkloadFile(checkout, "tsconfig.json");
+        EnsureWorkloadFile(checkout, "targets/clu/benchmark/master-benchmark.md");
+        if (candidate)
+        {
+            var npmCli = CanonicalPath(Path.Combine(nodeRoot, "node_modules", "npm", "bin", "npm-cli.js"), false);
+            using (var stream = new FileStream(npmCli, FileMode.Open, FileAccess.Read, FileShare.Read))
+            using (var sha = SHA256.Create())
+            {
+                Check(IsSingleLink(stream) && stream.Length > 0 && stream.Length <= MaxNpmCliBytes,
+                    "Invalid pinned npm CLI file.");
+                var hash = BitConverter.ToString(sha.ComputeHash(stream)).Replace("-", "").ToLowerInvariant();
+                Check(hash == MxcPin.ProofAdmissionNpmCliSha256, "Governed workload npm CLI pin mismatch.");
+            }
+        }
     }
 
     private static void EnsureQualificationFixture(Request r)
