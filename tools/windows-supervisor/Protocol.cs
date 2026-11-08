@@ -44,6 +44,9 @@ public static class Protocol
     {
         var r = new Request();
         r.requestPath = LocalPath(path, false, false);
+        bool proofAdmission = !String.IsNullOrEmpty(MxcPin.ProofAdmissionStage);
+        if (proofAdmission)
+            r.fixtureRoot = ProofAdmissionCaseRoot(r.requestPath);
         var serializer = Serializer();
         string json;
         using (var stream = new FileStream(r.requestPath, FileMode.Open, FileAccess.Read, FileShare.Read))
@@ -61,7 +64,10 @@ public static class Protocol
         Check(fields["denyNetwork"] is bool && (bool)fields["denyNetwork"], "Network denial is required.");
         Check(fields["timeoutMs"] is int, "Invalid timeout type.");
         r.timeoutMs = (int)fields["timeoutMs"];
-        Check(r.timeoutMs == 5000 || r.timeoutMs == 12000, "Invalid qualification timeout.");
+        if (proofAdmission)
+            Check(r.timeoutMs == 20000, "Invalid proof admission timeout.");
+        else
+            Check(r.timeoutMs == 5000 || r.timeoutMs == 12000, "Invalid qualification timeout.");
         r.readOnlyRoots = ReadRoots(fields["readOnlyRoots"]);
         r.writableRoots = ReadRoots(fields["writableRoots"]);
         foreach (var writable in r.writableRoots)
@@ -82,6 +88,11 @@ public static class Protocol
         r.cwd = LocalPath(AsText(fields["cwd"], 4096), true, false);
         Check(InRoots(r.cwd, r.readOnlyRoots) || InRoots(r.cwd, r.writableRoots),
             "Working directory is outside the declared roots.");
+        if (proofAdmission)
+        {
+            ReadProofAdmissionFixture(r, fields["env"]);
+            return r;
+        }
         EnsureQualificationFixture(r);
         r.env = ReadEnvironment(r, fields["env"]);
         EnsureQualificationCommand(r);
@@ -151,6 +162,108 @@ public static class Protocol
             slashes = 0;
         }
         return output.Append('\\', 2 * slashes).Append('"').ToString();
+    }
+
+    private static string ProofAdmissionCaseRoot(string requestPath)
+    {
+        var stage = CanonicalPath(MxcPin.ProofAdmissionStage, true);
+        var requestDirectory = Path.GetDirectoryName(requestPath);
+        var privateDirectory = requestDirectory == null ? null : Path.GetDirectoryName(requestDirectory);
+        var caseRoot = privateDirectory == null ? null : Path.GetDirectoryName(privateDirectory);
+        Check(caseRoot != null &&
+            (Same(caseRoot, Path.Combine(stage, "baseline")) || Same(caseRoot, Path.Combine(stage, "candidate"))) &&
+            Same(privateDirectory, Path.Combine(caseRoot, "private")) &&
+            MatchesTemporaryName(Path.GetFileName(requestDirectory), "request-") &&
+            Same(Path.GetFileName(requestPath), "request.json"), "Only the pinned proof admission fixture is allowed.");
+        return caseRoot;
+    }
+
+    private static void ReadProofAdmissionFixture(Request r, object environment)
+    {
+        bool candidate = Same(Path.GetFileName(r.fixtureRoot), "candidate");
+        var stage = Path.GetDirectoryName(r.fixtureRoot);
+        var checkout = Path.Combine(r.fixtureRoot, "checkout");
+        var workspace = Path.Combine(r.fixtureRoot, "workspace");
+        var temp = Path.Combine(r.fixtureRoot, "scratch-temp");
+        var home = Path.Combine(r.fixtureRoot, "scratch-home");
+        var trusted = Path.Combine(stage, "trusted-source");
+        var systemDirectory = CanonicalPath(Environment.SystemDirectory, true);
+        r.systemRoot = CanonicalPath(Path.GetDirectoryName(systemDirectory), true);
+        Check(Same(r.command, CanonicalPath(MxcPin.QualificationNodeExe, false)),
+            "Unexpected proof admission Node executable.");
+        var nodeRoot = Path.GetDirectoryName(r.command);
+        Check(!Overlaps(stage, nodeRoot) && !Overlaps(stage, r.systemRoot),
+            "Proof admission fixture overlaps a runtime root.");
+        Check(Same(r.cwd, checkout) &&
+            r.readOnlyRoots.Length == (candidate ? 3 : 4) &&
+            ContainsExact(nodeRoot, r.readOnlyRoots) && ContainsExact(r.systemRoot, r.readOnlyRoots) &&
+            ContainsExact(trusted, r.readOnlyRoots) && (candidate || ContainsExact(checkout, r.readOnlyRoots)) &&
+            r.writableRoots.Length == (candidate ? 4 : 3) &&
+            ContainsExact(workspace, r.writableRoots) && ContainsExact(temp, r.writableRoots) &&
+            ContainsExact(home, r.writableRoots) && (!candidate || ContainsExact(checkout, r.writableRoots)),
+            "Unexpected proof admission roots.");
+
+        Check(r.args.Length == 3 && r.args[0] == "-e" &&
+            r.args[2] == (candidate ? "candidate" : "baseline"), "Unexpected proof admission arguments.");
+        using (var sha = SHA256.Create())
+        {
+            var hash = BitConverter.ToString(sha.ComputeHash(Encoding.UTF8.GetBytes(r.args[1])))
+                .Replace("-", "").ToLowerInvariant();
+            Check(hash == MxcPin.ProofAdmissionScriptSha256, "Proof admission script pin mismatch.");
+        }
+        Check(IsSyntheticFile(Path.Combine(trusted, "trusted.txt"), "clue-admission-source-v1\n") &&
+            IsSyntheticFile(Path.Combine(checkout, "input.txt"), "clue-admission-checkout-v1\n") &&
+            IsSyntheticFile(Path.Combine(r.fixtureRoot, "outside", "forbidden.txt"), "clue-admission-outside-v1\n") &&
+            IsSyntheticFile(Path.Combine(home, "user.npmrc"), "") &&
+            IsSyntheticFile(Path.Combine(home, "global.npmrc"), ""), "Proof admission fixture inputs do not match.");
+
+        var cache = CanonicalPath(Path.Combine(home, "npm-cache"), true);
+        var interpreter = CanonicalPath(Path.Combine(systemDirectory, "cmd.exe"), false);
+        var paths = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            { "PATH", nodeRoot + ";" + systemDirectory },
+            { "SystemRoot", r.systemRoot },
+            { "WINDIR", r.systemRoot },
+            { "ComSpec", interpreter },
+            { "HOME", home },
+            { "USERPROFILE", home },
+            { "APPDATA", home },
+            { "LOCALAPPDATA", home },
+            { "TEMP", temp },
+            { "TMP", temp },
+            { "TMPDIR", temp },
+            { "NPM_CONFIG_CACHE", cache },
+            { "NPM_CONFIG_USERCONFIG", Path.Combine(home, "user.npmrc") },
+            { "NPM_CONFIG_GLOBALCONFIG", Path.Combine(home, "global.npmrc") }
+        };
+        var literals = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            { "CI", "1" },
+            { "NO_COLOR", "1" },
+            { "PATHEXT", ".COM;.EXE;.BAT;.CMD" },
+            { "NPM_CONFIG_OFFLINE", "true" },
+            { "NPM_CONFIG_AUDIT", "false" },
+            { "NPM_CONFIG_FUND", "false" },
+            { "NPM_CONFIG_UPDATE_NOTIFIER", "false" }
+        };
+        var supplied = environment as IDictionary<string, object>;
+        Check(supplied != null && supplied.Count == paths.Count + literals.Count, "Unexpected proof admission environment.");
+        var env = new SortedDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var pair in paths)
+        {
+            object value;
+            Check(supplied.TryGetValue(pair.Key, out value) && Same(AsText(value, 32766), pair.Value),
+                "Unexpected proof admission environment path.");
+            env.Add(pair.Key, pair.Value);
+        }
+        foreach (var pair in literals)
+        {
+            object value;
+            Check(supplied.TryGetValue(pair.Key, out value) && AsText(value, 32766) == pair.Value,
+                "Unexpected proof admission environment value.");
+            env.Add(pair.Key, pair.Value);
+        }
+        r.env = env;
     }
 
     private static void EnsureQualificationFixture(Request r)
