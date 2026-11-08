@@ -1,9 +1,11 @@
 using System;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 
 internal static class NativeJob
@@ -15,15 +17,18 @@ internal static class NativeJob
     private const uint UnicodeEnvironment = 0x00000400;
     private const uint NoWindow = 0x08000000;
     private const uint UseStdHandles = 0x00000100;
+    private const uint JobQuery = 0x0004;
+    private const int FileNotFound = 2;
+    private const int AlreadyExists = 183;
     private const int HandleList = 0x00020002;
     private const int JobList = 0x0002000D;
 
     internal static int Run(string engine, string log, string config, string systemRoot, int timeout,
-        out bool deadlineExpired, Action<IntPtr> observe = null, Action onJobEmpty = null)
+        out bool deadlineExpired, Action<IntPtr> observe = null, Action onJobEmpty = null, string jobName = null)
     {
         deadlineExpired = false;
         var clock = Stopwatch.StartNew();
-        IntPtr job = CreateJobObjectW(IntPtr.Zero, null);
+        IntPtr job = jobName == null ? CreateJobObjectW(IntPtr.Zero, null) : CreatePrivateNamedJob(jobName);
         if (job == IntPtr.Zero) throw Error();
         IntPtr attributes = IntPtr.Zero;
         IntPtr jobs = IntPtr.Zero;
@@ -135,6 +140,92 @@ internal static class NativeJob
         }
     }
 
+    private static IntPtr CreatePrivateNamedJob(string name)
+    {
+        RequireJobName(name);
+        IntPtr descriptor;
+        // Limit job handles to elevated administrators and SYSTEM. The owner-rights ACE
+        // suppresses the implicit WRITE_DAC grant to a non-elevated token of the same user.
+        const string sddl = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;RC;;;OW)";
+        Check(ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, 1, out descriptor, IntPtr.Zero));
+        try
+        {
+            var attributes = new SecurityAttributes {
+                Length = (uint)Marshal.SizeOf(typeof(SecurityAttributes)),
+                SecurityDescriptor = descriptor,
+                InheritHandle = 0,
+            };
+            IntPtr job = CreateNamedJobObjectW(ref attributes, name);
+            int error = Marshal.GetLastWin32Error();
+            if (job == IntPtr.Zero) throw new Win32Exception(error);
+            if (error == AlreadyExists)
+            {
+                Close(job);
+                throw new InvalidOperationException("NAMED_JOB_ALREADY_EXISTS");
+            }
+            return job;
+        }
+        finally { LocalFree(descriptor); }
+    }
+
+    // Recovery calls this only in the recorded session, after the retained process
+    // handles signal. An access error is not evidence that the job is absent.
+    internal static bool NamedJobAbsent(string name)
+    {
+        RequireJobName(name);
+        IntPtr job = OpenJobObjectW(JobQuery, false, name);
+        int error = Marshal.GetLastWin32Error();
+        if (job == IntPtr.Zero)
+        {
+            if (error == FileNotFound) return true;
+            throw new Win32Exception(error);
+        }
+        Check(CloseHandle(job));
+        return false;
+    }
+
+    internal static int[] ReadJobProcessIds(IntPtr job)
+    {
+        if (job == IntPtr.Zero || job == new IntPtr(-1))
+            throw new ArgumentException("A specific job handle is required.", "job");
+
+        // JOBOBJECT_BASIC_PROCESS_ID_LIST has two DWORDs followed by ULONG_PTR IDs.
+        const int headerLength = 8;
+        const int maximumProcessCount = 32;
+        int capacity = headerLength + maximumProcessCount * IntPtr.Size;
+        IntPtr buffer = Marshal.AllocHGlobal(capacity);
+        try
+        {
+            uint written;
+            Check(QueryJobProcessIdList(job, 3, buffer, (uint)capacity, out written));
+            if (written < headerLength || written > capacity)
+                throw new InvalidDataException("JOB_PROCESS_ID_LIST_LENGTH_INVALID");
+            int assigned = Marshal.ReadInt32(buffer, 0);
+            int count = Marshal.ReadInt32(buffer, sizeof(uint));
+            if (count < 0 || count > maximumProcessCount || count != assigned ||
+                written < headerLength + count * IntPtr.Size)
+                throw new InvalidDataException("JOB_PROCESS_ID_LIST_INCOMPLETE");
+
+            var result = new int[count];
+            var seen = new HashSet<int>();
+            for (int index = 0; index < count; index++)
+            {
+                long id = Marshal.ReadIntPtr(buffer, headerLength + index * IntPtr.Size).ToInt64();
+                if (id <= 0 || id > Int32.MaxValue || !seen.Add((int)id))
+                    throw new InvalidDataException("JOB_PROCESS_ID_LIST_ENTRY_INVALID");
+                result[index] = (int)id;
+            }
+            return result;
+        }
+        finally { Marshal.FreeHGlobal(buffer); }
+    }
+
+    private static void RequireJobName(string name)
+    {
+        if (name == null || !Regex.IsMatch(name, @"\ALocal\\CLU-E-[a-f0-9]{32}\z", RegexOptions.CultureInvariant))
+            throw new InvalidDataException("NAMED_JOB_NAME_INVALID");
+    }
+
     private static void WaitForEmptyJob(IntPtr job)
     {
         var clock = Stopwatch.StartNew();
@@ -155,6 +246,14 @@ internal static class NativeJob
 
     private static Win32Exception Error() { return new Win32Exception(Marshal.GetLastWin32Error()); }
     private static void Check(bool condition) { if (!condition) throw Error(); }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct SecurityAttributes
+    {
+        internal uint Length;
+        internal IntPtr SecurityDescriptor;
+        internal int InheritHandle;
+    }
 
     [StructLayout(LayoutKind.Sequential)]
     private struct BasicLimit
@@ -208,10 +307,21 @@ internal static class NativeJob
 
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true, ExactSpelling = true)]
     private static extern IntPtr CreateJobObjectW(IntPtr attributes, string name);
+    [DllImport("kernel32.dll", EntryPoint = "CreateJobObjectW", CharSet = CharSet.Unicode, SetLastError = true, ExactSpelling = true)]
+    private static extern IntPtr CreateNamedJobObjectW(ref SecurityAttributes attributes, string name);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true, ExactSpelling = true)]
+    private static extern IntPtr OpenJobObjectW(uint access, [MarshalAs(UnmanagedType.Bool)] bool inherit, string name);
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true, ExactSpelling = true)]
+    private static extern bool ConvertStringSecurityDescriptorToSecurityDescriptorW(string sddl, uint revision,
+        out IntPtr descriptor, IntPtr size);
+    [DllImport("kernel32.dll", ExactSpelling = true)]
+    private static extern IntPtr LocalFree(IntPtr memory);
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool SetInformationJobObject(IntPtr job, int type, ref ExtendedLimit value, uint size);
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool QueryInformationJobObject(IntPtr job, int type, out BasicAccounting value, uint size, IntPtr returned);
+    [DllImport("kernel32.dll", EntryPoint = "QueryInformationJobObject", SetLastError = true, ExactSpelling = true)]
+    private static extern bool QueryJobProcessIdList(IntPtr job, int type, IntPtr value, uint size, out uint returned);
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool TerminateJobObject(IntPtr job, uint exit);
     [DllImport("kernel32.dll", SetLastError = true)]

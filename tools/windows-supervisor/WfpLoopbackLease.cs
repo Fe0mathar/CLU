@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Security.Principal;
 
@@ -33,14 +34,17 @@ internal sealed class WfpLoopbackLease : IDisposable
     private readonly Guid sublayerKey;
     private readonly Guid[] filterKeys;
     private readonly ulong[] filterIds;
+    private readonly byte[] staticPackageSid;
     private bool removalVerified;
 
-    private WfpLoopbackLease(IntPtr engine, Guid sublayerKey, Guid[] filterKeys, ulong[] filterIds)
+    private WfpLoopbackLease(IntPtr engine, Guid sublayerKey, Guid[] filterKeys, ulong[] filterIds,
+        byte[] staticPackageSid)
     {
         this.engine = engine;
         this.sublayerKey = sublayerKey;
         this.filterKeys = filterKeys;
         this.filterIds = filterIds;
+        this.staticPackageSid = staticPackageSid;
     }
 
     internal int Count { get { return filterKeys.Length; } }
@@ -50,24 +54,37 @@ internal sealed class WfpLoopbackLease : IDisposable
 
     internal static WfpLoopbackLease Install(byte[] packageSid, out bool failureCleanupVerified)
     {
-        failureCleanupVerified = false;
-        if (packageSid == null || packageSid.Length != 40)
-            throw new ArgumentException("The diagnostic requires one unique AppContainer package SID.");
-        byte[] expectedSid = (byte[])packageSid.Clone();
-        var sid = new SecurityIdentifier(expectedSid, 0);
-        if (sid.BinaryLength != expectedSid.Length || !sid.Value.StartsWith("S-1-15-2-", StringComparison.Ordinal))
-            throw new ArgumentException("The diagnostic requires one unique AppContainer package SID.");
+        return Install(packageSid, null, out failureCleanupVerified);
+    }
 
-        var session = new Session {
-            Key = Guid.NewGuid(), Flags = DynamicSession, TransactionTimeout = 5000,
-            Display = new DisplayData { Name = "CLU-E disposable network diagnostic" },
-        };
-        IntPtr engine;
-        Check(FwpmEngineOpen0(null, RpcAuthnWinnt, IntPtr.Zero, ref session, out engine), "WFP_OPEN");
+    internal static WfpLoopbackLease InstallStatic(byte[] packageSid, Action<Guid, Guid[]> publishRecoveryKeys,
+        out bool failureCleanupVerified)
+    {
+        if (publishRecoveryKeys == null) throw new ArgumentNullException("publishRecoveryKeys");
+        return Install(packageSid, publishRecoveryKeys, out failureCleanupVerified);
+    }
+
+    private static WfpLoopbackLease Install(byte[] packageSid, Action<Guid, Guid[]> publishRecoveryKeys,
+        out bool failureCleanupVerified)
+    {
+        failureCleanupVerified = false;
+        byte[] expectedSid = ValidatePackageSid(packageSid);
+        bool staticLifetime = publishRecoveryKeys != null;
         Guid sublayerKey = Guid.NewGuid();
         var filterKeys = new Guid[Layers.Length];
+        for (int index = 0; index < filterKeys.Length; index++) filterKeys[index] = Guid.NewGuid();
+        if (staticLifetime)
+        {
+            // Publish the exact recovery intent before making any WFP changes.
+            publishRecoveryKeys(sublayerKey, (Guid[])filterKeys.Clone());
+        }
+
+        string staticName = staticLifetime ? StaticObjectName(sublayerKey) : null;
+        var display = new DisplayData { Name = staticName ?? "CLU-E disposable package-only block" };
+        IntPtr engine = OpenEngine(!staticLifetime);
         var filterIds = new ulong[Layers.Length];
-        var lease = new WfpLoopbackLease(engine, sublayerKey, filterKeys, filterIds);
+        var lease = new WfpLoopbackLease(engine, sublayerKey, filterKeys, filterIds,
+            staticLifetime ? expectedSid : null);
         bool transaction = false;
         IntPtr conditionPointer = IntPtr.Zero;
         GCHandle pinnedSid = new GCHandle();
@@ -85,15 +102,14 @@ internal sealed class WfpLoopbackLease : IDisposable
             transaction = true;
             var sublayer = new Sublayer {
                 Key = sublayerKey, Weight = FixtureSublayerWeight,
-                Display = new DisplayData { Name = "CLU-E disposable package-only block" },
+                Display = display,
             };
             Check(FwpmSubLayerAdd0(engine, ref sublayer, IntPtr.Zero), "WFP_SUBLAYER_ADD");
             for (int index = 0; index < Layers.Length; index++)
             {
-                filterKeys[index] = Guid.NewGuid();
                 var filter = new Filter {
                     Key = filterKeys[index], Flags = ClearActionRight,
-                    Display = new DisplayData { Name = "CLU-E disposable package-only block" },
+                    Display = display,
                     LayerKey = Layers[index], SublayerKey = sublayerKey,
                     ConditionCount = 1, Conditions = conditionPointer,
                     Action = new FilterAction { Type = ActionBlock },
@@ -103,15 +119,23 @@ internal sealed class WfpLoopbackLease : IDisposable
             Check(FwpmTransactionCommit0(engine), "WFP_TRANSACTION_COMMIT");
             transaction = false;
 
-            lease.VerifiedSublayerWeight = VerifySublayer(engine, sublayerKey);
+            lease.VerifiedSublayerWeight = ReadSublayer(engine, sublayerKey, staticName, false).Value;
             for (int index = 0; index < Layers.Length; index++)
-                VerifyFilter(engine, filterKeys[index], filterIds[index], Layers[index], sublayerKey, expectedSid);
+                ReadFilter(engine, filterKeys[index], filterIds[index], Layers[index], sublayerKey,
+                    expectedSid, staticName, false);
             return lease;
         }
         catch
         {
             if (transaction) FwpmTransactionAbort0(engine);
-            try { failureCleanupVerified = lease.ReleaseAndVerify(); }
+            try
+            {
+                // If a static commit may have happened, retain any installed policy until
+                // the caller proves the job is empty and explicitly reconciles the journal.
+                failureCleanupVerified = staticLifetime
+                    ? lease.CloseEngine() && VerifyAbsent(sublayerKey, filterKeys)
+                    : lease.ReleaseAndVerify();
+            }
             catch { failureCleanupVerified = false; }
             throw;
         }
@@ -122,38 +146,70 @@ internal sealed class WfpLoopbackLease : IDisposable
         }
     }
 
-    private static ushort VerifySublayer(IntPtr engine, Guid key)
+    private static byte[] ValidatePackageSid(byte[] packageSid)
+    {
+        if (packageSid == null || packageSid.Length != 40)
+            throw new ArgumentException("The diagnostic requires one unique AppContainer package SID.");
+        byte[] copy = (byte[])packageSid.Clone();
+        var sid = new SecurityIdentifier(copy, 0);
+        if (sid.BinaryLength != copy.Length || !sid.Value.StartsWith("S-1-15-2-", StringComparison.Ordinal))
+            throw new ArgumentException("The diagnostic requires one unique AppContainer package SID.");
+        return copy;
+    }
+
+    private static string StaticObjectName(Guid sublayerKey)
+    {
+        return "CLU-E disposable static loopback " + sublayerKey.ToString("D");
+    }
+
+    private static IntPtr OpenEngine(bool dynamicLifetime)
+    {
+        var session = new Session {
+            Key = Guid.NewGuid(), Flags = dynamicLifetime ? DynamicSession : 0u, TransactionTimeout = 5000,
+            Display = new DisplayData { Name = "CLU-E disposable network diagnostic" },
+        };
+        IntPtr engine;
+        Check(FwpmEngineOpen0(null, RpcAuthnWinnt, IntPtr.Zero, ref session, out engine), "WFP_OPEN");
+        return engine;
+    }
+
+    private static ushort? ReadSublayer(IntPtr engine, Guid key, string staticName, bool allowMissing)
     {
         IntPtr result;
-        Check(FwpmSubLayerGetByKey0(engine, ref key, out result), "WFP_SUBLAYER_GET");
+        uint status = FwpmSubLayerGetByKey0(engine, ref key, out result);
         try
         {
+            if (allowMissing && status == SublayerNotFound) return null;
+            Check(status, "WFP_SUBLAYER_GET");
             if (result == IntPtr.Zero) throw new InvalidOperationException("WFP_SUBLAYER_READBACK_MISSING");
             var layer = (Sublayer)Marshal.PtrToStructure(result, typeof(Sublayer));
             if (layer.Key != key)
                 throw new InvalidOperationException("WFP_SUBLAYER_KEY_MISMATCH");
-            // Dynamic lifetime is established by the engine session. The documented
-            // persistence bit is the sublayer flag that changes that lifetime check.
             if ((layer.Flags & SublayerPersistent) != 0)
                 throw new InvalidOperationException("WFP_SUBLAYER_PERSISTENT_0x" + layer.Flags.ToString("X8"));
             if (layer.Weight != FixtureSublayerWeight)
                 throw new InvalidOperationException("WFP_SUBLAYER_WEIGHT_0x" + layer.Weight.ToString("X8"));
             if (!ProviderUnassigned(layer.ProviderKey))
                 throw new InvalidOperationException("WFP_SUBLAYER_PROVIDER_ASSIGNED");
+            VerifyStaticMarker(layer.Display, layer.ProviderData, staticName);
             return layer.Weight;
         }
-        finally { FwpmFreeMemory0(ref result); }
+        finally { if (result != IntPtr.Zero) FwpmFreeMemory0(ref result); }
     }
 
-    private static void VerifyFilter(IntPtr engine, Guid key, ulong id, Guid layer, Guid sublayer, byte[] sid)
+    private static ulong? ReadFilter(IntPtr engine, Guid key, ulong? expectedId, Guid layer, Guid sublayer,
+        byte[] sid, string staticName, bool allowMissing)
     {
         IntPtr result;
-        Check(FwpmFilterGetByKey0(engine, ref key, out result), "WFP_FILTER_GET");
+        uint status = FwpmFilterGetByKey0(engine, ref key, out result);
         try
         {
+            if (allowMissing && status == FilterNotFound) return null;
+            Check(status, "WFP_FILTER_GET");
             if (result == IntPtr.Zero) throw new InvalidOperationException("WFP_FILTER_READBACK_MISSING");
             var filter = (Filter)Marshal.PtrToStructure(result, typeof(Filter));
-            if (filter.Key != key || id == 0 || filter.Id != id || filter.LayerKey != layer || filter.SublayerKey != sublayer)
+            if (filter.Key != key || filter.Id == 0 || (expectedId.HasValue && filter.Id != expectedId.Value) ||
+                filter.LayerKey != layer || filter.SublayerKey != sublayer)
                 throw new InvalidOperationException("WFP_FILTER_IDENTITY_MISMATCH");
             if ((filter.Flags & (ClearActionRight | DisallowedFilterFlags)) != ClearActionRight)
                 throw new InvalidOperationException("WFP_FILTER_FLAGS_0x" + filter.Flags.ToString("X8"));
@@ -161,6 +217,7 @@ internal sealed class WfpLoopbackLease : IDisposable
                 throw new InvalidOperationException("WFP_FILTER_ACTION_0x" + filter.Action.Type.ToString("X8"));
             if (!ProviderUnassigned(filter.ProviderKey))
                 throw new InvalidOperationException("WFP_FILTER_PROVIDER_ASSIGNED");
+            VerifyStaticMarker(filter.Display, filter.ProviderData, staticName);
             if (filter.ConditionCount != 1 || filter.Conditions == IntPtr.Zero)
                 throw new InvalidOperationException("WFP_FILTER_CONDITION_SHAPE");
             var condition = (FilterCondition)Marshal.PtrToStructure(filter.Conditions, typeof(FilterCondition));
@@ -172,8 +229,15 @@ internal sealed class WfpLoopbackLease : IDisposable
             Marshal.Copy(observedSid, bytes, 0, bytes.Length);
             for (int index = 0; index < sid.Length; index++)
                 if (bytes[index] != sid[index]) throw new InvalidOperationException("WFP_PACKAGE_SCOPE_READBACK_MISMATCH");
+            return filter.Id;
         }
-        finally { FwpmFreeMemory0(ref result); }
+        finally { if (result != IntPtr.Zero) FwpmFreeMemory0(ref result); }
+    }
+
+    private static void VerifyStaticMarker(DisplayData display, Blob data, string staticName)
+    {
+        if (staticName != null && (!String.Equals(display.Name, staticName, StringComparison.Ordinal) || data.Size != 0))
+            throw new InvalidOperationException("WFP_STATIC_OWNER_MISMATCH");
     }
 
     private static bool ProviderUnassigned(IntPtr provider)
@@ -186,11 +250,80 @@ internal sealed class WfpLoopbackLease : IDisposable
     internal bool ReleaseAndVerify()
     {
         if (removalVerified) return true;
+        if (!CloseEngine()) return false;
+        removalVerified = staticPackageSid == null
+            ? VerifyAbsent(sublayerKey, filterKeys)
+            : RecoverStatic(staticPackageSid, sublayerKey, filterKeys);
+        return removalVerified;
+    }
+
+    private bool CloseEngine()
+    {
         if (engine != IntPtr.Zero)
         {
             if (FwpmEngineClose0(engine) != 0) return false;
             engine = IntPtr.Zero;
         }
+        return true;
+    }
+
+    // Only call after independent evidence shows the entire recorded job has exited.
+    // The GUIDs and SID must come from the trusted run journal, never from the workload.
+    internal static bool RecoverStatic(byte[] packageSid, Guid sublayerKey, Guid[] filterKeys)
+    {
+        byte[] sid = ValidatePackageSid(packageSid);
+        if (sublayerKey == Guid.Empty || filterKeys == null || filterKeys.Length != Layers.Length)
+            throw new ArgumentException("WFP_STATIC_RECOVERY_KEYS_INVALID");
+        var keys = (Guid[])filterKeys.Clone();
+        var unique = new HashSet<Guid> { sublayerKey };
+        foreach (Guid key in keys)
+            if (key == Guid.Empty || !unique.Add(key))
+                throw new ArgumentException("WFP_STATIC_RECOVERY_KEYS_INVALID");
+
+        string staticName = StaticObjectName(sublayerKey);
+        IntPtr recovery = OpenEngine(false);
+        bool transaction = false;
+        bool closed;
+        try
+        {
+            // Verify scope and delete within one write transaction so a concurrent WFP
+            // change cannot substitute an object between readback and deletion.
+            Check(FwpmTransactionBegin0(recovery, 0), "WFP_STATIC_RECOVERY_BEGIN");
+            transaction = true;
+            bool layerPresent = ReadSublayer(recovery, sublayerKey, staticName, true).HasValue;
+            int filterCount = 0;
+            for (int index = 0; index < Layers.Length; index++)
+                if (ReadFilter(recovery, keys[index], null, Layers[index], sublayerKey, sid, staticName, true).HasValue)
+                    filterCount++;
+
+            if (layerPresent && filterCount == keys.Length)
+            {
+                foreach (Guid filterKey in keys)
+                {
+                    Guid key = filterKey;
+                    Check(FwpmFilterDeleteByKey0(recovery, ref key), "WFP_STATIC_FILTER_DELETE");
+                }
+                Guid layerKey = sublayerKey;
+                Check(FwpmSubLayerDeleteByKey0(recovery, ref layerKey), "WFP_STATIC_SUBLAYER_DELETE");
+            }
+            else if (layerPresent || filterCount != 0)
+            {
+                throw new InvalidOperationException("WFP_STATIC_RECOVERY_PARTIAL_SET");
+            }
+
+            Check(FwpmTransactionCommit0(recovery), "WFP_STATIC_RECOVERY_COMMIT");
+            transaction = false;
+        }
+        finally
+        {
+            if (transaction) FwpmTransactionAbort0(recovery);
+            closed = FwpmEngineClose0(recovery) == 0;
+        }
+        return closed && VerifyAbsent(sublayerKey, keys);
+    }
+
+    private static bool VerifyAbsent(Guid sublayerKey, Guid[] filterKeys)
+    {
         IntPtr observer;
         if (FwpmEngineOpenWithoutSession(null, RpcAuthnWinnt, IntPtr.Zero, IntPtr.Zero, out observer) != 0) return false;
         bool absent = true;
@@ -212,11 +345,14 @@ internal sealed class WfpLoopbackLease : IDisposable
             if (layerStatus != SublayerNotFound) absent = false;
         }
         finally { if (FwpmEngineClose0(observer) != 0) absent = false; }
-        removalVerified = absent;
-        return removalVerified;
+        return absent;
     }
 
-    public void Dispose() { ReleaseAndVerify(); }
+    public void Dispose()
+    {
+        if (staticPackageSid == null) ReleaseAndVerify();
+        else CloseEngine();
+    }
 
     private static void Check(uint status, string operation)
     {
@@ -323,9 +459,13 @@ internal sealed class WfpLoopbackLease : IDisposable
     [DllImport("fwpuclnt.dll", ExactSpelling = true)]
     private static extern uint FwpmSubLayerGetByKey0(IntPtr engine, ref Guid key, out IntPtr sublayer);
     [DllImport("fwpuclnt.dll", ExactSpelling = true)]
+    private static extern uint FwpmSubLayerDeleteByKey0(IntPtr engine, ref Guid key);
+    [DllImport("fwpuclnt.dll", ExactSpelling = true)]
     private static extern uint FwpmFilterAdd0(IntPtr engine, ref Filter filter, IntPtr descriptor, out ulong id);
     [DllImport("fwpuclnt.dll", ExactSpelling = true)]
     private static extern uint FwpmFilterGetByKey0(IntPtr engine, ref Guid key, out IntPtr filter);
+    [DllImport("fwpuclnt.dll", ExactSpelling = true)]
+    private static extern uint FwpmFilterDeleteByKey0(IntPtr engine, ref Guid key);
     [DllImport("fwpuclnt.dll", ExactSpelling = true)]
     private static extern void FwpmFreeMemory0(ref IntPtr pointer);
     [DllImport("advapi32.dll", ExactSpelling = true)]

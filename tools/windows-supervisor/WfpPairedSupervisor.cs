@@ -10,14 +10,14 @@ using System.Text.RegularExpressions;
 using System.Threading;
 using System.Web.Script.Serialization;
 
-// This separate entry point only runs the two fixed diagnostic modes in its compiled-in staging tree.
+// This entry point runs fixed diagnostic modes in its compiled-in staging tree.
 internal sealed class WfpPairedSupervisor
 {
     private const int AccessDenied = 10013;
     private const int DeadlineMs = 25000;
     private const int AcknowledgementMs = 6000;
     private static readonly string[] CrashRoles = { "crash", "crash-child", "crash-grandchild" };
-    private readonly string mode, root, workspace, privateRoot, fixture;
+    private readonly string mode, root, workspace, privateRoot, fixture, jobName;
     private readonly Process supervisor;
     private readonly JavaScriptSerializer json = new JavaScriptSerializer();
     private readonly Dictionary<string, int[]> phases = new Dictionary<string, int[]> {
@@ -25,6 +25,7 @@ internal sealed class WfpPairedSupervisor
     };
     private WfpContainerIdentity.OwnedHandle[] processes;
     private byte[] packageSid;
+    private int[] staticJobMembers;
     private WfpLoopbackLease lease;
     private WfpDropObservation dropObservation;
     private object dropEvidence;
@@ -38,6 +39,7 @@ internal sealed class WfpPairedSupervisor
     {
         this.mode = mode;
         this.supervisor = supervisor;
+        if (mode == "static-crash") jobName = "Local\\CLU-E-" + Guid.NewGuid().ToString("N");
         string stage = Protocol.CanonicalPath(MxcPin.WfpDiagnosticStage, true);
         root = Protocol.CanonicalPath(Path.Combine(stage, mode), true);
         workspace = Protocol.CanonicalPath(Path.Combine(root, "workspace"), true);
@@ -50,11 +52,16 @@ internal sealed class WfpPairedSupervisor
         try
         {
             if (args.Length == 1 && args[0] == "paired") return new WfpPairedSupervisor("paired").Run();
-            if (args.Length == 1 && args[0] == "crash") return StartGuardian();
+            if (args.Length == 1 && args[0] == "crash") return StartGuardian(false);
+            if (args.Length == 1 && args[0] == "static-crash") return StartGuardian(true);
+            if (args.Length == 1 && args[0] == "recover-retained")
+                return WfpStaticRecovery.Run(StaticPrivateRoot(), DiagnosticImage(), 0);
             int pid;
-            if (args.Length != 2 || args[0] != "guardian" ||
+            if (args.Length != 2 ||
                 !Int32.TryParse(args[1], NumberStyles.None, CultureInfo.InvariantCulture, out pid) || pid < 1)
                 return 125;
+            if (args[0] == "recover") return WfpStaticRecovery.Run(StaticPrivateRoot(), DiagnosticImage(), pid);
+            if (args[0] != "guardian" && args[0] != "static-guardian") return 125;
             using (var owner = Process.GetProcessById(pid))
             {
                 // Opening the handle pins this exact supervisor across the entire run.
@@ -62,12 +69,12 @@ internal sealed class WfpPairedSupervisor
                     !String.Equals(Protocol.CanonicalPath(owner.MainModule.FileName, false), DiagnosticImage(),
                         StringComparison.OrdinalIgnoreCase))
                     return 125;
-                return new WfpPairedSupervisor("crash", owner).Run();
+                return new WfpPairedSupervisor(args[0] == "guardian" ? "crash" : "static-crash", owner).Run();
             }
         }
         catch (Exception)
         {
-            Console.Error.WriteLine("[CLU-E 05N4] CONTROLLER_STARTUP_REFUSED");
+            Console.Error.WriteLine("[CLU-E 05P] CONTROLLER_STARTUP_REFUSED");
             return 125;
         }
     }
@@ -81,17 +88,37 @@ internal sealed class WfpPairedSupervisor
         return expected;
     }
 
-    private static int StartGuardian()
+    private static string StaticPrivateRoot()
     {
+        return Protocol.CanonicalPath(Path.Combine(MxcPin.WfpDiagnosticStage, "static-crash", "private"), true);
+    }
+
+    private static int StartGuardian(bool useStatic)
+    {
+        var clock = Stopwatch.StartNew();
         using (var self = Process.GetCurrentProcess())
         using (var guardian = Process.Start(new ProcessStartInfo {
             FileName = DiagnosticImage(),
-            Arguments = "guardian " + self.Id.ToString(CultureInfo.InvariantCulture),
+            Arguments = (useStatic ? "static-guardian " : "guardian ") + self.Id.ToString(CultureInfo.InvariantCulture),
             WorkingDirectory = MxcPin.WfpDiagnosticStage,
             UseShellExecute = false,
         }))
         {
             if (guardian == null || !guardian.WaitForExit(DeadlineMs + AcknowledgementMs + 4000)) return 124;
+            if (useStatic)
+            {
+                string stage = StaticPrivateRoot();
+                if (File.Exists(Path.Combine(stage, "ready.json")) && !File.Exists(Path.Combine(stage, "result.json")))
+                {
+                    string receipt = Path.Combine(stage, WfpStaticRecovery.ResultFile);
+                    while (clock.ElapsedMilliseconds < 40000)
+                    {
+                        if (File.Exists(receipt)) return 0;
+                        Thread.Sleep(25);
+                    }
+                    return 124;
+                }
+            }
             return guardian.ExitCode;
         }
     }
@@ -113,7 +140,7 @@ internal sealed class WfpPairedSupervisor
                 WriteNew(config, Protocol.BuildConfig(request));
                 bool expired;
                 int exit = NativeJob.Run(engine, log, config, request.systemRoot, DeadlineMs, out expired,
-                    mode == "paired" ? (Action<IntPtr>)ObservePaired : ObserveCrash, () => jobEmpty = true);
+                    mode == "paired" ? (Action<IntPtr>)ObservePaired : ObserveCrash, () => jobEmpty = true, jobName);
                 engineExitCode = exit;
                 if (mode == "paired")
                 {
@@ -133,7 +160,7 @@ internal sealed class WfpPairedSupervisor
         catch (SupervisorLostException)
         {
             state = "GUARDIAN_JOB_CLEANUP_UNVERIFIED";
-            if (jobEmpty && crashReady && lease != null)
+            if (jobName == null && jobEmpty && crashReady && lease != null)
             {
                 try
                 {
@@ -180,7 +207,7 @@ internal sealed class WfpPairedSupervisor
         return new Request {
             requestPath = Path.Combine(privateRoot, "request.json"),
             command = fixture,
-            args = new[] { mode, workspace },
+            args = new[] { jobName == null ? mode : "crash", workspace },
             cwd = workspace,
             readOnlyRoots = new[] { runtimeDirectory, system },
             writableRoots = new[] { workspace },
@@ -255,7 +282,18 @@ internal sealed class WfpPairedSupervisor
         if (step == 0)
         {
             PinProcesses(job, pids);
-            Install();
+            if (jobName == null) Install();
+            else
+            {
+                staticJobMembers = NativeJob.ReadJobProcessIds(job);
+                var memberSet = new HashSet<int>(staticJobMembers);
+                foreach (int pid in pids)
+                    if (!memberSet.Contains(pid)) throw new InvalidDataException("STATIC_FIXTURE_JOB_MEMBERSHIP_INVALID");
+                bool installCleanupVerified;
+                lease = WfpLoopbackLease.InstallStatic(packageSid,
+                    (sublayer, keys) => WfpStaticRecovery.Publish(privateRoot, jobName, supervisor, packageSid,
+                        sublayer, keys, staticJobMembers), out installCleanupVerified);
+            }
             ReleaseGate("crash");
             step++;
         }
@@ -269,10 +307,17 @@ internal sealed class WfpPairedSupervisor
         identityVerified = true;
         using (var guardian = Process.GetCurrentProcess())
         {
-            WriteNew(Path.Combine(privateRoot, "ready.json"), json.Serialize(new {
-                supervisorPid = supervisor.Id, guardianPid = guardian.Id, fixturePids = pids,
-                filterIds = FilterIdStrings(), sublayerKey = lease.SublayerKey.ToString("D"),
-            }));
+            var ready = new Dictionary<string, object> {
+                { "supervisorPid", supervisor.Id }, { "guardianPid", guardian.Id }, { "fixturePids", pids },
+                { "filterIds", FilterIdStrings() }, { "sublayerKey", lease.SublayerKey.ToString("D") },
+            };
+            if (jobName != null)
+            {
+                if (!new HashSet<int>(staticJobMembers).SetEquals(NativeJob.ReadJobProcessIds(job)))
+                    throw new InvalidDataException("STATIC_JOB_MEMBERSHIP_CHANGED");
+                ready.Add("jobPids", staticJobMembers);
+            }
+            WriteNew(Path.Combine(privateRoot, "ready.json"), json.Serialize(ready));
         }
         crashReady = true;
     }
