@@ -38,16 +38,18 @@ internal sealed class WfpLoopbackLease : IDisposable
     private readonly Guid[] filterKeys;
     private readonly ulong[] filterIds;
     private readonly byte[] staticPackageSid;
+    private readonly ushort expectedWeight;
     private bool removalVerified;
 
     private WfpLoopbackLease(IntPtr engine, Guid sublayerKey, Guid[] filterKeys, ulong[] filterIds,
-        byte[] staticPackageSid)
+        byte[] staticPackageSid, ushort expectedWeight)
     {
         this.engine = engine;
         this.sublayerKey = sublayerKey;
         this.filterKeys = filterKeys;
         this.filterIds = filterIds;
         this.staticPackageSid = staticPackageSid;
+        this.expectedWeight = expectedWeight;
     }
 
     internal int Count { get { return filterKeys.Length; } }
@@ -88,14 +90,15 @@ internal sealed class WfpLoopbackLease : IDisposable
             throw new InvalidOperationException("WFP_LEASE_ENGINE_NOT_OPEN");
         byte[] expectedSid = ValidatePackageSid(packageSid);
         string staticName = staticPackageSid == null ? null : StaticObjectName(sublayerKey);
-        ushort weight = ReadSublayer(engine, sublayerKey, staticName, false).Value;
+        ushort weight = ReadSublayer(engine, sublayerKey, staticName, false, expectedWeight).Value;
         for (int index = 0; index < Layers.Length; index++)
             ReadFilter(engine, filterKeys[index], filterIds[index], Layers[index], sublayerKey,
                 expectedSid, staticName, false);
         VerifiedSublayerWeight = weight;
     }
 
-    internal static void VerifyExactDynamicInstalled(byte[] packageSid, Guid sublayer, Guid[] filters, ulong[] ids)
+    internal static ushort VerifyExactDynamicInstalled(byte[] packageSid, Guid sublayer, Guid[] filters, ulong[] ids,
+        ushort expectedWeight)
     {
         byte[] sid = ValidatePackageSid(packageSid);
         Guid[] keys = ExactKeys(sublayer, filters);
@@ -104,9 +107,10 @@ internal sealed class WfpLoopbackLease : IDisposable
         IntPtr observer = OpenEngine(false);
         try
         {
-            ReadSublayer(observer, sublayer, null, false);
+            ushort weight = ReadSublayer(observer, sublayer, null, false, expectedWeight).Value;
             for (int index = 0; index < keys.Length; index++)
                 ReadFilter(observer, keys[index], ids[index], Layers[index], sublayer, sid, null, false);
+            return weight;
         }
         finally { Check(FwpmEngineClose0(observer), "WFP_DYNAMIC_OBSERVER_CLOSE"); }
     }
@@ -127,34 +131,35 @@ internal sealed class WfpLoopbackLease : IDisposable
         return keys;
     }
 
-    internal static WfpLoopbackLease Install(byte[] packageSid, out bool failureCleanupVerified)
+    internal static WfpLoopbackLease Install(byte[] packageSid, out bool failureCleanupVerified,
+        ushort expectedWeight = FixtureSublayerWeight)
     {
-        return Install(packageSid, null, out failureCleanupVerified);
+        return Install(packageSid, null, expectedWeight, out failureCleanupVerified);
     }
 
     internal static WfpLoopbackLease InstallExactDynamic(byte[] packageSid, Guid sublayer, Guid[] filters,
-        out bool failureCleanupVerified)
+        ushort expectedWeight, out bool failureCleanupVerified)
     {
-        return Install(packageSid, null, sublayer, ExactKeys(sublayer, filters), out failureCleanupVerified);
+        return Install(packageSid, null, sublayer, ExactKeys(sublayer, filters), expectedWeight, out failureCleanupVerified);
     }
 
     internal static WfpLoopbackLease InstallStatic(byte[] packageSid, Action<Guid, Guid[]> publishRecoveryKeys,
         out bool failureCleanupVerified)
     {
         if (publishRecoveryKeys == null) throw new ArgumentNullException("publishRecoveryKeys");
-        return Install(packageSid, publishRecoveryKeys, out failureCleanupVerified);
+        return Install(packageSid, publishRecoveryKeys, FixtureSublayerWeight, out failureCleanupVerified);
     }
 
     private static WfpLoopbackLease Install(byte[] packageSid, Action<Guid, Guid[]> publishRecoveryKeys,
-        out bool failureCleanupVerified)
+        ushort expectedWeight, out bool failureCleanupVerified)
     {
         var filterKeys = new Guid[Layers.Length];
         for (int index = 0; index < filterKeys.Length; index++) filterKeys[index] = Guid.NewGuid();
-        return Install(packageSid, publishRecoveryKeys, Guid.NewGuid(), filterKeys, out failureCleanupVerified);
+        return Install(packageSid, publishRecoveryKeys, Guid.NewGuid(), filterKeys, expectedWeight, out failureCleanupVerified);
     }
 
     private static WfpLoopbackLease Install(byte[] packageSid, Action<Guid, Guid[]> publishRecoveryKeys,
-        Guid sublayerKey, Guid[] filterKeys, out bool failureCleanupVerified)
+        Guid sublayerKey, Guid[] filterKeys, ushort expectedWeight, out bool failureCleanupVerified)
     {
         failureCleanupVerified = false;
         byte[] expectedSid = ValidatePackageSid(packageSid);
@@ -170,7 +175,7 @@ internal sealed class WfpLoopbackLease : IDisposable
         IntPtr engine = OpenEngine(!staticLifetime);
         var filterIds = new ulong[Layers.Length];
         var lease = new WfpLoopbackLease(engine, sublayerKey, filterKeys, filterIds,
-            staticLifetime ? expectedSid : null);
+            staticLifetime ? expectedSid : null, expectedWeight);
         bool transaction = false;
         IntPtr conditionPointer = IntPtr.Zero;
         GCHandle pinnedSid = new GCHandle();
@@ -187,7 +192,7 @@ internal sealed class WfpLoopbackLease : IDisposable
             Check(FwpmTransactionBegin0(engine, 0), "WFP_TRANSACTION_BEGIN");
             transaction = true;
             var sublayer = new Sublayer {
-                Key = sublayerKey, Weight = FixtureSublayerWeight,
+                Key = sublayerKey, Weight = expectedWeight,
                 Display = display,
             };
             Check(FwpmSubLayerAdd0(engine, ref sublayer, IntPtr.Zero), "WFP_SUBLAYER_ADD");
@@ -256,7 +261,7 @@ internal sealed class WfpLoopbackLease : IDisposable
         return engine;
     }
 
-    private static ushort? ReadSublayer(IntPtr engine, Guid key, string staticName, bool allowMissing)
+    private static ushort? ReadSublayer(IntPtr engine, Guid key, string staticName, bool allowMissing, ushort expectedWeight)
     {
         IntPtr result;
         uint status = FwpmSubLayerGetByKey0(engine, ref key, out result);
@@ -270,7 +275,7 @@ internal sealed class WfpLoopbackLease : IDisposable
                 throw new InvalidOperationException("WFP_SUBLAYER_KEY_MISMATCH");
             if ((layer.Flags & SublayerPersistent) != 0)
                 throw new InvalidOperationException("WFP_SUBLAYER_PERSISTENT_0x" + layer.Flags.ToString("X8"));
-            if (layer.Weight != FixtureSublayerWeight)
+            if (layer.Weight != expectedWeight)
                 throw new InvalidOperationException("WFP_SUBLAYER_WEIGHT_0x" + layer.Weight.ToString("X8"));
             if (!ProviderUnassigned(layer.ProviderKey))
                 throw new InvalidOperationException("WFP_SUBLAYER_PROVIDER_ASSIGNED");
@@ -388,7 +393,7 @@ internal sealed class WfpLoopbackLease : IDisposable
             // change cannot substitute an object between readback and deletion.
             Check(FwpmTransactionBegin0(recovery, 0), "WFP_STATIC_RECOVERY_BEGIN");
             transaction = true;
-            bool layerPresent = ReadSublayer(recovery, sublayerKey, staticName, true).HasValue;
+            bool layerPresent = ReadSublayer(recovery, sublayerKey, staticName, true, FixtureSublayerWeight).HasValue;
             int filterCount = 0;
             for (int index = 0; index < Layers.Length; index++)
                 if (ReadFilter(recovery, keys[index], null, Layers[index], sublayerKey, sid, staticName, true).HasValue)

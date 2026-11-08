@@ -57,6 +57,10 @@ function Invoke-WfpEnforcementFaultSetup([string] $ControllerPath, [string] $Sta
         ownerProgress = $null
         ownerError = $null
         ownerNativeErrorCode = $null
+        backupSublayerWeightExpected = $null
+        ownerSublayerWeightExpected = $null
+        backupSublayerWeightObserved = $null
+        ownerSublayerWeightObserved = $null
         bfeSamples = $null
         phaseBinds = [ordered]@{ control = $null; armed = $null; fault = $null }
     }
@@ -132,6 +136,13 @@ function Invoke-WfpEnforcementFaultSetup([string] $ControllerPath, [string] $Sta
                 $ownerNativeErrorCode -ge 0 -and $ownerNativeErrorCode -le [uint32]::MaxValue) {
                 $result.ownerNativeErrorCode = $ownerNativeErrorCode
             }
+            foreach ($key in @('backupSublayerWeightExpected', 'ownerSublayerWeightExpected',
+                'backupSublayerWeightObserved', 'ownerSublayerWeightObserved')) {
+                $weight = $record[$key]
+                if ((Test-WfpNativeNumber $weight) -and $weight -le [uint16]::MaxValue) {
+                    $result[$key] = $weight
+                }
+            }
             foreach ($key in $checks) { $result[$key] = $record[$key] -is [bool] -and $record[$key] }
             foreach ($key in @('engineExitCode', 'bfeSamples')) {
                 if (Test-WfpNativeNumber ($record[$key])) { $result[$key] = $record[$key] }
@@ -160,10 +171,13 @@ function Invoke-WfpEnforcementFaultSetup([string] $ControllerPath, [string] $Sta
         $armed = $result.phaseBinds.armed -join ','
         $fault = $result.phaseBinds.fault -join ','
         $checksPassed = @($checks | Where-Object { !$result[$_] }).Count -eq 0
+        $weightsVerified = $result.backupSublayerWeightExpected -eq 65533 -and
+            $result.ownerSublayerWeightExpected -eq 65534 -and
+            $result.backupSublayerWeightObserved -eq 65533 -and $result.ownerSublayerWeightObserved -eq 65534
         if ($result.controllerState -ceq 'WFP_LEASE_OWNER_FAULT_OBSERVED' -and
             $result.controllerExitCode -eq 0 -and $result.engineExitCode -eq 0 -and $result.bfeSamples -ge 2 -and
             $result.ownerExitCode -eq 0xCE06 -and
-            $stageCleanupSafe -and $checksPassed -and $control -ceq '0,0,0,0' -and
+            $stageCleanupSafe -and $checksPassed -and $weightsVerified -and $control -ceq '0,0,0,0' -and
             $armed -ceq '10013,10013,10013,10013' -and $fault -ceq '10013,10013,10013,10013') {
             $result.state = 'WFP_LEASE_OWNER_FAULT_OBSERVED'
         } else {

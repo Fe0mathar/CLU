@@ -14,6 +14,8 @@ internal sealed partial class WfpPairedSupervisor
     private const int FaultOwnerTransitionMs = 5000;
     private const uint FaultOwnerTerminationCode = 0xCE06;
     private const uint FaultOwnerCleanupCode = 0xCE07;
+    private const ushort FaultBackupSublayerWeight = 0xFFFD;
+    private const ushort FaultOwnerSublayerWeight = 0xFFFE;
     private const string FaultScenario = "enforcement-fault";
     private const string FaultHandoffFile = "owner-request.txt";
     private const string FaultReceiptFile = "owner-ready.txt";
@@ -41,6 +43,7 @@ internal sealed partial class WfpPairedSupervisor
     private int? ownerExitCode;
     private string ownerProgress, ownerError;
     private uint? ownerNativeErrorCode;
+    private ushort? backupSublayerWeightObserved, ownerSublayerWeightObserved;
     private bool faultOwnerStartAttempted, faultOwnerStarted, faultOwnerTerminationRequested, faultOwnerExited;
     private bool faultBackupInstallAttempted, faultBackupInstallCleanupVerified;
     private bool bothLeasesPresentBeforeFault, dynamicAbsenceVerified, backupPresentDuringFault;
@@ -73,6 +76,8 @@ internal sealed partial class WfpPairedSupervisor
         }
         catch (Exception failure)
         {
+            if (faultBackupInstallAttempted && faultBackup == null)
+                backupSublayerWeightObserved = ReadWeightMismatch(failure.Message);
             error = Regex.IsMatch(failure.Message, @"\A[A-Z][A-Z0-9_]{0,75}(?:_0x[0-9A-F]{8})?\z")
                 ? failure.Message : "ENFORCEMENT_FAULT_NATIVE_REFUSAL";
         }
@@ -107,12 +112,15 @@ internal sealed partial class WfpPairedSupervisor
             faultOwnerStarted && faultOwnerTerminationRequested && faultOwnerExited && bothLeasesPresentBeforeFault &&
             dynamicAbsenceVerified && backupPresentDuringFault && fixtureLiveDuringFault && faultPhaseReleased &&
             faultPhaseCompleted && bfeHealthy && jobEmpty && jobAbsent && ownerRemovalVerified && backupRemovalVerified &&
+            backupSublayerWeightObserved == FaultBackupSublayerWeight && ownerSublayerWeightObserved == FaultOwnerSublayerWeight &&
             All(faultBinds["control"], 0) && All(faultBinds["armed"], AccessDenied) && All(faultBinds["fault"], AccessDenied);
         WriteNew(Path.Combine(privateRoot, "result.json"), json.Serialize(new {
             state = passed ? "WFP_LEASE_OWNER_FAULT_OBSERVED" : "WFP_LEASE_OWNER_FAULT_UNVERIFIED",
             error, engineExitCode, phaseBinds = faultBinds, identityVerified, bothLeasesPresentBeforeFault,
             ownerStarted = faultOwnerStarted, ownerTerminationRequested = faultOwnerTerminationRequested,
             ownerExited = faultOwnerExited, ownerExitCode, ownerProgress, ownerError, ownerNativeErrorCode,
+            backupSublayerWeightExpected = FaultBackupSublayerWeight, backupSublayerWeightObserved,
+            ownerSublayerWeightExpected = FaultOwnerSublayerWeight, ownerSublayerWeightObserved,
             dynamicAbsenceVerified, backupPresentDuringFault, fixtureLiveDuringFault,
             faultPhaseReleased, faultPhaseCompleted, bfeHealthy, bfeSamples, jobEmpty, jobAbsent, backupRemovalVerified,
             ownerRemovalVerified, stageCleanupSafe, proofAuthorization = false,
@@ -137,7 +145,8 @@ internal sealed partial class WfpPairedSupervisor
                 if (!ReadFaultBinds("control", 0)) return;
                 VerifyIdentity(job);
                 faultBackupInstallAttempted = true;
-                faultBackup = WfpLoopbackLease.Install(packageSid, out faultBackupInstallCleanupVerified);
+                faultBackup = WfpLoopbackLease.Install(packageSid, out faultBackupInstallCleanupVerified, FaultBackupSublayerWeight);
+                backupSublayerWeightObserved = faultBackup.VerifiedSublayerWeight;
                 StartFaultOwner();
                 break;
             case 2:
@@ -239,14 +248,35 @@ internal sealed partial class WfpPairedSupervisor
         if (faultOwner.HasExited || backupKeys.Contains(faultReceipt.Sublayer) || backupKeys.Overlaps(faultReceipt.Filters))
             throw new InvalidDataException("WFP_FAULT_LEASE_IDENTITIES_INVALID");
         VerifyFaultBackup(job);
-        WfpLoopbackLease.VerifyExactDynamicInstalled(packageSid, faultReceipt.Sublayer, faultReceipt.Filters, faultReceipt.Ids);
+        VerifyFaultSublayer(faultReceipt.Sublayer, faultReceipt.Filters, faultReceipt.Ids,
+            FaultOwnerSublayerWeight, ref ownerSublayerWeightObserved);
     }
 
     private void VerifyFaultBackup(IntPtr job)
     {
         VerifyIdentity(job);
         bfeWatch.RequireHealthy();
-        WfpLoopbackLease.VerifyExactDynamicInstalled(packageSid, faultBackup.SublayerKey, faultBackup.FilterKeys, faultBackup.FilterIds);
+        VerifyFaultSublayer(faultBackup.SublayerKey, faultBackup.FilterKeys, faultBackup.FilterIds,
+            FaultBackupSublayerWeight, ref backupSublayerWeightObserved);
+    }
+
+    private void VerifyFaultSublayer(Guid sublayer, Guid[] filters, ulong[] ids, ushort expected, ref ushort? observed)
+    {
+        observed = null;
+        try { observed = WfpLoopbackLease.VerifyExactDynamicInstalled(packageSid, sublayer, filters, ids, expected); }
+        catch (InvalidOperationException failure)
+        {
+            observed = ReadWeightMismatch(failure.Message);
+            throw;
+        }
+    }
+
+    private static ushort? ReadWeightMismatch(string message)
+    {
+        var match = Regex.Match(message, @"\AWFP_SUBLAYER_WEIGHT_0x([0-9A-F]{8})\z", RegexOptions.CultureInvariant);
+        ushort weight;
+        return match.Success && UInt16.TryParse(match.Groups[1].Value, NumberStyles.AllowHexSpecifier,
+            CultureInfo.InvariantCulture, out weight) ? (ushort?)weight : null;
     }
 
     private bool FinishFaultOwner()
@@ -345,7 +375,8 @@ internal sealed partial class WfpPairedSupervisor
                 if (parent.HasExited) throw new InvalidDataException("WFP_FAULT_OWNER_PARENT_EXITED");
                 progress("WFP_INSTALL");
                 bool cleanupVerified;
-                using (var dynamicLease = WfpLoopbackLease.InstallExactDynamic(sid, sublayer, filters, out cleanupVerified))
+                using (var dynamicLease = WfpLoopbackLease.InstallExactDynamic(sid, sublayer, filters,
+                    FaultOwnerSublayerWeight, out cleanupVerified))
                 {
                     if (parent.HasExited) throw new InvalidDataException("WFP_FAULT_OWNER_PARENT_EXITED");
                     progress("READY_PUBLISH");
@@ -414,6 +445,8 @@ internal sealed partial class WfpPairedSupervisor
             ownerNativeErrorCode = code;
         }
         ownerError = parts[2];
+        if (ownerError == "WFP_SUBLAYER_WEIGHT" && ownerNativeErrorCode.HasValue && ownerNativeErrorCode.Value <= UInt16.MaxValue)
+            ownerSublayerWeightObserved = (ushort)ownerNativeErrorCode.Value;
     }
 
     private static string ReadPrivateFaultMarker(string path)
