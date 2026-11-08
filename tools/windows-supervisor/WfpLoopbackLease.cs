@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Security.Principal;
 
@@ -21,13 +22,15 @@ internal sealed class WfpLoopbackLease : IDisposable
     private const uint SublayerNotFound = 0x80320007;
 
     private static readonly Guid PackageId = new Guid("71bc78fa-f17c-4997-a602-6abb261f351c");
+    private static readonly Guid BindV4Layer = new Guid("1247d66d-0b60-4a15-8d44-7155d0f53a0c"); // ALE_RESOURCE_ASSIGNMENT_V4
+    private static readonly Guid BindV6Layer = new Guid("55a650e1-5f0a-4eca-a653-88f53b26aa8c"); // ALE_RESOURCE_ASSIGNMENT_V6
     private static readonly Guid[] Layers = {
         new Guid("c38d57d1-05a7-4c33-904f-7fbceee60e82"), // ALE_AUTH_CONNECT_V4
         new Guid("4a72393b-319f-44bc-84c3-ba54dcb3b6b4"), // ALE_AUTH_CONNECT_V6
         new Guid("e1cd9fe7-f4b5-4273-96c0-592e487b8650"), // ALE_AUTH_RECV_ACCEPT_V4
         new Guid("a3b42c97-9f04-4672-b87e-cee9c483257f"), // ALE_AUTH_RECV_ACCEPT_V6
-        new Guid("1247d66d-0b60-4a15-8d44-7155d0f53a0c"), // ALE_RESOURCE_ASSIGNMENT_V4
-        new Guid("55a650e1-5f0a-4eca-a653-88f53b26aa8c"), // ALE_RESOURCE_ASSIGNMENT_V6
+        BindV4Layer,
+        BindV6Layer,
     };
 
     private IntPtr engine;
@@ -51,6 +54,32 @@ internal sealed class WfpLoopbackLease : IDisposable
     internal ulong[] FilterIds { get { return (ulong[])filterIds.Clone(); } }
     internal Guid SublayerKey { get { return sublayerKey; } }
     internal ushort VerifiedSublayerWeight { get; private set; }
+
+    internal string[] ReadBindLayerRuntimeIds()
+    {
+        if (engine == IntPtr.Zero || engine == new IntPtr(-1))
+            throw new InvalidOperationException("WFP_LEASE_ENGINE_NOT_OPEN");
+        ushort v4 = ReadLayerRuntimeId(BindV4Layer);
+        ushort v6 = ReadLayerRuntimeId(BindV6Layer);
+        if (v4 == v6) throw new InvalidOperationException("WFP_BIND_LAYER_IDS_NOT_DISTINCT");
+        return new[] { v4.ToString(CultureInfo.InvariantCulture), v6.ToString(CultureInfo.InvariantCulture) };
+    }
+
+    private ushort ReadLayerRuntimeId(Guid key)
+    {
+        IntPtr result;
+        uint status = FwpmLayerGetByKey0(engine, ref key, out result);
+        try
+        {
+            Check(status, "WFP_LAYER_GET");
+            if (result == IntPtr.Zero) throw new InvalidOperationException("WFP_LAYER_READBACK_MISSING");
+            var layer = (Layer)Marshal.PtrToStructure(result, typeof(Layer));
+            if (layer.Key != key || layer.Id == 0)
+                throw new InvalidOperationException("WFP_LAYER_IDENTITY_MISMATCH");
+            return layer.Id;
+        }
+        finally { if (result != IntPtr.Zero) FwpmFreeMemory0(ref result); }
+    }
 
     internal void VerifyInstalled(byte[] packageSid)
     {
@@ -267,6 +296,21 @@ internal sealed class WfpLoopbackLease : IDisposable
         return removalVerified;
     }
 
+    // The caller must verify that the job is empty and BFE is running again.
+    internal bool ReleaseAfterBfeInterruptionAndVerify()
+    {
+        if (staticPackageSid != null)
+            throw new InvalidOperationException("WFP_BFE_CLEANUP_REQUIRES_DYNAMIC_LEASE");
+
+        // Try to close the old session even if it has been invalidated.
+        // Only a fresh session can establish absence of every recorded key.
+        IntPtr staleEngine = engine;
+        engine = IntPtr.Zero;
+        if (staleEngine != IntPtr.Zero) FwpmEngineClose0(staleEngine);
+        removalVerified = VerifyAbsent(sublayerKey, filterKeys);
+        return removalVerified;
+    }
+
     private bool CloseEngine()
     {
         if (engine != IntPtr.Zero)
@@ -394,6 +438,17 @@ internal sealed class WfpLoopbackLease : IDisposable
     }
 
     [StructLayout(LayoutKind.Sequential)]
+    private struct Layer
+    {
+        internal Guid Key;
+        internal IntPtr DisplayName, DisplayDescription;
+        internal uint Flags, FieldCount;
+        internal IntPtr Fields;
+        internal Guid DefaultSublayerKey;
+        internal ushort Id;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
     private struct Sublayer
     {
         internal Guid Key;
@@ -468,6 +523,8 @@ internal sealed class WfpLoopbackLease : IDisposable
     private static extern uint FwpmSubLayerAdd0(IntPtr engine, ref Sublayer sublayer, IntPtr descriptor);
     [DllImport("fwpuclnt.dll", ExactSpelling = true)]
     private static extern uint FwpmSubLayerGetByKey0(IntPtr engine, ref Guid key, out IntPtr sublayer);
+    [DllImport("fwpuclnt.dll", ExactSpelling = true)]
+    private static extern uint FwpmLayerGetByKey0(IntPtr engine, ref Guid key, out IntPtr layer);
     [DllImport("fwpuclnt.dll", ExactSpelling = true)]
     private static extern uint FwpmSubLayerDeleteByKey0(IntPtr engine, ref Guid key);
     [DllImport("fwpuclnt.dll", ExactSpelling = true)]

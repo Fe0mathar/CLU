@@ -15,6 +15,7 @@ internal sealed class WfpPairedSupervisor
 {
     private const int AccessDenied = 10013;
     private const int DeadlineMs = 25000;
+    private const int BfeRecoveryWaitMs = 85000;
     private const int AcknowledgementMs = 6000;
     private static readonly string[] CrashRoles = { "crash", "crash-child", "crash-grandchild" };
     private readonly string mode, root, workspace, privateRoot, fixture, jobName;
@@ -30,6 +31,10 @@ internal sealed class WfpPairedSupervisor
     private WfpDropObservation dropObservation;
     private WfpBfeWatch bfeWatch;
     private bool bfeAbortObserved, bfeLatched, bfePolicyRetainedAtCleanup;
+    private bool bfeCleanupVerifiedFresh;
+    private bool? escapeObserved;
+    private int pairedFixturePid;
+    private string[] bindLayerIds;
     private object dropEvidence;
     private string filteredStartedAt, filteredFinishedAt, error;
     private int? engineExitCode;
@@ -56,6 +61,7 @@ internal sealed class WfpPairedSupervisor
             if (args.Length == 1 && args[0] == "paired") return new WfpPairedSupervisor("paired").Run();
             if (args.Length == 1 && args[0] == "host-net") return new WfpPairedSupervisor("host-net").Run();
             if (args.Length == 1 && args[0] == "bfe-guard") return new WfpPairedSupervisor("bfe-guard").Run();
+            if (args.Length == 1 && args[0] == "bfe-lab") return new WfpPairedSupervisor("bfe-lab").Run();
             if (args.Length == 1 && (args[0] == "crash" || args[0] == "static-crash" || args[0] == "static-double"))
                 return StartGuardian(args[0]);
             if (args.Length == 1 && args[0] == "recover-retained")
@@ -85,7 +91,7 @@ internal sealed class WfpPairedSupervisor
         }
         catch (Exception)
         {
-            Console.Error.WriteLine("[CLU-E 05R] CONTROLLER_STARTUP_REFUSED");
+            Console.Error.WriteLine("[CLU-E 05S] CONTROLLER_STARTUP_REFUSED");
             return 125;
         }
     }
@@ -138,6 +144,7 @@ internal sealed class WfpPairedSupervisor
 
     private int Run()
     {
+        bool bfeLab = mode == "bfe-lab";
         string state = "CONTROLLER_REFUSED";
         int result = 125;
         try
@@ -155,7 +162,7 @@ internal sealed class WfpPairedSupervisor
                 Action<IntPtr> observe = ObserveCrash;
                 if (mode == "paired") observe = ObservePaired;
                 if (mode == "host-net") observe = ObserveHostLoopback;
-                if (mode == "bfe-guard")
+                if (mode == "bfe-guard" || bfeLab)
                 {
                     bfeWatch = new WfpBfeWatch();
                     RequireBfeHealthy();
@@ -178,9 +185,9 @@ internal sealed class WfpPairedSupervisor
                     state = completed ? "HOST_LOOPBACK_FIXTURE_COMPLETED" : "HOST_LOOPBACK_FIXTURE_UNVERIFIED";
                     result = completed ? 0 : expired ? 124 : 1;
                 }
-                else if (mode == "bfe-guard")
+                else if (mode == "bfe-guard" || bfeLab)
                 {
-                    state = "BFE_GUARD_CANCELLATION_UNVERIFIED";
+                    state = bfeLab ? "BFE_LAB_INTERRUPTION_NOT_OBSERVED" : "BFE_GUARD_CANCELLATION_UNVERIFIED";
                     result = expired ? 124 : 125;
                 }
                 else
@@ -196,12 +203,12 @@ internal sealed class WfpPairedSupervisor
             string fault = bfeWatch.State;
             try { bfeWatch.RequireHealthy(); }
             catch (InvalidOperationException) { bfeLatched = bfeWatch.State == fault; }
-            if (jobEmpty && crashReady && lease != null)
+            if (!bfeLab && jobEmpty && crashReady && lease != null)
             {
                 try { lease.VerifyInstalled(packageSid); bfePolicyRetainedAtCleanup = true; }
                 catch (Exception) { }
             }
-            state = "BFE_GUARD_CANCELLATION_UNVERIFIED";
+            state = bfeLab ? "BFE_LAB_CANCELLATION_UNVERIFIED" : "BFE_GUARD_CANCELLATION_UNVERIFIED";
             error = fault;
         }
         catch (SupervisorLostException)
@@ -231,8 +238,26 @@ internal sealed class WfpPairedSupervisor
             if (dropObservation != null) dropObservation.Dispose();
             if (lease != null && jobEmpty)
             {
-                try { removalVerified = lease.ReleaseAndVerify(); }
+                try
+                {
+                    removalVerified = bfeLab && bfeAbortObserved
+                        ? VerifyBfeLabCleanupAfterRecovery() : lease.ReleaseAndVerify();
+                }
                 catch (Exception) { removalVerified = false; }
+            }
+            if (bfeLab && jobEmpty && step > 0)
+            {
+                escapeObserved = false;
+                foreach (string role in CrashRoles)
+                {
+                    try
+                    {
+                        string marker = ReadMarker(role + "-escape.txt", true);
+                        if (marker == "BOUND") { escapeObserved = true; break; }
+                        else if (marker != null) throw new InvalidDataException("BFE_LAB_ESCAPE_MARKER_INVALID");
+                    }
+                    catch (Exception) { escapeObserved = null; }
+                }
             }
             if (processes != null)
                 foreach (var process in processes)
@@ -243,10 +268,14 @@ internal sealed class WfpPairedSupervisor
                 gateReleased = step > 0, fixtureBindDenied = crashReady,
                 terminationVerified = bfeAbortObserved && jobEmpty && crashReady,
                 policyRetainedAtCleanup = bfePolicyRetainedAtCleanup,
+                cleanupVerifiedFresh = bfeCleanupVerifiedFresh,
             };
             if (bfeWatch != null)
             {
-                if (bfeWatch.InitialRunning && bfeWatch.SyntheticFaultObserved && bfeLatched && crashReady &&
+                if (bfeLab && bfeWatch.InitialRunning && !bfeWatch.SyntheticFaultObserved && bfeLatched && crashReady &&
+                    identityVerified && jobEmpty && bfeAbortObserved && bfeCleanupVerifiedFresh)
+                    state = "BFE_LAB_CANCELLATION_OBSERVED";
+                else if (!bfeLab && bfeWatch.InitialRunning && bfeWatch.SyntheticFaultObserved && bfeLatched && crashReady &&
                     identityVerified && jobEmpty && bfeAbortObserved && bfePolicyRetainedAtCleanup && removalVerified)
                 {
                     state = "BFE_GUARD_CANCELLATION_OBSERVED";
@@ -257,7 +286,8 @@ internal sealed class WfpPairedSupervisor
             WriteNew(Path.Combine(privateRoot, "result.json"), json.Serialize(new {
                 state, error, engineExitCode, phases, filteredStartedAt, filteredFinishedAt, dropEvidence,
                 identityVerified, independentRemovalVerified = removalVerified, jobEmpty,
-                supervisorLossObserved, observerAcknowledged, bfeGuard,
+                supervisorLossObserved, observerAcknowledged, bfeGuard, escapeObserved,
+                pairedFixturePid, bindLayerIds,
             }));
         }
         return result;
@@ -271,7 +301,7 @@ internal sealed class WfpPairedSupervisor
         return new Request {
             requestPath = Path.Combine(privateRoot, "request.json"),
             command = fixture,
-            args = new[] { jobName == null && mode != "bfe-guard" ? mode : "crash", workspace },
+            args = new[] { jobName == null && mode != "bfe-guard" && mode != "bfe-lab" ? mode : "crash", workspace },
             cwd = workspace,
             readOnlyRoots = new[] { runtimeDirectory, system },
             writableRoots = new[] { workspace },
@@ -294,6 +324,7 @@ internal sealed class WfpPairedSupervisor
             int pid = ReadPid("paired");
             if (pid == 0) return;
             PinProcesses(job, new[] { pid });
+            pairedFixturePid = pid;
             ReleaseGate("paired-before");
         }
         else if (step == 1)
@@ -303,6 +334,8 @@ internal sealed class WfpPairedSupervisor
             VerifyIdentity(job);
             if (!All(phases["before"], 0)) throw new InvalidDataException("PAIRED_BASELINE_BIND_FAILED");
             Install();
+            try { bindLayerIds = lease.ReadBindLayerRuntimeIds(); }
+            catch (Exception) { bindLayerIds = null; }
             dropObservation = WfpDropObservation.Start(lease.FilterIds);
             filteredStartedAt = Now();
             ReleaseGate("paired-during");
@@ -400,7 +433,7 @@ internal sealed class WfpPairedSupervisor
     private void ObserveBfeGuard(IntPtr job)
     {
         bool inject = false;
-        if (crashReady)
+        if (mode == "bfe-guard" && crashReady)
         {
             string marker = Path.Combine(privateRoot, "bfe-inject.txt");
             if (File.Exists(marker))
@@ -431,6 +464,36 @@ internal sealed class WfpPairedSupervisor
     {
         try { bfeWatch.RequireHealthy(inject); }
         catch (InvalidOperationException) { throw new BfeGuardAbortException(); }
+    }
+
+    private bool VerifyBfeLabCleanupAfterRecovery()
+    {
+        var clock = Stopwatch.StartNew();
+        string path = Path.Combine(privateRoot, "bfe-recovered.txt");
+        while (!File.Exists(path) && clock.ElapsedMilliseconds < BfeRecoveryWaitMs)
+            Thread.Sleep(25);
+        if (!File.Exists(path)) return false;
+        using (var marker = new FileStream(Protocol.CanonicalPath(path, false), FileMode.Open, FileAccess.Read, FileShare.Read))
+        {
+            const string expected = "RECOVERED";
+            if (marker.Length != expected.Length) return false;
+            foreach (char character in expected)
+                if (marker.ReadByte() != character) return false;
+        }
+        while (clock.ElapsedMilliseconds < BfeRecoveryWaitMs)
+        {
+            using (var current = new WfpBfeWatch())
+            {
+                if (current.InitialRunning)
+                {
+                    try { bfeCleanupVerifiedFresh = lease.ReleaseAfterBfeInterruptionAndVerify(); }
+                    catch (Exception) { }
+                    if (bfeCleanupVerifiedFresh) return true;
+                }
+            }
+            Thread.Sleep(250);
+        }
+        return false;
     }
 
     private sealed class BfeGuardAbortException : Exception { }
@@ -530,10 +593,15 @@ internal sealed class WfpPairedSupervisor
         return Array.ConvertAll(value.Split(' '), code => Int32.Parse(code, CultureInfo.InvariantCulture));
     }
 
-    private string ReadMarker(string file)
+    private string ReadMarker(string file, bool verifyAbsence = false)
     {
         string path = Path.Combine(workspace, file);
-        if (!File.Exists(path)) return null;
+        if (verifyAbsence)
+        {
+            try { File.GetAttributes(path); }
+            catch (FileNotFoundException) { return null; }
+        }
+        else if (!File.Exists(path)) return null;
         using (var stream = new FileStream(Protocol.CanonicalPath(path, false), FileMode.Open, FileAccess.Read, FileShare.Read))
         {
             if (stream.Length < 1 || stream.Length > 32) throw new InvalidDataException("FIXTURE_MARKER_SIZE");

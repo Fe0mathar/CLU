@@ -17,11 +17,28 @@ function Test-WfpNativeNumber($Value) {
     return ($Value -is [int] -or $Value -is [long]) -and $Value -ge 0 -and $Value -le [int]::MaxValue
 }
 
-function Get-WfpPairedBindAttribution([System.Collections.IDictionary] $Paired, $SystemAudit) {
-    $summary = [ordered]@{ state = 'PAIRED_BIND_CAUSALITY_UNPROVEN'; systemAudit = $SystemAudit; security = $null; bindCases = $null }
+function Get-WfpSecurityRecordAnchor {
+    $record = $null
+    try {
+        $record = Get-WinEvent -LogName Security -MaxEvents 1 -ErrorAction Stop
+        if ($record.LogName -ceq 'Security' -and $record.RecordId -gt 0) { return [long] $record.RecordId }
+    } catch {
+        if ($_.FullyQualifiedErrorId -like 'NoMatchingEventsFound,*') { return [long] 0 }
+    } finally {
+        if ($record -is [IDisposable]) { $record.Dispose() }
+    }
+    return [long] -1
+}
+
+function Get-WfpPairedBindAttribution([System.Collections.IDictionary] $Paired, $SystemAudit, [long] $AfterRecordId) {
+    $summary = [ordered]@{
+        state = 'PAIRED_BIND_CAUSALITY_UNPROVEN'; systemAudit = $SystemAudit; security = $null; bindCases = $null
+        exactState = 'EXACT_BIND_ATTRIBUTION_NOT_ATTEMPTED'; exactBindCases = $null
+    }
     if ($Paired.state -cne 'PAIRED_BIND_CAUSALITY_OBSERVED') { return $summary }
 
     $summary.state = 'BIND_DENIED_ATTRIBUTION_UNPROVEN'
+    $summary.exactState = 'BIND_DENIED_EXACT_ATTRIBUTION_UNPROVEN'
     $drop = $Paired.dropEvidence
     if ($drop -isnot [System.Collections.IDictionary] -or $drop['filterIds'] -isnot [array] -or
         $drop['filterIds'].Count -ne 6 -or $drop['verifiedSublayerWeight'] -ne 65534) { return $summary }
@@ -39,7 +56,13 @@ function Get-WfpPairedBindAttribution([System.Collections.IDictionary] $Paired, 
     foreach ($key in $keys) {
         $cases[$key] = $bfe -is [System.Collections.IDictionary] -and (Test-WfpNativeNumber ($bfe[$key])) -and $bfe[$key] -gt 0
     }
-    if ($cases.Values -contains $false) {
+    $exactCases = [ordered]@{}
+    foreach ($key in $keys) { $exactCases[$key] = $false }
+    if ($AfterRecordId -lt 0) {
+        $summary.security = [ordered]@{ state = 'SECURITY_RECORD_ANCHOR_UNAVAILABLE'; hits = $null }
+    } elseif ($Paired.pairedFixturePid -le 0 -or $Paired.bindLayerIds.Count -ne 2) {
+        $summary.security = [ordered]@{ state = 'FIXTURE_OR_LAYER_ID_UNAVAILABLE'; hits = $null }
+    } else {
         try {
             $reader = Join-Path $PSScriptRoot 'WfpSecurityEvents.ps1'
             Assert-NoReparsePath $reader
@@ -47,16 +70,26 @@ function Get-WfpPairedBindAttribution([System.Collections.IDictionary] $Paired, 
             $query = @{
                 FilterIds = [string[]] $drop['filterIds']
                 Start = [datetime] $Paired.filteredStartedAt
-                End = [datetime] $Paired.filteredFinishedAt
+                End = ([datetime] $Paired.filteredFinishedAt).AddSeconds(2)
+                FixturePid = $Paired.pairedFixturePid
+                BindLayerIds = $Paired.bindLayerIds
+                AfterRecordId = $AfterRecordId
+                RequireExactIdentity = $true
             }
             $summary.security = Get-WfpSecurityBindEvidence @query
             if ($summary.security.state -ceq 'MATCHED') {
-                foreach ($key in $keys) { $cases[$key] = $cases[$key] -or $summary.security.hits.$key -gt 0 }
+                foreach ($key in $keys) {
+                    $exactCases[$key] = $summary.security.hits.$key -gt 0
+                    $cases[$key] = $cases[$key] -or $exactCases[$key]
+                }
             }
         } catch { $summary.security = [ordered]@{ state = 'UNAVAILABLE'; hits = $null } }
     }
 
     $summary.bindCases = $cases
+    $summary.exactBindCases = $exactCases
+    if ($exactCases.Values -notcontains $false) { $summary.exactState = 'ALL_BIND_DROPS_EXACTLY_ATTRIBUTED' }
+    elseif ($exactCases.Values -contains $true) { $summary.exactState = 'PARTIAL_EXACT_BIND_DROP_ATTRIBUTION' }
     if ($cases.Values -notcontains $false) { $summary.state = 'ALL_BIND_DROPS_ATTRIBUTED' }
     elseif ($cases.Values -contains $true) { $summary.state = 'PARTIAL_BIND_DROP_ATTRIBUTION' }
     return $summary
@@ -76,7 +109,9 @@ function Invoke-WfpPairedSetup([string] $ControllerPath, [string] $Stage, [strin
         identityVerified = $false; independentRemovalVerified = $false; jobEmpty = $false
         phases = [ordered]@{ before = $null; during = $null; after = $null }
         filteredStartedAt = $null; filteredFinishedAt = $null; dropEvidence = $null
+        pairedFixturePid = 0; bindLayerIds = @()
     }
+    $securityAnchor = Get-WfpSecurityRecordAnchor
     try {
         Assert-NoReparsePath $ControllerPath
         Assert-NoReparsePath $FixturePath
@@ -92,6 +127,11 @@ function Invoke-WfpPairedSetup([string] $ControllerPath, [string] $Stage, [strin
             $paired[$flag] = $record[$flag] -is [bool] -and $record[$flag]
         }
         foreach ($key in @('filteredStartedAt', 'filteredFinishedAt', 'dropEvidence')) { $paired[$key] = $record[$key] }
+        if (Test-WfpNativeNumber ($record['pairedFixturePid'])) { $paired.pairedFixturePid = [int] $record['pairedFixturePid'] }
+        if ($record['bindLayerIds'] -is [array] -and $record['bindLayerIds'].Count -eq 2 -and
+            $record['bindLayerIds'][0] -is [string] -and $record['bindLayerIds'][1] -is [string]) {
+            $paired.bindLayerIds = [string[]] $record['bindLayerIds']
+        }
         $vectors = $record['phases']
         if ($vectors -is [System.Collections.IDictionary]) {
             foreach ($phase in @('before', 'during', 'after')) {
@@ -190,6 +230,8 @@ function Invoke-WfpPairedSetup([string] $ControllerPath, [string] $Stage, [strin
         $crash['state'] = 'GUARDIAN_FINAL_EVIDENCE_UNVERIFIED'
     }
     # Read existing audit events after both tests to allow delivery of paired-run records.
-    $attribution = Get-WfpPairedBindAttribution $paired $systemAudit
+    $attribution = Get-WfpPairedBindAttribution $paired $systemAudit $securityAnchor
+    $paired.Remove('pairedFixturePid')
+    $paired.Remove('bindLayerIds')
     return [ordered]@{ paired = $paired; attribution = $attribution; crash = $crash; stageCleanupSafe = $guardianSettled }
 }

@@ -3,7 +3,8 @@ param(
     [string] $InstallRoot,
     [string] $EvidenceRoot,
     [switch] $WfpDiagnostic,
-    [switch] $WfpPairedDiagnostic
+    [switch] $WfpPairedDiagnostic,
+    [switch] $WfpBfeLab
 )
 
 Set-StrictMode -Version Latest
@@ -288,6 +289,7 @@ $setupStage = 'HOST_PREREQUISITES'
 try {
     if ($PSVersionTable.PSVersion.Major -lt 7 -or !$IsWindows) { throw 'Run this setup on native Windows with PowerShell 7.' }
     if ($WfpDiagnostic -and $WfpPairedDiagnostic) { throw 'Select one WFP diagnostic mode.' }
+    if ($WfpBfeLab -and !$WfpPairedDiagnostic) { throw 'The BFE lab requires the paired WFP diagnostic.' }
     $repo = Get-LocalPath (Split-Path -Parent (Split-Path -Parent $PSScriptRoot))
     Assert-NoReparsePath $repo
     if (!$InstallRoot) { $InstallRoot = Join-Path $env:LOCALAPPDATA 'CLU-E\WindowsSupervisor' }
@@ -326,6 +328,14 @@ try {
                 throw 'Right-click CLUE-Windows-WFP-Diagnostic.bat and choose Run as administrator.'
             }
         } finally { $identity.Dispose() }
+    }
+    if ($WfpBfeLab) {
+        $setupStage = 'BFE_LAB_PREREQUISITES'
+        $bfeLabReader = Join-Path $PSScriptRoot 'WfpBfeLabSetup.ps1'
+        Assert-NoReparsePath $bfeLabReader
+        . $bfeLabReader
+        $bfeLabConfirmation = Read-Host 'Type DISPOSABLE OFFLINE HYPER-V GUEST to confirm the lab VM is isolated and checkpointed'
+        Assert-WfpBfeLabEnvironment -Confirmation $bfeLabConfirmation
     }
     if ($WfpPairedDiagnostic) {
         $staticDiagnosticLock = [Threading.Mutex]::new($false, 'Local\CLU-E-StaticDiagnostic-05P')
@@ -427,7 +437,8 @@ try {
         $setupStage = 'PAIRED_DIAGNOSTIC_BUILD'
         foreach ($directory in @('fixture', 'paired\private', 'paired\workspace', 'crash\private', 'crash\workspace',
             'static-crash\private', 'static-crash\workspace', 'static-double\private', 'static-double\workspace',
-            'host-net\private', 'host-net\workspace', 'bfe-guard\private', 'bfe-guard\workspace')) {
+            'host-net\private', 'host-net\workspace', 'bfe-guard\private', 'bfe-guard\workspace',
+            'bfe-lab\private', 'bfe-lab\workspace')) {
             Assert-NoReparsePath (Join-Path $stage $directory) -CreateDirectory
         }
         $fixtureSource = Join-Path $PSScriptRoot 'WfpPairedFixture.cs'
@@ -510,6 +521,18 @@ $diagnosticPins
             $stageCleanupSafe = $bfeExperiment.stageCleanupSafe
             $bfeResult = $bfeExperiment.result
         }
+        $bfeLabResult = [ordered]@{ state = 'BFE_LAB_NOT_REQUESTED' }
+        if ($WfpBfeLab) {
+            $bfeLabResult.state = 'BFE_LAB_SKIPPED_PRIOR_CLEANUP_UNVERIFIED'
+            if ($stageCleanupSafe) {
+                $setupStage = 'BFE_LAB_EXECUTION'
+                Assert-WfpBfeLabEnvironment -Confirmation $bfeLabConfirmation
+                $stageCleanupSafe = $false
+                $bfeLab = Invoke-WfpBfeLabSetup $controller $stage
+                $stageCleanupSafe = $bfeLab.stageCleanupSafe
+                $bfeLabResult = $bfeLab.result
+            }
+        }
         $payload = [ordered]@{
             schemaVersion = 'clue-mxc-supervisor-diagnostic/1'
             checkedAt = [DateTime]::UtcNow.ToString('o')
@@ -537,16 +560,19 @@ $diagnosticPins
             wfpStaticDoubleLoss = $doubleResult
             wfpHostLoopback = $hostResult
             wfpBfeGuard = $bfeResult
+            wfpBfeLab = $bfeLabResult
             bfeRestartQualified = $false
         }
         Write-DiagnosticFile $report $payload
         Write-Host ('[CLU-E paired binds] ' + $experiment.paired.state)
         Write-Host ('[CLU-E WFP attribution] ' + $experiment.attribution.state)
+        Write-Host ('[CLU-E exact bind attribution] ' + $experiment.attribution.exactState)
         Write-Host ('[CLU-E abrupt exit] ' + $experiment.crash.state)
         Write-Host ('[CLU-E static guardian loss] ' + $staticResult.state)
         Write-Host ('[CLU-E static double loss] ' + $doubleResult.state)
         Write-Host ('[CLU-E host loopback] ' + $hostResult.state)
         Write-Host ('[CLU-E BFE health guard] ' + $bfeResult.state)
+        if ($WfpBfeLab) { Write-Host ('[CLU-E BFE lab] ' + $bfeLabResult.state) }
         if (!$stageCleanupSafe) {
             Write-Host 'The diagnostic stage was retained because cleanup is unverified.'
             foreach ($case in @(
@@ -617,7 +643,8 @@ $diagnosticPins
     Write-Host 'Native proof remains blocked pending a supported intra-sandbox loopback enforcement mechanism.'
     exit $code
 } catch {
-    Write-Host "CLU-E supervisor setup stopped: $($_.Exception.Message)"
+    $failure = $_.Exception.Message
+    Write-Host "CLU-E supervisor setup stopped: $failure"
     if ($null -ne $report -and !(Test-Path -LiteralPath $report)) {
         try {
             Assert-NoReparsePath (Split-Path -Parent $report)
@@ -636,6 +663,11 @@ $diagnosticPins
                 wfpPairedDiagnostic = [bool] $WfpPairedDiagnostic
                 wfpGuardianDiagnostic = [bool] $WfpPairedDiagnostic
                 wfpStaticGuardianDiagnostic = [bool] $WfpPairedDiagnostic
+                wfpBfeLab = if ($WfpBfeLab) {
+                    $labState = if ($failure -cmatch '\ABFE_LAB_[A-Z0-9_]{1,72}\z') { $failure } else { 'BFE_LAB_SETUP_FAILED' }
+                    [ordered]@{ state = $labState }
+                } else { $null }
+                bfeRestartQualified = $false
                 diagnosticStageRetained = !$stageCleanupSafe
                 canaryExitCode = $null
                 canaryReport = $null
