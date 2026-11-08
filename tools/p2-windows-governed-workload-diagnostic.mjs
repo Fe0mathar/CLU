@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-import { lstatSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { closeSync, fstatSync, lstatSync, openSync, readFileSync, readdirSync, readSync, realpathSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { fileURLToPath } from 'node:url';
@@ -8,7 +9,11 @@ import { externalReportPath, writeExternalReport } from './verification-support.
 import { exerciseGovernedWorkload } from './windows-supervisor/governedWorkloadHarness.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const usage = 'Usage: node tools/p2-windows-governed-workload-diagnostic.mjs --stage <staged admission dir> --supervisor <staged supervisor> --output <staged report>';
+const usage = 'Usage: node tools/p2-windows-governed-workload-diagnostic.mjs --stage <staged admission dir> --supervisor <supervisor> --output <staged report> [--installed <wrapper SHA-256> <engine SHA-256>]';
+const sha256Pattern = /^[0-9a-f]{64}$/u;
+const supervisorName = 'CLU-E-Windows-Supervisor.exe';
+const engineName = 'wxc-exec.exe';
+const maxInstalledImageBytes = 128n * 1024n * 1024n;
 
 function inside(parent, child) {
   const delta = relative(parent, child);
@@ -21,6 +26,47 @@ function checkedPath(path, directory) {
   if ((directory ? !entry.isDirectory() : !entry.isFile() || entry.nlink !== 1) ||
       relative(path, realpathSync.native(path)) !== '') throw new Error('PATH_IDENTITY_UNVERIFIED');
   return path;
+}
+
+function verifyInstalledImage(path, expectedSha256) {
+  const file = checkedPath(path, false);
+  const fd = openSync(file, 'r');
+  try {
+    const before = fstatSync(fd, { bigint: true });
+    if (!before.isFile() || before.nlink !== 1n || before.size < 1n || before.size > maxInstalledImageBytes) {
+      throw new Error('INSTALLED_IMAGE_FILE_UNVERIFIED');
+    }
+    const hash = createHash('sha256');
+    const buffer = Buffer.alloc(64 * 1024);
+    for (let remaining = Number(before.size); remaining > 0;) {
+      const bytesRead = readSync(fd, buffer, 0, Math.min(buffer.length, remaining), null);
+      if (bytesRead === 0) throw new Error('INSTALLED_IMAGE_READ_UNVERIFIED');
+      hash.update(buffer.subarray(0, bytesRead));
+      remaining -= bytesRead;
+    }
+    const after = fstatSync(fd, { bigint: true });
+    if (after.nlink !== 1n || after.size !== before.size || after.mtimeNs !== before.mtimeNs ||
+        after.ctimeNs !== before.ctimeNs || hash.digest('hex') !== expectedSha256) {
+      throw new Error('INSTALLED_IMAGE_HASH_UNVERIFIED');
+    }
+    checkedPath(file, false);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function verifyInstalledPair(supervisor, wrapperSha256, engineSha256) {
+  const directory = dirname(supervisor);
+  for (let current = directory; ; current = dirname(current)) {
+    checkedPath(current, true);
+    if (dirname(current) === current) break;
+  }
+  const entries = readdirSync(directory).sort();
+  if (entries.length !== 2 || entries[0] !== supervisorName || entries[1] !== engineName) {
+    throw new Error('INSTALLED_IMAGE_PAIR_UNVERIFIED');
+  }
+  verifyInstalledImage(supervisor, wrapperSha256);
+  verifyInstalledImage(join(directory, engineName), engineSha256);
 }
 
 async function approve({ source, cache }) {
@@ -56,9 +102,11 @@ function progress(phase) {
 }
 
 const args = process.argv.slice(2);
+const installed = args.length === 9 && args[6] === '--installed' &&
+  args[7].length === 64 && args[8].length === 64 && sha256Pattern.test(args[7]) && sha256Pattern.test(args[8]);
 if (args.length === 1 && args[0] === '--help') {
   console.log(usage);
-} else if (args.length !== 6 || args[0] !== '--stage' || args[2] !== '--supervisor' || args[4] !== '--output') {
+} else if ((args.length !== 6 && !installed) || args[0] !== '--stage' || args[2] !== '--supervisor' || args[4] !== '--output') {
   console.error(usage);
   process.exitCode = 2;
 } else {
@@ -66,13 +114,18 @@ if (args.length === 1 && args[0] === '--help') {
     const stage = checkedPath(args[1], true);
     const outer = dirname(stage);
     const physicalRoot = realpathSync.native(root);
-    const expectedExe = join(outer, 'bin', 'CLU-E-Windows-Supervisor.exe');
+    const expectedExe = installed
+      ? join(dirname(outer), 'installed-diagnostics', args[7], supervisorName)
+      : join(outer, 'bin', supervisorName);
     const expectedOutput = join(outer, 'admission-result.json');
     if (basename(stage) !== 'admission' || !/^\.setup-[0-9a-f]{32}$/u.test(basename(outer)) ||
-        !isAbsolute(args[3]) || relative(expectedExe, args[3]) !== '' ||
+        !isAbsolute(args[3]) || (installed ? args[3] !== expectedExe : relative(expectedExe, args[3]) !== '') ||
         !isAbsolute(args[5]) || relative(expectedOutput, args[5]) !== '' ||
         inside(physicalRoot, outer) || inside(outer, physicalRoot) || readdirSync(stage).length !== 0 ||
         lstatSync(expectedOutput, { throwIfNoEntry: false }) !== undefined) throw new Error('STAGE_SCOPE_UNVERIFIED');
+    if (installed && (inside(physicalRoot, dirname(expectedExe)) || inside(dirname(expectedExe), physicalRoot))) {
+      throw new Error('INSTALLED_IMAGE_SCOPE_UNVERIFIED');
+    }
     const output = externalReportPath(physicalRoot, expectedOutput);
     let report = {
       schemaVersion: 'clue-windows-governed-workload/1', state: 'NATIVE_WINDOWS_REQUIRED',
@@ -85,9 +138,14 @@ if (args.length === 1 && args[0] === '--help') {
       const fixture = checkedPath(join(physicalRoot, 'tools', 'windows-supervisor', 'GovernedWorkloadBootstrap.cjs'), false);
       const bytes = readFileSync(fixture);
       if (bytes.length < 1 || bytes.length > 16 * 1024 || bytes.some((byte) => byte === 0 || byte > 127)) throw new Error('BOOTSTRAP_BYTES_UNVERIFIED');
+      if (installed) verifyInstalledPair(supervisor, args[7], args[8]);
       report = await exerciseGovernedWorkload({
         repoRoot: physicalRoot, stage, supervisor, node, systemRoot, script: bytes.toString('ascii'), approve, progress,
       });
+      if (installed) {
+        verifyInstalledPair(supervisor, args[7], args[8]);
+        report.installedImage = { wrapperSha256: args[7], engineSha256: args[8], verifiedBefore: true, verifiedAfter: true };
+      }
     }
     writeExternalReport(physicalRoot, output, report);
     console.log(`Windows governed workload ${report.state}`);

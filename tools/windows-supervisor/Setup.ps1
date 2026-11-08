@@ -8,6 +8,7 @@ param(
     [switch] $ProofAdmissionDiagnostic,
     [switch] $ReviewedWorkloadDiagnostic,
     [switch] $GovernedWorkloadDiagnostic,
+    [switch] $InstalledGovernedWorkloadDiagnostic,
     [switch] $WfpEnforcementFaultDiagnostic
 )
 
@@ -256,9 +257,49 @@ function Clear-ProofAdmissionStage([string] $Path, [bool] $Safe, [int] $MaximumE
     return 'RETAINED_UNVERIFIED'
 }
 
+function Assert-InstalledGovernedImages([string] $Directory, [string] $WrapperSha256, [string] $EngineSha256) {
+    Assert-NoReparsePath $Directory
+    $wrapper = Join-Path $Directory 'CLU-E-Windows-Supervisor.exe'
+    $engine = Join-Path $Directory 'wxc-exec.exe'
+    $entries = @(Get-ChildItem -LiteralPath $Directory -Force)
+    if ((Split-Path -Leaf $Directory) -cne $WrapperSha256 -or $entries.Count -ne 2 -or
+        $entries.Name -cnotcontains 'CLU-E-Windows-Supervisor.exe' -or $entries.Name -cnotcontains 'wxc-exec.exe' -or
+        @($entries | Where-Object { $_.PSIsContainer -or ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) }).Count -ne 0) {
+        throw 'The diagnostic installation does not contain exactly its two pinned images.'
+    }
+    Assert-NoReparsePath $wrapper
+    Assert-NoReparsePath $engine
+    if ((Get-Sha256 $wrapper) -cne $WrapperSha256 -or (Get-Sha256 $engine) -cne $EngineSha256) {
+        throw 'The installed diagnostic image hash does not match its pin.'
+    }
+    Assert-MicrosoftSignature $engine
+}
+
+function Clear-InstalledGovernedImages([string] $OwnedDirectory, [string] $StageCleanup,
+    [string] $WrapperSha256, [string] $EngineSha256) {
+    if (!$OwnedDirectory) { return 'NOT_REQUIRED' }
+    if ($StageCleanup -cne 'REMOVED') { return 'RETAINED_UNVERIFIED' }
+    try {
+        Assert-InstalledGovernedImages $OwnedDirectory $WrapperSha256 $EngineSha256
+        # This path belongs to the successful exclusive move. Never delete unknown entries.
+        [IO.File]::Delete((Join-Path $OwnedDirectory 'CLU-E-Windows-Supervisor.exe'))
+        [IO.File]::Delete((Join-Path $OwnedDirectory 'wxc-exec.exe'))
+        [IO.Directory]::Delete($OwnedDirectory, $false)
+        if (!(Test-Path -LiteralPath $OwnedDirectory)) { return 'REMOVED' }
+    } catch { }
+    return 'RETAINED_UNVERIFIED'
+}
+
+function Close-InstalledGovernedHandles([Collections.Generic.List[IO.FileStream]] $Handles) {
+    foreach ($handle in $Handles) { $handle.Dispose() }
+    $Handles.Clear()
+}
+
 function Write-StagedProofDiagnosticReport([string] $Path, [string] $State, $ExitCode) {
     $payload = [ordered]@{
-        schemaVersion = if ($script:GovernedWorkloadDiagnostic) {
+        schemaVersion = if ($script:InstalledGovernedWorkloadDiagnostic) {
+            'clue-windows-installed-governed-workload-diagnostic/1'
+        } elseif ($script:GovernedWorkloadDiagnostic) {
             'clue-windows-governed-workload-diagnostic/1'
         } elseif ($script:ReviewedWorkloadDiagnostic) {
             'clue-windows-reviewed-workload-diagnostic/1'
@@ -279,7 +320,7 @@ function Write-StagedProofDiagnosticReport([string] $Path, [string] $State, $Exi
         $payload.bootstrapSha256 = $script:admissionFixtureHash
         $payload.runnerSha256 = $script:admissionRunnerHash
         $payload.workloadExitCode = $ExitCode
-        if ($script:GovernedWorkloadDiagnostic) {
+        if ($script:governedWorkloadDiagnosticSelected) {
             $payload.npmCliSha256 = $script:admissionNpmCliHash
             $payload.governedWorkload = $script:admissionResult
         } else {
@@ -292,7 +333,13 @@ function Write-StagedProofDiagnosticReport([string] $Path, [string] $State, $Exi
     }
     $payload.cleanup = $script:admissionCleanup
     $payload.diagnosticStageRetained = $script:admissionCleanup -eq 'RETAINED_UNVERIFIED'
-    $maximumBytes = if ($script:GovernedWorkloadDiagnostic) { 131072 } else { 65536 }
+    if ($script:InstalledGovernedWorkloadDiagnostic) {
+        $payload.installation = $script:admissionInstallation
+        $payload.offHostLan = 'NOT_TESTED'
+        $payload.productionLoopbackEnforcement = 'UNQUALIFIED'
+        $payload.bfeRestartQualified = $false
+    }
+    $maximumBytes = if ($script:governedWorkloadDiagnosticSelected) { 131072 } else { 65536 }
     Write-DiagnosticFile $Path $payload $maximumBytes
 }
 
@@ -490,9 +537,22 @@ $admissionNpmCli = $null
 $admissionNpmCliHash = $null
 $admissionCleanup = 'NOT_REQUIRED'
 $admissionCleanupAttempted = $false
-$admissionCleanupMaximumEntries = if ($GovernedWorkloadDiagnostic) { 50000 } else { 1024 }
+$governedWorkloadDiagnosticSelected = $GovernedWorkloadDiagnostic -or $InstalledGovernedWorkloadDiagnostic
+$admissionCleanupMaximumEntries = if ($governedWorkloadDiagnosticSelected) { 50000 } else { 1024 }
 $admissionExitCode = $null
 $admissionResult = $null
+$admissionOwnedInstallation = $null
+$admissionInstallationHandles = [Collections.Generic.List[IO.FileStream]]::new()
+$admissionInstallationCleanupAttempted = $false
+$admissionInstallation = [ordered]@{
+    layout = 'INSTALLED_DIAGNOSTICS_CONTENT_ADDRESSED'
+    state = 'NOT_ATTEMPTED'
+    wrapperSha256 = $null
+    engineSha256 = $null
+    verifiedBefore = $false
+    verifiedAfter = $false
+    cleanup = 'NOT_REQUIRED'
+}
 $wfpFaultResult = $null
 $wfpFaultControllerHash = $null
 $wfpFaultFixtureHash = $null
@@ -502,7 +562,7 @@ $wfpFaultBlockedPriorStageId = $null
 $wfpFaultCleanup = 'NOT_REQUIRED'
 $wfpFaultCleanupAttempted = $false
 $setupStage = 'HOST_PREREQUISITES'
-$operatorWorkloadDiagnostic = $ReviewedWorkloadDiagnostic -or $GovernedWorkloadDiagnostic
+$operatorWorkloadDiagnostic = $ReviewedWorkloadDiagnostic -or $governedWorkloadDiagnosticSelected
 $stagedProofDiagnostic = $ProofAdmissionDiagnostic -or $operatorWorkloadDiagnostic
 $stagedWfpDiagnostic = $WfpPairedDiagnostic -or $WfpEnforcementFaultDiagnostic
 $setupFailureState = $null
@@ -519,6 +579,11 @@ try {
     if ($GovernedWorkloadDiagnostic -and ($ReviewedWorkloadDiagnostic -or $ProofAdmissionDiagnostic -or
         $WfpDiagnostic -or $WfpPairedDiagnostic -or $WfpBfeLab)) {
         throw 'Run the governed workload diagnostic separately from other diagnostics.'
+    }
+    if ($InstalledGovernedWorkloadDiagnostic -and ($GovernedWorkloadDiagnostic -or $ReviewedWorkloadDiagnostic -or
+        $ProofAdmissionDiagnostic -or $WfpDiagnostic -or $WfpPairedDiagnostic -or $WfpBfeLab -or
+        $WfpEnforcementFaultDiagnostic)) {
+        throw 'Run the installed governed workload diagnostic separately from other diagnostics.'
     }
     if ($WfpEnforcementFaultDiagnostic -and ($stagedProofDiagnostic -or $WfpDiagnostic -or
         $WfpPairedDiagnostic -or $WfpBfeLab)) {
@@ -539,6 +604,8 @@ try {
     $stamp = [DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss-fff') + '-' + [Guid]::NewGuid().ToString('N').Substring(0, 8)
     $report = if ($WfpEnforcementFaultDiagnostic) {
         Join-Path $evidence "CLU-E_WINDOWS_WFP_ENFORCEMENT_FAULT_$stamp.json"
+    } elseif ($InstalledGovernedWorkloadDiagnostic) {
+        Join-Path $evidence "CLU-E_WINDOWS_INSTALLED_GOVERNED_WORKLOAD_$stamp.json"
     } elseif ($GovernedWorkloadDiagnostic) {
         Join-Path $evidence "CLU-E_WINDOWS_GOVERNED_WORKLOAD_$stamp.json"
     } elseif ($ReviewedWorkloadDiagnostic) {
@@ -626,7 +693,9 @@ try {
         Write-Host '[1/4] Checking the Windows WFP enforcement fault diagnostic prerequisites.'
     }
     if ($stagedProofDiagnostic) {
-        if ($GovernedWorkloadDiagnostic) {
+        if ($InstalledGovernedWorkloadDiagnostic) {
+            Write-Host '[1/4] Checking the installed governed Windows workload diagnostic prerequisites.'
+        } elseif ($governedWorkloadDiagnosticSelected) {
             Write-Host '[1/4] Checking the governed Windows workload diagnostic prerequisites.'
         } elseif ($ReviewedWorkloadDiagnostic) {
             Write-Host '[1/4] Checking the reviewed Windows workload diagnostic prerequisites.'
@@ -641,7 +710,11 @@ try {
         } finally { $identity.Dispose() }
         if ($operatorWorkloadDiagnostic) {
             if ($windowsHost.elevated) {
-                if ($GovernedWorkloadDiagnostic) {
+                if ($InstalledGovernedWorkloadDiagnostic) {
+                    $setupFailureState = 'INSTALLED_GOVERNED_WORKLOAD_REQUIRES_STANDARD_USER'
+                    throw 'Open the installed governed workload launcher from normal Windows Explorer without Run as administrator.'
+                }
+                if ($governedWorkloadDiagnosticSelected) {
                     $setupFailureState = 'GOVERNED_WORKLOAD_REQUIRES_STANDARD_USER'
                     throw 'Open the governed workload launcher from normal Windows Explorer without Run as administrator.'
                 }
@@ -660,7 +733,7 @@ try {
         Assert-NoReparsePath $node
         if ($stagedProofDiagnostic) {
             $admissionNodeHash = Get-Sha256 $node
-            if ($GovernedWorkloadDiagnostic) {
+            if ($governedWorkloadDiagnosticSelected) {
                 $setupStage = 'GOVERNED_WORKLOAD_NPM_PREREQUISITE'
                 $admissionNpmCli = Get-LocalPath (Join-Path (Split-Path -Parent $node) 'node_modules\npm\bin\npm-cli.js')
                 Assert-NoReparsePath $admissionNpmCli
@@ -769,7 +842,7 @@ try {
     if (!(Copy-PinnedInstalledMxc $arch $install $mxc $mxcDownload)) {
         if ($stagedProofDiagnostic) {
             $mxcDownload.state = 'VERIFIED_X64_CACHE_REQUIRED'
-            if ($GovernedWorkloadDiagnostic) {
+            if ($governedWorkloadDiagnosticSelected) {
                 throw 'The governed workload diagnostic requires the previously verified x64 MXC engine under the current Windows account.'
             }
             if ($ReviewedWorkloadDiagnostic) {
@@ -798,13 +871,15 @@ try {
     $admissionGovernedPin = 'false'
     $admissionNpmCliPin = ''
     if ($stagedProofDiagnostic) {
-        $setupStage = if ($GovernedWorkloadDiagnostic) {
+        $setupStage = if ($InstalledGovernedWorkloadDiagnostic) {
+            'INSTALLED_GOVERNED_WORKLOAD_BUILD'
+        } elseif ($governedWorkloadDiagnosticSelected) {
             'GOVERNED_WORKLOAD_BUILD'
         } elseif ($ReviewedWorkloadDiagnostic) { 'REVIEWED_WORKLOAD_BUILD' } else { 'PROOF_ADMISSION_BUILD' }
         $admissionStage = Join-Path $stage 'admission'
         Assert-NoReparsePath $admissionStage -CreateDirectory
         $quotedAdmissionStage = $admissionStage.Replace('"', '""')
-        $admissionFixtureSource = if ($GovernedWorkloadDiagnostic) {
+        $admissionFixtureSource = if ($governedWorkloadDiagnosticSelected) {
             $admissionGovernedPin = 'true'
             $admissionNpmCliPin = $admissionNpmCliHash
             Join-Path $PSScriptRoot 'GovernedWorkloadBootstrap.cjs'
@@ -883,13 +958,44 @@ $diagnosticPins
         if ((Invoke-ExactExecutable $csc $admissionArgs $stage 60) -ne 0) { throw 'Staged diagnostic supervisor compilation failed.' }
         Assert-NoReparsePath $admissionSupervisor
         $admissionSupervisorHash = Get-Sha256 $admissionSupervisor
-        if ($GovernedWorkloadDiagnostic) {
+        if ($InstalledGovernedWorkloadDiagnostic) {
+            $setupStage = 'INSTALLED_GOVERNED_WORKLOAD_INSTALLATION'
+            $admissionInstallation.wrapperSha256 = $admissionSupervisorHash
+            $admissionInstallation.engineSha256 = $mxcHash
+            $installationRoot = Join-Path $install 'installed-diagnostics'
+            Assert-NoReparsePath $installationRoot -CreateDirectory
+            $destination = Join-Path $installationRoot $admissionSupervisorHash
+            if (Test-Path -LiteralPath $destination) {
+                $admissionInstallation.state = 'COLLISION_REFUSED'
+                $setupFailureState = 'INSTALLED_GOVERNED_WORKLOAD_INSTALLATION_COLLISION'
+                throw 'The installed diagnostic destination already exists.'
+            }
+            # Directory.Move rejects an existing destination, including one created after the check.
+            [IO.Directory]::Move($bin, $destination)
+            $admissionOwnedInstallation = $destination
+            $admissionInstallation.state = 'OWNED'
+            $admissionSupervisor = Join-Path $destination 'CLU-E-Windows-Supervisor.exe'
+            $mxc = Join-Path $destination 'wxc-exec.exe'
+            foreach ($image in @($admissionSupervisor, $mxc)) {
+                Assert-NoReparsePath $image
+                $admissionInstallationHandles.Add([IO.File]::Open($image, [IO.FileMode]::Open,
+                    [IO.FileAccess]::Read, [IO.FileShare]::Read))
+            }
+            Assert-InstalledGovernedImages $destination $admissionSupervisorHash $mxcHash
+            $admissionInstallation.verifiedBefore = $true
+        }
+        if ($governedWorkloadDiagnosticSelected) {
             $admissionRunner = Join-Path $repo 'tools\p2-windows-governed-workload-diagnostic.mjs'
             $admissionSchema = 'clue-windows-governed-workload/1'
             $admissionSuccess = 'GOVERNED_WORKLOAD_OBSERVED'
             $admissionTimeout = 1200
-            $admissionLabel = 'CLU-E governed workload'
-            $setupStage = 'GOVERNED_WORKLOAD_EXECUTION'
+            if ($InstalledGovernedWorkloadDiagnostic) {
+                $admissionLabel = 'CLU-E installed governed workload'
+                $setupStage = 'INSTALLED_GOVERNED_WORKLOAD_EXECUTION'
+            } else {
+                $admissionLabel = 'CLU-E governed workload'
+                $setupStage = 'GOVERNED_WORKLOAD_EXECUTION'
+            }
         } elseif ($ReviewedWorkloadDiagnostic) {
             $admissionRunner = Join-Path $repo 'tools\p2-windows-reviewed-workload-diagnostic.mjs'
             $admissionSchema = 'clue-windows-reviewed-workload/1'
@@ -907,7 +1013,9 @@ $diagnosticPins
         Assert-NoReparsePath $admissionRunner
         if ($operatorWorkloadDiagnostic) { $admissionRunnerHash = Get-Sha256 $admissionRunner }
         $admissionOutput = Join-Path $stage 'admission-result.json'
-        if ($GovernedWorkloadDiagnostic) {
+        if ($InstalledGovernedWorkloadDiagnostic) {
+            Write-Host '[3/4] Running the reviewed Windows workload through the verified installed diagnostic image.'
+        } elseif ($governedWorkloadDiagnosticSelected) {
             Write-Host '[3/4] Preparing reviewed source and offline dependency inputs for the governed Windows workload.'
         } elseif ($ReviewedWorkloadDiagnostic) {
             Write-Host '[3/4] Preparing dashboard snapshots for operator review and Windows workload tests.'
@@ -915,9 +1023,13 @@ $diagnosticPins
             $setupStage = 'PROOF_ADMISSION_EXECUTION'
             Write-Host '[3/4] Running production-shaped baseline and candidate fixture requests on Windows.'
         }
+        $admissionRunnerArgs = @($admissionRunner, '--stage', $admissionStage,
+            '--supervisor', $admissionSupervisor, '--output', $admissionOutput)
+        if ($InstalledGovernedWorkloadDiagnostic) {
+            $admissionRunnerArgs += @('--installed', $admissionSupervisorHash, $mxcHash)
+        }
         $stageCleanupSafe = $false
-        $admissionExitCode = Invoke-ExactExecutable $node @($admissionRunner, '--stage', $admissionStage,
-            '--supervisor', $admissionSupervisor, '--output', $admissionOutput) $repo $admissionTimeout
+        $admissionExitCode = Invoke-ExactExecutable $node $admissionRunnerArgs $repo $admissionTimeout
         Assert-NoReparsePath $admissionOutput
         $admissionOutputItem = Get-Item -LiteralPath $admissionOutput -Force
         $admissionMaximumReportBytes = if ($operatorWorkloadDiagnostic) { 65536 } else { 32768 }
@@ -937,6 +1049,19 @@ $diagnosticPins
             ($admissionExitCode -eq 0 -and !$admissionRead['stageCleanupSafe'])) {
             throw 'Staged diagnostic runner report failed contract validation.'
         }
+        if ($InstalledGovernedWorkloadDiagnostic) {
+            $installedImage = $admissionRead['installedImage']
+            if ($installedImage -isnot [System.Collections.IDictionary] -or $installedImage.Count -ne 4 -or
+                $installedImage['wrapperSha256'] -cne $admissionSupervisorHash -or
+                $installedImage['engineSha256'] -cne $mxcHash -or
+                $installedImage['verifiedBefore'] -isnot [bool] -or !$installedImage['verifiedBefore'] -or
+                $installedImage['verifiedAfter'] -isnot [bool] -or !$installedImage['verifiedAfter']) {
+                throw 'The governed workload did not verify the exact installed diagnostic images before and after execution.'
+            }
+            Assert-InstalledGovernedImages $admissionOwnedInstallation $admissionSupervisorHash $mxcHash
+            $admissionInstallation.verifiedAfter = $true
+            $admissionInstallation.state = 'VERIFIED'
+        }
         if (!$operatorWorkloadDiagnostic) { $stageCleanupSafe = $admissionRead['stageCleanupSafe'] }
         foreach ($admissionPinnedPath in @($node, $admissionSupervisor, $mxc, $admissionFixtureSource)) {
             Assert-NoReparsePath $admissionPinnedPath
@@ -950,10 +1075,10 @@ $diagnosticPins
         if ($operatorWorkloadDiagnostic) {
             Assert-NoReparsePath $admissionRunner
             if ((Get-Sha256 $admissionRunner) -cne $admissionRunnerHash) {
-                if ($GovernedWorkloadDiagnostic) { throw 'The governed workload diagnostic runner changed during execution.' }
+                if ($governedWorkloadDiagnosticSelected) { throw 'The governed workload diagnostic runner changed during execution.' }
                 throw 'The reviewed workload diagnostic runner changed during execution.'
             }
-            if ($GovernedWorkloadDiagnostic) {
+            if ($governedWorkloadDiagnosticSelected) {
                 Assert-NoReparsePath $admissionNpmCli
                 if ((Get-Sha256 $admissionNpmCli) -cne $admissionNpmCliHash) {
                     throw 'The pinned governed workload npm CLI changed during execution.'
@@ -964,19 +1089,34 @@ $diagnosticPins
         $admissionResult = $admissionRead
         $admissionCleanup = Clear-ProofAdmissionStage $stage $stageCleanupSafe $admissionCleanupMaximumEntries
         $admissionCleanupAttempted = $true
-        $setupStage = if ($GovernedWorkloadDiagnostic) {
+        if ($InstalledGovernedWorkloadDiagnostic) {
+            Close-InstalledGovernedHandles $admissionInstallationHandles
+            $admissionInstallation.cleanup = Clear-InstalledGovernedImages $admissionOwnedInstallation $admissionCleanup $admissionSupervisorHash $mxcHash
+            $admissionInstallationCleanupAttempted = $true
+        }
+        $setupStage = if ($InstalledGovernedWorkloadDiagnostic) {
+            'INSTALLED_GOVERNED_WORKLOAD_FINISHED'
+        } elseif ($governedWorkloadDiagnosticSelected) {
             'GOVERNED_WORKLOAD_FINISHED'
         } elseif ($ReviewedWorkloadDiagnostic) { 'REVIEWED_WORKLOAD_FINISHED' } else { 'PROOF_ADMISSION_FINISHED' }
-        $admissionState = $admissionResult['state']
+        $admissionState = if ($InstalledGovernedWorkloadDiagnostic -and $admissionExitCode -eq 0) {
+            'INSTALLED_GOVERNED_WORKLOAD_OBSERVED'
+        } else { $admissionResult['state'] }
         $admissionProcessExit = $admissionExitCode
         if ($admissionCleanup -eq 'RETAINED_UNVERIFIED') {
-            $admissionState = if ($GovernedWorkloadDiagnostic) {
+            $admissionState = if ($InstalledGovernedWorkloadDiagnostic) {
+                'INSTALLED_GOVERNED_WORKLOAD_STAGE_CLEANUP_UNVERIFIED'
+            } elseif ($governedWorkloadDiagnosticSelected) {
                 'GOVERNED_WORKLOAD_STAGE_CLEANUP_UNVERIFIED'
             } elseif ($ReviewedWorkloadDiagnostic) {
                 'REVIEWED_WORKLOAD_STAGE_CLEANUP_UNVERIFIED'
             } else { 'PROOF_ADMISSION_STAGE_CLEANUP_UNVERIFIED' }
             $admissionProcessExit = 1
             Write-Host 'The diagnostic stage was retained because cleanup is unverified.'
+        } elseif ($InstalledGovernedWorkloadDiagnostic -and $admissionInstallation.cleanup -ceq 'RETAINED_UNVERIFIED') {
+            $admissionState = 'INSTALLED_GOVERNED_WORKLOAD_INSTALLATION_CLEANUP_UNVERIFIED'
+            $admissionProcessExit = 1
+            Write-Host 'The installed diagnostic images were retained because cleanup is unverified.'
         }
         Write-StagedProofDiagnosticReport $report $admissionState $admissionExitCode
         Write-Host "[$admissionLabel] $admissionState"
@@ -1236,6 +1376,10 @@ $diagnosticPins
     if ($stagedProofDiagnostic -and !$admissionCleanupAttempted) {
         $admissionCleanup = Clear-ProofAdmissionStage $stage $stageCleanupSafe $admissionCleanupMaximumEntries
     }
+    if ($InstalledGovernedWorkloadDiagnostic -and !$admissionInstallationCleanupAttempted) {
+        Close-InstalledGovernedHandles $admissionInstallationHandles
+        $admissionInstallation.cleanup = Clear-InstalledGovernedImages $admissionOwnedInstallation $admissionCleanup $admissionSupervisorHash $mxcHash
+    }
     if ($WfpEnforcementFaultDiagnostic -and !$wfpFaultCleanupAttempted) {
         $wfpFaultCleanup = Clear-ProofAdmissionStage $stage $stageCleanupSafe
     }
@@ -1285,6 +1429,7 @@ $diagnosticPins
     }
     exit 1
 } finally {
+    if ($InstalledGovernedWorkloadDiagnostic) { Close-InstalledGovernedHandles $admissionInstallationHandles }
     if (!$stagedProofDiagnostic -and !$WfpEnforcementFaultDiagnostic -and $stageCleanupSafe -and
         $null -ne $stage -and (Test-Path -LiteralPath $stage -PathType Container)) {
         Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
