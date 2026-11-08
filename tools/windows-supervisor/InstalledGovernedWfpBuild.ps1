@@ -204,7 +204,7 @@ public static class ClueGovernedWfpOperator
             'WfpLoopbackLease.cs' = '22f6da4c0a380763e00c17892b10452c3746a42c346e63467e997d077e60c9d0'
             'WfpDropObservation.cs' = 'f9131d325ce6f30d77840d2f786b1ca2898e82338156aa98b7cb3f8c0946510b'
             'WfpBfeWatch.cs' = '6fa8d9c9f7865a35783082f11fb210a64f28705b8f63431c016288a34fc5ab4c'
-            'WfpIntegratedRun.cs' = '813d3e74991c9aa4ed2b03b7a66164ca6328b54484b24a2a5d9dc2e6e75f01bf'
+            'WfpIntegratedRun.cs' = '2bfe14573abb306bda46b4c61c6df0271619b0f42fbd94395ac043f4521895eb'
             'WfpIntegratedGuardian.cs' = 'dc5cc80ceb0cc9929ff883aaffeb9e24394f2367695c06b93175e6c7288b4400'
             'GovernedWorkloadBootstrap.cjs' = '1350631e94c3fa7ce45a74ca298d5e8bea6b983fab1c0c465be97b90bf871ae6'
             'GovernedWfpBindPrelude.cjs' = '2951a6d40a48426c31dd678c74d0d89627f7ea1638898cf1e1c7c3161d907f65'

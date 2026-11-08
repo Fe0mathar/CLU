@@ -388,7 +388,12 @@ export async function exerciseGovernedWorkload({
         const notes = nativeResult.stderr.split(/\r?\n/u).map((line) =>
           /^\[CLU-E governed WFP\] (NodeStart|Control|Armed|Workload|Drain|OwnerLoss) (GOVERNED_WFP_[A-Z0-9_]{1,62}|WIN32_ERROR_[0-9]{1,10}|TIMEOUT|REFUSED)$/u.exec(line),
         ).filter(Boolean);
-        native.wfpRefusal = notes.length === 1 ? { phase: notes[0][1], code: notes[0][2] } : null;
+        const lifecycleNotes = ownerLossExpected ? notes.filter((note) => note[1] !== 'Drain') : notes;
+        native.wfpRefusal = lifecycleNotes.length === 1 ? { phase: lifecycleNotes[0][1], code: lifecycleNotes[0][2] } : null;
+        if (ownerLossExpected) {
+          const drain = notes.find((note) => note[1] === 'Drain');
+          native.wfpDrainRefusal = drain === undefined ? null : { phase: drain[1], code: drain[2] };
+        }
       }
       if (ownerLossExpected) {
         const workloadEvidenceAbsent = !nativeResult.stdout.includes(evidencePrefix) &&
@@ -483,7 +488,7 @@ export async function exerciseGovernedWorkload({
       const { native } = evidence;
       const nativeVerified = native.exitCode === 125 && native.failure === 'NONZERO_EXIT' &&
         native.refusalPhase === 'ENGINE_RUN' && native.wfpRefusal?.phase === 'OwnerLoss' &&
-        native.wfpRefusal.code === 'GOVERNED_WFP_GUARDIAN_LOST' &&
+        native.wfpRefusal.code === 'GOVERNED_WFP_GUARDIAN_LOST' && native.wfpDrainRefusal === null &&
         evidence.wfpIntegration?.state === wfpOwnerLossObserved;
       const host = {
         startedMarkerVerified: false, checkoutWriteVerified: false, releaseMarkerAbsent: false,

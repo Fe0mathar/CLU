@@ -17,6 +17,7 @@ internal sealed class WfpIntegratedRun : IDisposable
 {
     private const int PipeTimeoutMs = 4000;
     private const int MarkerTimeoutMs = 15000;
+    private const uint OwnerLossNodeExitTimeoutMs = 5000;
     private const int OwnerLossCleanupTimeoutMs = 25000;
     private const uint ProcessQueryLimitedInformation = 0x1000;
     private const uint Synchronize = 0x00100000;
@@ -26,6 +27,7 @@ internal sealed class WfpIntegratedRun : IDisposable
     private const int TokenElevation = 20;
     private const uint WaitObject = 0;
     private const uint WaitTimeout = 258;
+    private const uint WaitFailed = 0xFFFFFFFF;
 
     private readonly Request request;
     private readonly string workspace;
@@ -154,6 +156,7 @@ internal sealed class WfpIntegratedRun : IDisposable
         catch (InvalidDataException failure) { ReportFailure("Drain", failure); }
         catch (InvalidOperationException failure) { ReportFailure("Drain", failure); }
         catch (TimeoutException failure) { ReportFailure("Drain", failure); }
+        catch (Win32Exception failure) { ReportFailure("Drain", failure); }
         finally
         {
             Dispose();
@@ -167,10 +170,13 @@ internal sealed class WfpIntegratedRun : IDisposable
         uint exit;
         ownerExitVerified = WaitForSingleObject(guardian, PipeTimeoutMs) == WaitObject &&
             GetExitCodeProcess(guardian, out exit) && exit == WfpIntegratedGuardian.OwnerLossExitCode;
-        nodeExited = WaitForSingleObject(node, 0) == WaitObject;
+        // Job accounting and the retained process handle provide separate exit evidence.
+        uint nodeWait = WaitForSingleObject(node, OwnerLossNodeExitTimeoutMs);
+        int nodeWaitError = nodeWait == WaitFailed ? Marshal.GetLastWin32Error() : 0;
+        nodeExited = nodeWait == WaitObject;
         RequireReleaseAbsent();
         releaseWithheld = true;
-        if (!ownerExitVerified || !nodeExited)
+        if (!ownerExitVerified)
             throw new InvalidDataException("GOVERNED_WFP_OWNER_LOSS_EXIT_UNVERIFIED");
 
         string imageDirectory = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
@@ -190,6 +196,10 @@ internal sealed class WfpIntegratedRun : IDisposable
                     throw new InvalidDataException("GOVERNED_WFP_OWNER_LOSS_CLEANUP_INVALID");
         }
         removalVerified = true;
+        if (nodeWait == WaitFailed) throw new Win32Exception(nodeWaitError);
+        if (!nodeExited)
+            throw new InvalidDataException(nodeWait == WaitTimeout
+                ? "GOVERNED_WFP_OWNER_LOSS_NODE_EXIT_TIMEOUT" : "GOVERNED_WFP_OWNER_LOSS_NODE_EXIT_UNVERIFIED");
         ownerLossObserved = true;
     }
 
