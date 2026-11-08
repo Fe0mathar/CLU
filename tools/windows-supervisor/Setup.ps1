@@ -299,6 +299,7 @@ function Close-InstalledGovernedHandles([Collections.Generic.List[IO.FileStream]
 function Invoke-InstalledGovernedWfpBuild([string] $Stage, [string] $Node, [string] $NodeSha256,
     [string] $NpmCliSha256, [string] $QualificationTemp, [string] $EngineSha256, [string] $OperatorSid,
     [int] $OperatorSessionId) {
+    $script:admissionInstallation.buildFailure = 'WFP_BUILD_LAUNCHER_PREFLIGHT'
     $stageName = Split-Path -Leaf $Stage
     if ($stageName -cnotmatch '\A\.setup-([a-f0-9]{32})\z') { throw 'The WFP workload stage identity is invalid.' }
     $runId = $Matches[1]
@@ -315,6 +316,7 @@ function Invoke-InstalledGovernedWfpBuild([string] $Stage, [string] $Node, [stri
         '-NodeSha256', $NodeSha256, '-NpmCliSha256', $NpmCliSha256, '-QualificationTemp', ('"{0}"' -f $QualificationTemp),
         '-EngineSha256', $EngineSha256, '-OperatorSid', $OperatorSid, '-OperatorSessionId', [string] $OperatorSessionId,
         '-OperatorPid', [string] $PID)
+    $script:admissionInstallation.buildFailure = 'WFP_BUILD_LAUNCHER_SCRIPT_PIN'
     $builderHandle = [IO.File]::Open($builder, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
     $process = $null
     try {
@@ -326,19 +328,56 @@ function Invoke-InstalledGovernedWfpBuild([string] $Stage, [string] $Node, [stri
         $sha = [Security.Cryptography.SHA256]::Create()
         try { $builderDigest = [BitConverter]::ToString($sha.ComputeHash($canonical)).Replace('-', '').ToLowerInvariant() }
         finally { $sha.Dispose() }
-        if ($builderDigest -cne '9a33670caf81053b9930966078fcf1f8214359d40e7480a15996c8d709453086') { throw 'The governed WFP builder source pin does not match.' }
+        if ($builderDigest -cne '1258beb12ad9d7b3685b90e852031f28ad94a2b15a499555afe8ce9a3efe30d0') { throw 'The governed WFP builder source pin does not match.' }
         Write-Host 'Approve the Windows elevation prompt for the protected supervisor build and WFP guardian.'
-        $process = Start-Process -FilePath $pwsh -ArgumentList $arguments -Verb RunAs -WindowStyle Hidden -PassThru
+        $script:admissionInstallation.buildFailure = 'WFP_BUILD_LAUNCHER_START_FAILED'
+        try { $process = Start-Process -FilePath $pwsh -ArgumentList $arguments -Verb RunAs -WindowStyle Hidden -PassThru }
+        catch {
+            $failure = $_.Exception
+            for ($depth = 0; $depth -lt 4 -and $null -ne $failure; $depth++) {
+                if ($failure -is [ComponentModel.Win32Exception] -and $failure.NativeErrorCode -eq 1223) {
+                    $script:admissionInstallation.buildFailure = 'WFP_BUILD_ELEVATION_CANCELLED'
+                    break
+                }
+                $failure = $failure.InnerException
+            }
+            throw
+        }
         if ($null -eq $process) { throw 'The elevated governed WFP builder did not start.' }
         $ready = Join-Path $protectedRoot 'ready.json'
         $clock = [Diagnostics.Stopwatch]::StartNew()
+        $builderExited = $false
         while (![IO.File]::Exists($ready) -and $clock.ElapsedMilliseconds -lt 120000) {
-            $builderExited = $false
             try { $builderExited = $process.HasExited } catch { }
             if ($builderExited) { break }
             Start-Sleep -Milliseconds 100
         }
-        if (![IO.File]::Exists($ready)) { throw 'The elevated governed WFP build did not publish its protected ready receipt.' }
+        if (![IO.File]::Exists($ready)) {
+            try { $builderExited = $process.HasExited } catch { }
+            $script:admissionInstallation.buildFailure = if ($builderExited) {
+                $builderExitCode = $null
+                try { $builderExitCode = $process.ExitCode } catch { }
+                if ($null -eq $builderExitCode) { 'WFP_BUILD_EXIT_STATUS_UNAVAILABLE' }
+                else {
+                    switch ($builderExitCode) {
+                        0 { 'WFP_BUILD_READY_RECEIPT_MISSING' }
+                        41 { 'WFP_BUILD_PREFLIGHT' }
+                        42 { 'WFP_BUILD_OPERATOR_TOKEN' }
+                        43 { 'WFP_BUILD_INPUT_IMAGES' }
+                        44 { 'WFP_BUILD_PROTECTED_ROOT' }
+                        45 { 'WFP_BUILD_SOURCE_PINS' }
+                        46 { 'WFP_BUILD_COMPILER_FAILED' }
+                        47 { 'WFP_BUILD_COMPILER_TIMEOUT' }
+                        48 { 'WFP_BUILD_INSTALLED_IMAGES' }
+                        49 { 'WFP_BUILD_GUARDIAN_START' }
+                        50 { 'WFP_BUILD_READY_PUBLICATION' }
+                        default { 'WFP_BUILD_UNCLASSIFIED_EXIT' }
+                    }
+                }
+            } else { 'WFP_BUILD_READY_TIMEOUT' }
+            throw ('The elevated governed WFP build did not publish its protected ready receipt. ' + $script:admissionInstallation.buildFailure)
+        }
+        $script:admissionInstallation.buildFailure = 'WFP_BUILD_READY_RECEIPT_INVALID'
         $dacl = "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;RC;;;OW)(A;OICI;0x1200a9;;;$OperatorSid)"
         Assert-WfpFaultStageAcl $protectedRoot $dacl
         Assert-NoReparsePath $ready
@@ -355,6 +394,7 @@ function Invoke-InstalledGovernedWfpBuild([string] $Stage, [string] $Node, [stri
             $receipt['guardianPid'] -le 0 -or $receipt['guardianPid'] -gt [int]::MaxValue) {
             throw 'The protected governed WFP ready receipt failed validation.'
         }
+        $script:admissionInstallation.buildFailure = $null
         return [ordered]@{
             programFiles = $programFiles
             root = $protectedRoot
@@ -633,6 +673,7 @@ $admissionInstallation = [ordered]@{
     verifiedAfter = $false
     cleanup = 'NOT_REQUIRED'
 }
+if ($InstalledGovernedWfpDiagnostic) { $admissionInstallation.buildFailure = $null }
 $wfpFaultResult = $null
 $wfpFaultControllerHash = $null
 $wfpFaultFixtureHash = $null
@@ -917,7 +958,7 @@ try {
             'WfpEnforcementFaultSetup.ps1' = '620d31ba73e6fbd2c01f930b373ddcec555cc5bb34856e31c6981f923a16df4c'
             'WfpFaultRecovery.cs' = 'f14116dcab8e4888253e314e099c30d7d93ed938a00fc7b6d510dc836b553536'
             'WfpHostLoopbackFixture.cs' = 'bc0e7b99bab9723a2b0de32ec787dac04d5748f11b4cd844ac5e370495e38285'
-            'WfpIntegratedRun.cs' = '330e5be0f639f99aefb9ecb87ed29fe3d894fd5ca68c5ecb9292ab5e9a5e7c1d'
+            'WfpIntegratedRun.cs' = '54d0c4c5365c4559373ff3a0a583c6f4eeddc1179e99079afe220004c505fd1d'
             'WfpIntegratedGuardian.cs' = '40b513253d0b1740469ec3604cbb75063a900379ed5b1b2fad203d0753bbd4c5'
             'WfpLeaseFaultController.cs' = 'd42b820a23fcb38b8e0234e84bcf631c7bed29b71e230057fc358e91b511ba99'
             'WfpLoopbackLease.cs' = '22f6da4c0a380763e00c17892b10452c3746a42c346e63467e997d077e60c9d0'
@@ -1054,12 +1095,14 @@ $diagnosticPins
     if ($stagedProofDiagnostic) {
         if ($InstalledGovernedWfpDiagnostic) {
             $setupStage = 'GOVERNED_WFP_PROTECTED_BUILD'
+            $admissionInstallation.buildFailure = 'WFP_BUILD_LAUNCHER_PREFLIGHT'
             $admissionWfpPreludePath = Join-Path $PSScriptRoot 'GovernedWfpBindPrelude.cjs'
             Assert-NoReparsePath $admissionWfpPreludePath
             $admissionWfpPreludeHash = Get-Sha256 $admissionWfpPreludePath
             $stageCleanupSafe = $false
             $admissionInstallation.state = 'BUILD_REQUESTED'
             $protectedImage = Invoke-InstalledGovernedWfpBuild $stage $node $admissionNodeHash $admissionNpmCliHash $qualificationTemp $mxcHash $admissionOperatorSid $sessionId
+            $admissionInstallation.buildFailure = 'WFP_BUILD_INSTALLED_IMAGE_VERIFICATION'
             $admissionProtectedInstallation = $protectedImage.directory
             $admissionSupervisorHash = $protectedImage.wrapperSha256
             $admissionSupervisor = Join-Path $admissionProtectedInstallation 'CLU-E-Windows-Supervisor.exe'
@@ -1076,6 +1119,7 @@ $diagnosticPins
             }
             Assert-InstalledGovernedImages $admissionProtectedInstallation $admissionSupervisorHash $mxcHash
             $admissionInstallation.verifiedBefore = $true
+            $admissionInstallation.buildFailure = $null
             $env:ProgramFiles = $protectedImage.programFiles
         } else {
             $admissionSupervisor = Join-Path $bin 'CLU-E-Windows-Supervisor.exe'

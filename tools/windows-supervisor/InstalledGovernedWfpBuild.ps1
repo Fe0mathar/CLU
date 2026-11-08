@@ -104,6 +104,9 @@ function Assert-ProtectedRoot([string] $Path, [string] $Dacl) {
     }
 }
 
+# These exit codes are consumed by Invoke-InstalledGovernedWfpBuild in Setup.ps1.
+# Keep the parent receipt independent of elevated console output.
+$failureExitCode = 41
 try {
     if (!$IsWindows -or $PSVersionTable.PSVersion.Major -lt 7 -or $OperatorSessionId -le 0 -or $OperatorPid -le 0 -or
         ![Environment]::UserInteractive) { throw 'WFP_BUILD_INTERACTIVE_WINDOWS_REQUIRED' }
@@ -125,6 +128,7 @@ try {
     try {
         if ($self.SessionId -ne $OperatorSessionId) { throw 'WFP_BUILD_OPERATOR_SESSION_MISMATCH' }
     } finally { $self.Dispose() }
+    $failureExitCode = 42
     Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
@@ -157,6 +161,7 @@ public static class ClueGovernedWfpOperator
             ![ClueGovernedWfpOperator]::Verify($operator.Handle, $OperatorSid)) {
             throw 'WFP_BUILD_OPERATOR_TOKEN_INVALID'
         }
+        $failureExitCode = 43
         Assert-LocalExactPath $Stage $true
         $stageName = Split-Path -Leaf $Stage
         if ($stageName -cnotmatch '\A\.setup-([a-f0-9]{32})\z') { throw 'WFP_BUILD_STAGE_ID_INVALID' }
@@ -171,6 +176,7 @@ public static class ClueGovernedWfpOperator
         Assert-Image $npm $NpmCliSha256 1048576
         Assert-Image $stageEngine $EngineSha256 134217728 -Microsoft
 
+        $failureExitCode = 44
         $programFiles = [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles)
         Assert-LocalExactPath $programFiles $true
         $protectedRoot = Join-Path $programFiles ".clue-governed-wfp-$runId"
@@ -187,6 +193,7 @@ public static class ClueGovernedWfpOperator
         $engine = Join-Path $bin 'wxc-exec.exe'
         [IO.File]::Copy($stageEngine, $engine, $false)
         Assert-Image $engine $EngineSha256 134217728 -Microsoft
+        $failureExitCode = 45
         $sourcePins = [ordered]@{
             'Supervisor.cs' = '11fc51e50823a80edcb99ff93bc808c8026e687e01bb061bbb0e272c3157e6f3'
             'Protocol.cs' = '5cb1fe80aa78cc8f8f0ecc9f6fa7a5a4c5de22bd82901d44e5525794f2f9194a'
@@ -196,7 +203,7 @@ public static class ClueGovernedWfpOperator
             'WfpLoopbackLease.cs' = '22f6da4c0a380763e00c17892b10452c3746a42c346e63467e997d077e60c9d0'
             'WfpDropObservation.cs' = 'f9131d325ce6f30d77840d2f786b1ca2898e82338156aa98b7cb3f8c0946510b'
             'WfpBfeWatch.cs' = '6fa8d9c9f7865a35783082f11fb210a64f28705b8f63431c016288a34fc5ab4c'
-            'WfpIntegratedRun.cs' = '330e5be0f639f99aefb9ecb87ed29fe3d894fd5ca68c5ecb9292ab5e9a5e7c1d'
+            'WfpIntegratedRun.cs' = '54d0c4c5365c4559373ff3a0a583c6f4eeddc1179e99079afe220004c505fd1d'
             'WfpIntegratedGuardian.cs' = '40b513253d0b1740469ec3604cbb75063a900379ed5b1b2fad203d0753bbd4c5'
             'GovernedWorkloadBootstrap.cjs' = '1350631e94c3fa7ce45a74ca298d5e8bea6b983fab1c0c465be97b90bf871ae6'
             'GovernedWfpBindPrelude.cjs' = '2951a6d40a48426c31dd678c74d0d89627f7ea1638898cf1e1c7c3161d907f65'
@@ -226,6 +233,7 @@ internal static class MxcPin {
 }
 "@
         [IO.File]::WriteAllText($pinSource, $generatedPin)
+        $failureExitCode = 46
         $systemRoot = Split-Path -Parent ([Environment]::SystemDirectory)
         $framework = Join-Path $systemRoot 'Microsoft.NET\Framework64\v4.0.30319'
         $csc = Join-Path $framework 'csc.exe'
@@ -254,9 +262,14 @@ internal static class MxcPin {
         $compiler.Environment['TMP'] = $protectedRoot
         $build = [Diagnostics.Process]::Start($compiler)
         try {
-            if (!$build.WaitForExit(60000)) { $build.Kill(); throw 'WFP_BUILD_COMPILER_TIMEOUT' }
+            if (!$build.WaitForExit(60000)) {
+                $failureExitCode = 47
+                $build.Kill()
+                throw 'WFP_BUILD_COMPILER_TIMEOUT'
+            }
             if ($build.ExitCode -ne 0) { throw 'WFP_BUILD_COMPILER_FAILED' }
         } finally { $build.Dispose() }
+        $failureExitCode = 48
         Assert-LocalExactPath $wrapper $false
         if (@(Get-ChildItem -LiteralPath $bin -Force).Count -ne 2) { throw 'WFP_BUILD_IMAGE_LAYOUT_INVALID' }
         $wrapperHash = (Get-FileHash -LiteralPath $wrapper -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -269,6 +282,7 @@ internal static class MxcPin {
         Assert-ProtectedRoot $protectedRoot $dacl
         if ($operator.HasExited) { throw 'WFP_BUILD_OPERATOR_EXITED' }
 
+        $failureExitCode = 49
         $start = [Diagnostics.ProcessStartInfo]::new()
         $start.FileName = $wrapper
         $start.WorkingDirectory = $destination
@@ -295,6 +309,7 @@ internal static class MxcPin {
                 [IO.File]::ReadAllText($listening, [Text.Encoding]::ASCII) -cne 'READY') {
                 throw 'WFP_BUILD_GUARDIAN_MARKER_INVALID'
             }
+            $failureExitCode = 50
             $receipt = [ordered]@{
                 schemaVersion = 'clue-governed-wfp-installed-image/1'
                 wrapperSha256 = $wrapperHash
@@ -313,5 +328,5 @@ internal static class MxcPin {
     exit 0
 } catch {
     Write-Host ('CLU-E governed WFP build stopped. ' + $_.Exception.Message)
-    exit 1
+    exit $failureExitCode
 }
