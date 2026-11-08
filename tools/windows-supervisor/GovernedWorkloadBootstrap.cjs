@@ -32,6 +32,7 @@ const result = {
   npmCacheWritable: false,
   stages: Object.fromEntries(stageNames.map((name) => [name, receipt('NOT_RUN', 'NONE', null)])),
   doctorDeepVerified: false,
+  doctorEvidence: null,
 };
 
 function receipt(state, code, exitCode) {
@@ -214,15 +215,42 @@ function spawnStage(args, env, deadline) {
     return { stage: receipt('LAUNCH_FAILED', permittedErrors.includes(code) ? code : 'OTHER', null) };
   }
   const exitCode = Number.isInteger(child.status) && child.status >= 0 && child.status <= 255 ? child.status : null;
-  if (exitCode !== 0) return { stage: receipt('FAILED', stageFailureCode(child), exitCode) };
+  if (exitCode !== 0) return { stage: receipt('FAILED', stageFailureCode(child), exitCode), stdout: child.stdout ?? '' };
   return { stage: receipt('PASSED', 'NONE', 0), stdout: child.stdout ?? '' };
 }
 
-function doctorOutputVerified(stdout) {
-  const logs = [...stdout.matchAll(/^ {2}OK +event log +head ([1-9]\d*) \(([1-9]\d*) records verified\)\r?$/gmu)];
-  const artifacts = [...stdout.matchAll(/^ {2}OK +artifacts +(\d+)\/(\d+) verified\r?$/gmu)];
-  return logs.length === 1 && logs[0][1] === logs[0][2] &&
-    artifacts.length === 1 && artifacts[0][1] === artifacts[0][2];
+function readDoctorEvidence(stdout) {
+  const logs = [...stdout.matchAll(/^( {2}OK|WARN|FAIL|INFO) +event log +([^\r\n]*)\r?$/gmu)];
+  const artifacts = [...stdout.matchAll(/^( {2}OK|WARN|FAIL|INFO) +artifacts +([^\r\n]*)\r?$/gmu)];
+  const evidence = {
+    eventLogState: logs.length === 0 ? 'ABSENT' : 'UNVERIFIED', eventLogHead: null, recordsVerified: null,
+    artifactState: artifacts.length === 0 ? 'ABSENT' : 'UNVERIFIED', artifactsChecked: null, artifactsVerified: null,
+  };
+  if (logs.length === 1) {
+    const [, level, detail] = logs[0];
+    if (level === 'WARN') evidence.eventLogState = 'UNAVAILABLE';
+    if (level === '  OK') {
+      if (detail === 'empty') evidence.eventLogState = 'EMPTY';
+      const counts = /^head (0|[1-9]\d{0,8}) \((0|[1-9]\d{0,8}) records verified\)$/u.exec(detail);
+      if (counts) {
+        evidence.eventLogHead = Number(counts[1]);
+        evidence.recordsVerified = Number(counts[2]);
+        // EventLog.append numbers the first event 0; verify counts all records.
+        evidence.eventLogState = evidence.recordsVerified === evidence.eventLogHead + 1 ? 'VERIFIED' : 'MISMATCH';
+      }
+    }
+  }
+  if (artifacts.length === 1) {
+    const [, level, detail] = artifacts[0];
+    const counts = /^(0|[1-9]\d{0,8})\/(0|[1-9]\d{0,8}) verified(, (?:0|[1-9]\d{0,8}) damaged)?$/u.exec(detail);
+    if (counts) {
+      evidence.artifactsVerified = Number(counts[1]);
+      evidence.artifactsChecked = Number(counts[2]);
+      evidence.artifactState = level === '  OK' && counts[3] === undefined &&
+        evidence.artifactsVerified === evidence.artifactsChecked ? 'VERIFIED' : 'MISMATCH';
+    }
+  }
+  return evidence;
 }
 
 function run() {
@@ -258,7 +286,8 @@ function run() {
     ['nativeSqlite', ['-e', sqliteProbe], (stdout) => stdout.trim() === 'CLU_E_GOVERNED_SQLITE_OK'],
   ] : [
     ['initWorkspace', [cli, 'init']],
-    ['doctorDeep', [cli, 'doctor', '--deep'], doctorOutputVerified],
+    ['doctorDeep', [cli, 'doctor', '--deep'], () => result.doctorEvidence.eventLogState === 'VERIFIED' &&
+      result.doctorEvidence.artifactState === 'VERIFIED'],
   ];
   result.state = 'GOVERNED_FAILED';
   result.exitCode = 1;
@@ -266,6 +295,7 @@ function run() {
   for (const [name, args, verify] of steps) {
     const { stage, stdout } = spawnStage(args, env, deadline);
     result.stages[name] = stage;
+    if (name === 'doctorDeep' && typeof stdout === 'string') result.doctorEvidence = readDoctorEvidence(stdout);
     if (stage.state !== 'PASSED') return;
     if (verify) {
       result.stages[name] = receipt('OUTPUT_UNVERIFIED', 'PROTOCOL_UNVERIFIED', 0);

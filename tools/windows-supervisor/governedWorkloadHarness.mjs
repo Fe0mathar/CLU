@@ -30,6 +30,10 @@ const stageCodes = new Set([
   'EISDIR', 'EINVAL', 'EIO', 'ENOSPC', 'ENOTCACHED', 'EINTEGRITY', 'EUSAGE', 'ERR_ACCESS_DENIED',
   'ERR_MODULE_NOT_FOUND', 'ERR_DLOPEN_FAILED', 'ERR_ASSERTION', 'TYPESCRIPT_DIAGNOSTICS', 'OTHER',
 ]);
+const doctorLogStates = new Set(['VERIFIED', 'ABSENT', 'EMPTY', 'UNAVAILABLE', 'UNVERIFIED', 'MISMATCH']);
+const doctorArtifactStates = new Set(['VERIFIED', 'ABSENT', 'UNVERIFIED', 'MISMATCH']);
+const eventFields = ['id', 'sequence', 'timestamp', 'type', 'mission_version', 'actor', 'subject_id', 'payload', 'previous_hash', 'hash'];
+const sha256Pattern = /^[0-9a-f]{64}$/u;
 
 function sha256(bytes) {
   return createHash('sha256').update(bytes).digest('hex');
@@ -154,6 +158,22 @@ function stageEvidence(value) {
   return coherent[state] ? { state, code, exitCode } : null;
 }
 
+function doctorEvidence(value) {
+  const keys = ['eventLogState', 'eventLogHead', 'recordsVerified', 'artifactState', 'artifactsChecked', 'artifactsVerified'];
+  if (!exactObject(value, keys)) return null;
+  const { eventLogState, eventLogHead, recordsVerified, artifactState, artifactsChecked, artifactsVerified } = value;
+  if (!doctorLogStates.has(eventLogState) || !doctorArtifactStates.has(artifactState)) return null;
+  const validPair = (state, first, second, relation, allowEqualMismatch = false) => {
+    if (state !== 'VERIFIED' && state !== 'MISMATCH') return first === null && second === null;
+    if (![first, second].every((number) => Number.isSafeInteger(number) && number >= 0 && number <= 999_999_999)) return false;
+    if (allowEqualMismatch && state === 'MISMATCH') return true;
+    return (state === 'VERIFIED') === relation(first, second);
+  };
+  if (!validPair(eventLogState, eventLogHead, recordsVerified, (head, count) => count - 1 === head) ||
+      !validPair(artifactState, artifactsChecked, artifactsVerified, (checked, verified) => checked === verified, true)) return null;
+  return { eventLogState, eventLogHead, recordsVerified, artifactState, artifactsChecked, artifactsVerified };
+}
+
 function workloadEvidence(stdout, side) {
   const lines = stdout.split(/\r?\n/u).filter((line) => line.startsWith(evidencePrefix));
   if (lines.length !== 1 || lines[0].length > 4096) return null;
@@ -169,6 +189,11 @@ function workloadEvidence(stdout, side) {
   const passed = value.state === 'GOVERNED_PASSED';
   const refused = value.state === 'BOOTSTRAP_REFUSED';
   if (value.exitCode !== (refused ? null : passed ? 0 : 1) || value.doctorDeepVerified !== (passed && side === 'baseline')) return null;
+  const doctor = value.doctorEvidence === null ? null : doctorEvidence(value.doctorEvidence);
+  if (value.doctorEvidence !== null && doctor === null) return null;
+  if (!['PASSED', 'FAILED', 'OUTPUT_UNVERIFIED'].includes(stages.doctorDeep.state) && doctor !== null) return null;
+  if (['PASSED', 'OUTPUT_UNVERIFIED'].includes(stages.doctorDeep.state) && doctor === null) return null;
+  if (value.doctorDeepVerified && (doctor.eventLogState !== 'VERIFIED' || doctor.artifactState !== 'VERIFIED')) return null;
   if (!refused && !Object.values(checks).every(Boolean)) return null;
   if (passed) {
     if (!selected.every((name) => stages[name].state === 'PASSED')) return null;
@@ -178,7 +203,7 @@ function workloadEvidence(stdout, side) {
     const firstIncomplete = selected.findIndex((name) => stages[name].state !== 'PASSED');
     if (firstIncomplete === -1 || !selected.slice(firstIncomplete + 1).every((name) => stages[name].state === 'NOT_RUN')) return null;
   }
-  return { state: value.state, exitCode: value.exitCode, ...checks, stages, doctorDeepVerified: value.doctorDeepVerified };
+  return { state: value.state, exitCode: value.exitCode, ...checks, stages, doctorDeepVerified: value.doctorDeepVerified, doctorEvidence: doctor };
 }
 
 function stageBaseline(paths, expected) {
@@ -212,19 +237,39 @@ function stageBaseline(paths, expected) {
   return { verified, instrumentation };
 }
 
-function verifyBaselineWorkspace(workspace) {
+function inspectBaselineWorkspace(workspace) {
   const mission = join(workspace, 'mission');
-  const events = exactFile(join(mission, 'events', 'events.ndjson'), 1024 * 1024);
-  const db = exactFile(join(mission, 'db', 'clue.db'), 32 * 1024 * 1024);
-  if (!events?.length || !db?.subarray(0, 16).equals(Buffer.from('SQLite format 3\0'))) return false;
+  const result = { eventLogVerified: false, eventLogHead: null, eventLogRecords: null, sqliteHeaderVerified: false };
   try {
-    const text = events.toString('utf8');
-    if (!text.endsWith('\n')) return false;
-    const records = text.slice(0, -1).split('\n').map((line) => JSON.parse(line));
-    return records.some((record) => record.type === 'mission.registered');
-  } catch {
-    return false;
-  }
+    const db = exactFile(join(mission, 'db', 'clue.db'), 32 * 1024 * 1024);
+    result.sqliteHeaderVerified = db?.subarray(0, 16).equals(Buffer.from('SQLite format 3\0')) === true;
+  } catch { /* The projection file could not be checked. */ }
+  try {
+    const bytes = exactFile(join(mission, 'events', 'events.ndjson'), 1024 * 1024);
+    if (!bytes?.length) return result;
+    const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+    if (!text.endsWith('\n')) return result;
+    const lines = text.slice(0, -1).split('\n');
+    if (lines.length > 4096) return result;
+    let previousHash = null;
+    let missionRegistered = false;
+    for (const [sequence, line] of lines.entries()) {
+      const record = JSON.parse(line);
+      if (!exactObject(record, eventFields) || record.sequence !== sequence || record.previous_hash !== previousHash ||
+          typeof record.hash !== 'string' || !sha256Pattern.test(record.hash) ||
+          typeof record.type !== 'string' || record.type.length === 0) return result;
+      previousHash = record.hash;
+      if (record.type === 'mission.registered' && typeof record.mission_version === 'string' &&
+          /^MISSION-[0-9]{6,}$/u.test(record.mission_version) && record.subject_id === record.mission_version &&
+          record.payload?.id === record.mission_version) missionRegistered = true;
+    }
+    if (missionRegistered) {
+      result.eventLogVerified = true;
+      result.eventLogHead = lines.length - 1;
+      result.eventLogRecords = lines.length;
+    }
+  } catch { /* The event log could not be checked. */ }
+  return result;
 }
 
 /** Run fixed native offline preparation followed by a clean-scope governed CLU-E CLI scenario. */
@@ -358,6 +403,8 @@ export async function exerciseGovernedWorkload({
       return report;
     }
 
+    if (!protectedInputs() || !verifyGovernedSource(baseline.checkout, verified, { allowBuildOutputs: true }) ||
+        inspectGovernedBuild(baseline.checkout).treeSha256 !== report.prepared.treeSha256) return report;
     report.state = 'GOVERNED_BASELINE_UNVERIFIED';
     progress?.('baseline');
     const baselineEvidence = await send(baselineRequest, baseline);
@@ -368,15 +415,24 @@ export async function exerciseGovernedWorkload({
       protectedInputsUnchanged: report.stageCleanupSafe && baselineEvidence.requestUnchanged && protectedInputs() &&
         verifyGovernedSource(baseline.checkout, verified, { allowBuildOutputs: true }),
       preparedTreeUnchanged: false, missionWorkspaceVerified: false,
+      missionWorkspace: null, doctorEventLogMatches: null,
     };
-    if (baselineEvidence.native.exitCode === 0 && report.stageCleanupSafe) {
-      baselineHost.missionWorkspaceVerified = verifyBaselineWorkspace(baseline.workspace);
+    if (report.stageCleanupSafe) {
+      const workspace = inspectBaselineWorkspace(baseline.workspace);
+      baselineHost.missionWorkspace = workspace;
+      baselineHost.missionWorkspaceVerified = workspace.eventLogVerified && workspace.sqliteHeaderVerified;
+      const doctor = baselineWorkload?.doctorEvidence;
+      if (workspace.eventLogVerified && doctor && doctor.eventLogHead !== null) {
+        baselineHost.doctorEventLogMatches = doctor.eventLogHead === workspace.eventLogHead &&
+          doctor.recordsVerified === workspace.eventLogRecords;
+      }
       try {
         baselineHost.preparedTreeUnchanged = inspectGovernedBuild(baseline.checkout).treeSha256 === report.prepared.treeSha256;
       } catch { /* The prepared tree cannot be re-attested. */ }
     }
     const baselinePassed = baselineEvidence.native.exitCode === 0 && baselineWorkload?.state === 'GOVERNED_PASSED' &&
-      Object.values(baselineHost).every(Boolean);
+      baselineHost.startedMarkerVerified && baselineHost.checkoutWriteDenied && baselineHost.protectedInputsUnchanged &&
+      baselineHost.preparedTreeUnchanged && baselineHost.missionWorkspaceVerified && baselineHost.doctorEventLogMatches === true;
     report.cases.baseline = {
       ...baselineEvidence.native, state: baselinePassed ? 'ADMITTED_AND_OBSERVED' : 'UNVERIFIED',
       workload: baselineWorkload, host: baselineHost,
