@@ -74,14 +74,19 @@ try {
     Assert-CrashPath $ReadyPath $true
     Assert-CrashPath $Workspace $false $true
     $caseRoot = [IO.Path]::GetDirectoryName($Workspace)
+    $privateRoot = [IO.Path]::Combine($caseRoot, 'private')
+    $jobEmptyPath = [IO.Path]::Combine($privateRoot, 'job-empty.txt')
+    $releaseVerifiedPath = [IO.Path]::Combine($privateRoot, 'release-verified.txt')
     $stageRoot = [IO.Path]::GetDirectoryName($caseRoot)
     if (![string]::Equals([IO.Path]::GetFileName($Workspace), 'workspace', [StringComparison]::OrdinalIgnoreCase) -or
         ![string]::Equals([IO.Path]::GetFileName($caseRoot), 'crash', [StringComparison]::OrdinalIgnoreCase) -or
         [IO.Path]::GetFileName($stageRoot) -cnotmatch '^\.setup-[0-9a-f]{32}$' -or
-        ![string]::Equals([IO.Path]::Combine($caseRoot, 'private', 'ready.json'), $ReadyPath,
+        ![string]::Equals([IO.Path]::Combine($privateRoot, 'ready.json'), $ReadyPath,
             [StringComparison]::OrdinalIgnoreCase)) {
         throw 'CRASH_READY_SCOPE_INVALID'
     }
+    Assert-CrashPath $jobEmptyPath $true
+    Assert-CrashPath $releaseVerifiedPath $true
     if (![string]::Equals([IO.Path]::Combine($stageRoot, 'bin', 'CLU-E-WfpPairedDiagnostic.exe'),
             $SupervisorPath, [StringComparison]::OrdinalIgnoreCase) -or
         ![string]::Equals([IO.Path]::Combine($stageRoot, 'fixture', 'WfpPairedFixture.exe'),
@@ -89,7 +94,7 @@ try {
         throw 'CRASH_IMAGE_SCOPE_INVALID'
     }
 
-    if ($null -eq ('Clue.Diagnostics.WfpPairedCrashWatch' -as [type])) {
+    if ($null -eq ('Clue.Diagnostics.WfpGuardianCrashWatch' -as [type])) {
         Add-Type -TypeDefinition @'
 using System;
 using System.Diagnostics;
@@ -101,7 +106,7 @@ using System.Threading;
 
 namespace Clue.Diagnostics
 {
-    public sealed class WfpPairedCrashWatch : IDisposable
+    public sealed class WfpGuardianCrashWatch : IDisposable
     {
         private const uint QueryLimitedInformation = 0x1000;
         private const uint Synchronize = 0x100000;
@@ -112,7 +117,7 @@ namespace Clue.Diagnostics
         private const uint SublayerNotFound = 0x80320007;
         private IntPtr supervisor;
 
-        public WfpPairedCrashWatch(int processId, string image)
+        public WfpGuardianCrashWatch(int processId, string image)
         {
             supervisor = OpenExact(processId, image, QueryLimitedInformation | Synchronize | Terminate);
         }
@@ -125,8 +130,12 @@ namespace Clue.Diagnostics
             public bool terminationRequested;
             public Preflight preflight = new Preflight();
             public bool supervisorExited;
+            public bool guardianExited;
             public bool fixtureTreeExited;
             public bool filtersRemoved;
+            public string jobEmptyMarkerState = "NOT_OBSERVED";
+            public bool orderedObservationVerified;
+            public bool releaseAcknowledgementWritten;
             public string observedOrdering = "NOT_OBSERVED";
             public int samples;
             public string error;
@@ -135,18 +144,22 @@ namespace Clue.Diagnostics
         public sealed class Preflight
         {
             public bool supervisorLive;
+            public bool guardianLive;
             public int liveFixtureProcesses;
             public int liveFilters;
             public bool sublayerPresent;
         }
 
-        public Evidence Observe(int[] fixturePids, string fixtureImage, ulong[] filterIds, Guid sublayerKey)
+        public Evidence Observe(int guardianPid, string guardianImage, int[] fixturePids, string fixtureImage,
+            ulong[] filterIds, Guid sublayerKey, string jobEmptyPath, string releaseVerifiedPath)
         {
             var evidence = new Evidence();
             var fixtures = new IntPtr[3];
+            IntPtr guardian = IntPtr.Zero;
             IntPtr engine = IntPtr.Zero;
             try
             {
+                guardian = OpenExact(guardianPid, guardianImage, QueryLimitedInformation | Synchronize);
                 for (int index = 0; index < fixtures.Length; index++)
                     fixtures[index] = OpenExact(fixturePids[index], fixtureImage, QueryLimitedInformation | Synchronize);
 
@@ -161,8 +174,15 @@ namespace Clue.Diagnostics
                 evidence.preflight.sublayerPresent = initial.SublayerPresent;
                 evidence.preflight.liveFixtureProcesses = CountLive(fixtures);
                 evidence.preflight.supervisorLive = SupervisorLive;
+                evidence.preflight.guardianLive = IsLive(guardian);
                 if (!initial.AllPresent || evidence.preflight.liveFixtureProcesses != fixtures.Length ||
-                    !evidence.preflight.supervisorLive) return evidence;
+                    !evidence.preflight.supervisorLive || !evidence.preflight.guardianLive) return evidence;
+                evidence.jobEmptyMarkerState = ReadMarker(jobEmptyPath, "EMPTY");
+                if (evidence.jobEmptyMarkerState != "MISSING" || ReadMarker(releaseVerifiedPath, "VERIFIED") != "MISSING")
+                {
+                    evidence.state = "GUARDIAN_MARKERS_NOT_FRESH";
+                    return evidence;
+                }
 
                 // This is the retained handle to the exact freshly spawned diagnostic supervisor.
                 // The observer owns only process handles. It never duplicates the kill-on-close job handle.
@@ -173,40 +193,54 @@ namespace Clue.Diagnostics
                 }
                 evidence.terminationRequested = true;
 
-                bool treeExitBeforeFilterRemoval = false;
                 bool filterLossBeforeTreeExit = false;
+                bool filterLossBeforeAck = false;
                 var elapsed = Stopwatch.StartNew();
                 do
                 {
+                    evidence.supervisorExited = !SupervisorLive;
+                    bool guardianLiveBefore = IsLive(guardian);
+                    if (evidence.jobEmptyMarkerState == "MISSING")
+                        evidence.jobEmptyMarkerState = ReadMarker(jobEmptyPath, "EMPTY");
                     int liveBefore = CountLive(fixtures);
                     FilterState filters = ReadFilters(engine, filterIds, sublayerKey);
                     int liveAfter = CountLive(fixtures);
                     evidence.samples++;
-                    evidence.supervisorExited = !SupervisorLive;
+                    evidence.guardianExited = !IsLive(guardian);
                     evidence.fixtureTreeExited = liveAfter == 0;
                     evidence.filtersRemoved = filters.AllAbsent;
 
-                    // Samples bracket the WFP reads. If one side has already changed,
-                    // a later sample can establish ordering only when the other side has not.
-                    if (liveBefore == 0 && filters.AllPresent) treeExitBeforeFilterRemoval = true;
+                    // The guardian's whole-job marker supplements independent checks of all tracked
+                    // fixture handles and exact WFP policy before the observer authorizes release.
                     if (!filters.AllPresent && liveAfter > 0) filterLossBeforeTreeExit = true;
-                    evidence.observedOrdering = treeExitBeforeFilterRemoval && filterLossBeforeTreeExit
-                        ? "OBSERVATION_CONFLICT"
-                        : treeExitBeforeFilterRemoval ? "TREE_EXIT_BEFORE_FILTER_REMOVAL_OBSERVED"
-                        : filterLossBeforeTreeExit ? "FILTER_LOSS_BEFORE_TREE_EXIT_OBSERVED" : "UNRESOLVED";
+                    if (!filters.AllPresent && !evidence.releaseAcknowledgementWritten) filterLossBeforeAck = true;
+                    if (!evidence.releaseAcknowledgementWritten && !filterLossBeforeAck && !filterLossBeforeTreeExit &&
+                        evidence.supervisorExited && guardianLiveBefore && !evidence.guardianExited &&
+                        evidence.jobEmptyMarkerState == "VERIFIED" && liveBefore == 0 && filters.AllPresent)
+                    {
+                        evidence.orderedObservationVerified = true;
+                        WriteReleaseAcknowledgement(releaseVerifiedPath);
+                        evidence.releaseAcknowledgementWritten = true;
+                    }
+                    evidence.observedOrdering = filterLossBeforeTreeExit ? "FILTER_LOSS_BEFORE_TREE_EXIT_OBSERVED"
+                        : evidence.orderedObservationVerified ? "JOB_EMPTY_BEFORE_FILTER_REMOVAL_OBSERVED" : "UNRESOLVED";
 
-                    if (evidence.supervisorExited && evidence.fixtureTreeExited && evidence.filtersRemoved) break;
+                    if (evidence.supervisorExited && evidence.guardianExited && evidence.fixtureTreeExited && evidence.filtersRemoved) break;
                     Thread.Sleep(2);
-                } while (elapsed.ElapsedMilliseconds < 6000);
+                } while (elapsed.ElapsedMilliseconds < 9000);
 
-                if (!evidence.supervisorExited || !evidence.fixtureTreeExited || !evidence.filtersRemoved)
-                    evidence.state = "CRASH_CLEANUP_INCOMPLETE";
-                else if (treeExitBeforeFilterRemoval && !filterLossBeforeTreeExit)
-                    evidence.state = "CRASH_CLEANUP_ORDER_OBSERVED";
-                else if (filterLossBeforeTreeExit)
+                if (filterLossBeforeTreeExit)
                     evidence.state = "CRASH_ORDER_UNSAFE_OR_CONFLICTING";
+                else if (!evidence.supervisorExited || !evidence.guardianExited || !evidence.fixtureTreeExited || !evidence.filtersRemoved)
+                    evidence.state = "GUARDIAN_CLEANUP_INCOMPLETE";
+                else if (evidence.orderedObservationVerified && evidence.releaseAcknowledgementWritten && !filterLossBeforeAck)
+                    evidence.state = "GUARDIAN_CLEANUP_ORDER_OBSERVED";
+                else if (evidence.jobEmptyMarkerState == "MISSING")
+                    evidence.state = "GUARDIAN_JOB_EMPTY_MARKER_MISSING";
+                else if (evidence.jobEmptyMarkerState != "VERIFIED")
+                    evidence.state = "GUARDIAN_JOB_EMPTY_MARKER_UNVERIFIED";
                 else
-                    evidence.state = "CRASH_CLEANUP_ORDER_UNRESOLVED";
+                    evidence.state = "GUARDIAN_CLEANUP_ORDER_UNRESOLVED";
             }
             catch (Exception failure)
             {
@@ -217,9 +251,44 @@ namespace Clue.Diagnostics
             finally
             {
                 if (engine != IntPtr.Zero) FwpmEngineClose0(engine);
+                if (guardian != IntPtr.Zero) CloseHandle(guardian);
                 foreach (IntPtr process in fixtures) if (process != IntPtr.Zero) CloseHandle(process);
             }
             return evidence;
+        }
+
+        private static string ReadMarker(string path, string expected)
+        {
+            try
+            {
+                FileAttributes attributes = File.GetAttributes(path);
+                if ((attributes & (FileAttributes.Directory | FileAttributes.ReparsePoint)) != 0) return "INVALID";
+                using (var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
+                {
+                    if (stream.Length != expected.Length) return "INVALID";
+                    foreach (char character in expected)
+                        if (stream.ReadByte() != character) return "INVALID";
+                    return "VERIFIED";
+                }
+            }
+            catch (FileNotFoundException) { return "MISSING"; }
+            catch (IOException) { return "UNAVAILABLE"; }
+            catch (UnauthorizedAccessException) { return "UNAVAILABLE"; }
+        }
+
+        private static void WriteReleaseAcknowledgement(string path)
+        {
+            string temporary = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+            try
+            {
+                using (var stream = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                {
+                    byte[] bytes = Encoding.ASCII.GetBytes("VERIFIED");
+                    stream.Write(bytes, 0, bytes.Length);
+                }
+                File.Move(temporary, path);
+            }
+            finally { File.Delete(temporary); }
         }
 
         private static int CountLive(IntPtr[] processes)
@@ -331,7 +400,7 @@ namespace Clue.Diagnostics
     }
 
     $failure = 'CRASH_SUPERVISOR_IDENTITY_UNVERIFIED'
-    $watch = [Clue.Diagnostics.WfpPairedCrashWatch]::new($SupervisorPid, $SupervisorPath)
+    $watch = [Clue.Diagnostics.WfpGuardianCrashWatch]::new($SupervisorPid, $SupervisorPath)
     $failure = 'CRASH_READY_NOT_OBSERVED'
     $clock = [Diagnostics.Stopwatch]::StartNew()
     $ready = $null
@@ -343,9 +412,12 @@ namespace Clue.Diagnostics
     if ($null -eq $ready) { throw $failure }
 
     $failure = 'CRASH_READY_INVALID'
-    if ($ready -isnot [Collections.IDictionary] -or $ready.Count -ne 4 -or
+    if ($ready -isnot [Collections.IDictionary] -or $ready.Count -ne 5 -or
         ($ready['supervisorPid'] -isnot [int] -and $ready['supervisorPid'] -isnot [long]) -or
         $ready['supervisorPid'] -ne $SupervisorPid -or
+        ($ready['guardianPid'] -isnot [int] -and $ready['guardianPid'] -isnot [long]) -or
+        $ready['guardianPid'] -lt 1 -or $ready['guardianPid'] -gt [int]::MaxValue -or
+        $ready['guardianPid'] -eq $SupervisorPid -or
         $ready['fixturePids'] -isnot [array] -or $ready['fixturePids'].Count -ne 3 -or
         $ready['filterIds'] -isnot [array] -or $ready['filterIds'].Count -ne 6 -or
         $ready['sublayerKey'] -isnot [string]) { throw $failure }
@@ -354,7 +426,8 @@ namespace Clue.Diagnostics
     $fixturePids = foreach ($fixtureProcessId in $ready['fixturePids']) {
         if (($fixtureProcessId -isnot [int] -and $fixtureProcessId -isnot [long]) -or
             $fixtureProcessId -lt 1 -or $fixtureProcessId -gt [int]::MaxValue -or
-            $fixtureProcessId -eq $SupervisorPid -or !$uniquePids.Add([int] $fixtureProcessId)) { throw $failure }
+            $fixtureProcessId -eq $SupervisorPid -or $fixtureProcessId -eq $ready['guardianPid'] -or
+            !$uniquePids.Add([int] $fixtureProcessId)) { throw $failure }
         [int] $fixtureProcessId
     }
 
@@ -374,7 +447,8 @@ namespace Clue.Diagnostics
     }
 
     $failure = 'CRASH_OBSERVER_INVOCATION_FAILED'
-    $result = $watch.Observe([int[]] $fixturePids, $FixturePath, [uint64[]] $filterIds, $sublayer)
+    $result = $watch.Observe([int] $ready['guardianPid'], $SupervisorPath, [int[]] $fixturePids,
+        $FixturePath, [uint64[]] $filterIds, $sublayer, $jobEmptyPath, $releaseVerifiedPath)
     $escapeMarkers = [ordered]@{ parent = $null; child = $null; grandchild = $null }
     foreach ($role in @('parent', 'child', 'grandchild')) {
         $marker = if ($role -eq 'parent') { 'crash-escape.txt' } else { 'crash-' + $role + '-escape.txt' }
@@ -390,8 +464,12 @@ namespace Clue.Diagnostics
         terminationRequested = $result.terminationRequested
         preflight = $result.preflight
         supervisorExited = $result.supervisorExited
+        guardianExited = $result.guardianExited
         fixtureTreeExited = $result.fixtureTreeExited
         filtersRemoved = $result.filtersRemoved
+        jobEmptyMarkerState = $result.jobEmptyMarkerState
+        orderedObservationVerified = $result.orderedObservationVerified
+        releaseAcknowledgementWritten = $result.releaseAcknowledgementWritten
         observedOrdering = $result.observedOrdering
         samples = $result.samples
         error = $result.error
@@ -404,8 +482,12 @@ namespace Clue.Diagnostics
         terminationRequested = $false
         preflight = $null
         supervisorExited = $null
+        guardianExited = $null
         fixtureTreeExited = $null
         filtersRemoved = $null
+        jobEmptyMarkerState = 'NOT_OBSERVED'
+        orderedObservationVerified = $false
+        releaseAcknowledgementWritten = $false
         observedOrdering = 'NOT_OBSERVED'
         samples = 0
         error = $(if ($_.Exception.Message -cmatch '^CRASH_[A-Z0-9_]{1,90}$') { $_.Exception.Message })

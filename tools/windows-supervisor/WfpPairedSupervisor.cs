@@ -3,9 +3,11 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
+using System.Reflection;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
+using System.Threading;
 using System.Web.Script.Serialization;
 
 // This separate entry point only runs the two fixed diagnostic modes in its compiled-in staging tree.
@@ -13,8 +15,10 @@ internal sealed class WfpPairedSupervisor
 {
     private const int AccessDenied = 10013;
     private const int DeadlineMs = 25000;
+    private const int AcknowledgementMs = 6000;
     private static readonly string[] CrashRoles = { "crash", "crash-child", "crash-grandchild" };
     private readonly string mode, root, workspace, privateRoot, fixture;
+    private readonly Process supervisor;
     private readonly JavaScriptSerializer json = new JavaScriptSerializer();
     private readonly Dictionary<string, int[]> phases = new Dictionary<string, int[]> {
         { "before", null }, { "during", null }, { "after", null },
@@ -27,11 +31,13 @@ internal sealed class WfpPairedSupervisor
     private string filteredStartedAt, filteredFinishedAt, error;
     private int? engineExitCode;
     private bool identityVerified, removalVerified, jobEmpty, crashReady, pairedComplete;
+    private bool supervisorLossObserved, observerAcknowledged;
     private int step;
 
-    private WfpPairedSupervisor(string mode)
+    private WfpPairedSupervisor(string mode, Process supervisor = null)
     {
         this.mode = mode;
+        this.supervisor = supervisor;
         string stage = Protocol.CanonicalPath(MxcPin.WfpDiagnosticStage, true);
         root = Protocol.CanonicalPath(Path.Combine(stage, mode), true);
         workspace = Protocol.CanonicalPath(Path.Combine(root, "workspace"), true);
@@ -41,12 +47,52 @@ internal sealed class WfpPairedSupervisor
 
     private static int Main(string[] args)
     {
-        if (args.Length != 1 || (args[0] != "paired" && args[0] != "crash")) return 125;
-        try { return new WfpPairedSupervisor(args[0]).Run(); }
+        try
+        {
+            if (args.Length == 1 && args[0] == "paired") return new WfpPairedSupervisor("paired").Run();
+            if (args.Length == 1 && args[0] == "crash") return StartGuardian();
+            int pid;
+            if (args.Length != 2 || args[0] != "guardian" ||
+                !Int32.TryParse(args[1], NumberStyles.None, CultureInfo.InvariantCulture, out pid) || pid < 1)
+                return 125;
+            using (var owner = Process.GetProcessById(pid))
+            {
+                // Opening the handle pins this exact supervisor across the entire run.
+                if (owner.Handle == IntPtr.Zero || owner.HasExited ||
+                    !String.Equals(Protocol.CanonicalPath(owner.MainModule.FileName, false), DiagnosticImage(),
+                        StringComparison.OrdinalIgnoreCase))
+                    return 125;
+                return new WfpPairedSupervisor("crash", owner).Run();
+            }
+        }
         catch (Exception)
         {
-            Console.Error.WriteLine("[CLU-E 05N3] CONTROLLER_STARTUP_REFUSED");
+            Console.Error.WriteLine("[CLU-E 05N4] CONTROLLER_STARTUP_REFUSED");
             return 125;
+        }
+    }
+
+    private static string DiagnosticImage()
+    {
+        string expected = Protocol.CanonicalPath(Path.Combine(MxcPin.WfpDiagnosticStage,
+            "bin", "CLU-E-WfpPairedDiagnostic.exe"), false);
+        if (!String.Equals(Protocol.CanonicalPath(Assembly.GetExecutingAssembly().Location, false), expected,
+            StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException("DIAGNOSTIC_IMAGE_LOCATION_INVALID");
+        return expected;
+    }
+
+    private static int StartGuardian()
+    {
+        using (var self = Process.GetCurrentProcess())
+        using (var guardian = Process.Start(new ProcessStartInfo {
+            FileName = DiagnosticImage(),
+            Arguments = "guardian " + self.Id.ToString(CultureInfo.InvariantCulture),
+            WorkingDirectory = MxcPin.WfpDiagnosticStage,
+            UseShellExecute = false,
+        }))
+        {
+            if (guardian == null || !guardian.WaitForExit(DeadlineMs + AcknowledgementMs + 4000)) return 124;
+            return guardian.ExitCode;
         }
     }
 
@@ -84,6 +130,23 @@ internal sealed class WfpPairedSupervisor
                 }
             }
         }
+        catch (SupervisorLostException)
+        {
+            state = "GUARDIAN_JOB_CLEANUP_UNVERIFIED";
+            if (jobEmpty && crashReady && lease != null)
+            {
+                try
+                {
+                    WriteNew(Path.Combine(privateRoot, "job-empty.txt"), "EMPTY");
+                    observerAcknowledged = WaitForAcknowledgement();
+                    removalVerified = lease.ReleaseAndVerify();
+                    state = !removalVerified ? "GUARDIAN_FILTER_REMOVAL_UNVERIFIED" :
+                        observerAcknowledged ? "GUARDIAN_JOB_EMPTY_RELEASE_VERIFIED" : "GUARDIAN_OBSERVER_ACK_MISSING";
+                    if (observerAcknowledged && removalVerified) result = 0;
+                }
+                catch (Exception) { error = "GUARDIAN_ORDERED_RELEASE_ERROR"; }
+            }
+        }
         catch (Exception failure)
         {
             error = Regex.IsMatch(failure.Message, @"^[A-Z][A-Z0-9_]{0,75}(?:_0x[0-9A-F]{8})?$")
@@ -103,6 +166,7 @@ internal sealed class WfpPairedSupervisor
             WriteNew(Path.Combine(privateRoot, "result.json"), json.Serialize(new {
                 state, error, engineExitCode, phases, filteredStartedAt, filteredFinishedAt, dropEvidence,
                 identityVerified, independentRemovalVerified = removalVerified, jobEmpty,
+                supervisorLossObserved, observerAcknowledged,
             }));
         }
         return result;
@@ -178,6 +242,13 @@ internal sealed class WfpPairedSupervisor
 
     private void ObserveCrash(IntPtr job)
     {
+        if (supervisor.HasExited)
+        {
+            supervisorLossObserved = true;
+            // NativeJob catches this signal, terminates the entire job and calls its
+            // empty-job callback only after native accounting reports zero processes.
+            throw new SupervisorLostException();
+        }
         if (crashReady) return;
         var pids = Array.ConvertAll(CrashRoles, ReadPid);
         if (Array.IndexOf(pids, 0) >= 0) return;
@@ -196,15 +267,38 @@ internal sealed class WfpPairedSupervisor
         }
         VerifyIdentity(job);
         identityVerified = true;
-        using (var supervisor = Process.GetCurrentProcess())
+        using (var guardian = Process.GetCurrentProcess())
         {
             WriteNew(Path.Combine(privateRoot, "ready.json"), json.Serialize(new {
-                supervisorPid = supervisor.Id, fixturePids = pids,
+                supervisorPid = supervisor.Id, guardianPid = guardian.Id, fixturePids = pids,
                 filterIds = FilterIdStrings(), sublayerKey = lease.SublayerKey.ToString("D"),
             }));
         }
         crashReady = true;
     }
+
+    private bool WaitForAcknowledgement()
+    {
+        string path = Path.Combine(privateRoot, "release-verified.txt");
+        var clock = Stopwatch.StartNew();
+        while (clock.ElapsedMilliseconds < AcknowledgementMs)
+        {
+            if (File.Exists(path))
+            {
+                using (var file = new FileStream(Protocol.CanonicalPath(path, false), FileMode.Open, FileAccess.Read, FileShare.Read))
+                {
+                    const string marker = "VERIFIED";
+                    if (file.Length != marker.Length) return false;
+                    foreach (char expected in marker) if (file.ReadByte() != expected) return false;
+                    return true;
+                }
+            }
+            Thread.Sleep(20);
+        }
+        return false;
+    }
+
+    private sealed class SupervisorLostException : Exception { }
 
     private void Install()
     {

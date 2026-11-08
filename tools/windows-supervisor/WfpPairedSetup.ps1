@@ -17,8 +17,8 @@ function Test-WfpNativeNumber($Value) {
     return ($Value -is [int] -or $Value -is [long]) -and $Value -ge 0 -and $Value -le [int]::MaxValue
 }
 
-function Get-WfpPairedBindAttribution([System.Collections.IDictionary] $Paired) {
-    $summary = [ordered]@{ state = 'PAIRED_BIND_CAUSALITY_UNPROVEN'; security = $null; bindCases = $null }
+function Get-WfpPairedBindAttribution([System.Collections.IDictionary] $Paired, $SystemAudit) {
+    $summary = [ordered]@{ state = 'PAIRED_BIND_CAUSALITY_UNPROVEN'; systemAudit = $SystemAudit; security = $null; bindCases = $null }
     if ($Paired.state -cne 'PAIRED_BIND_CAUSALITY_OBSERVED') { return $summary }
 
     $summary.state = 'BIND_DENIED_ATTRIBUTION_UNPROVEN'
@@ -63,6 +63,14 @@ function Get-WfpPairedBindAttribution([System.Collections.IDictionary] $Paired) 
 }
 
 function Invoke-WfpPairedSetup([string] $ControllerPath, [string] $Stage, [string] $FixturePath) {
+    $systemAudit = [ordered]@{ state = 'SYSTEM_POLICY_UNAVAILABLE'; systemFailureEnabled = $null }
+    try {
+        $auditReader = Join-Path $PSScriptRoot 'WfpBindAuditState.ps1'
+        Assert-NoReparsePath $auditReader
+        . $auditReader
+        $systemAudit = Get-WfpBindAuditState
+    } catch { }
+
     $paired = [ordered]@{
         state = 'PAIRED_CONTROLLER_UNAVAILABLE'; controllerState = $null; controllerError = $null; exitCode = $null; engineExitCode = $null
         identityVerified = $false; independentRemovalVerified = $false; jobEmpty = $false
@@ -104,6 +112,7 @@ function Invoke-WfpPairedSetup([string] $ControllerPath, [string] $Stage, [strin
 
     $crash = [ordered]@{ state = 'CRASH_CONTROLLER_UNAVAILABLE'; controllerState = $null; controllerError = $null; controllerExitCode = $null }
     $process = $null
+    $guardianSettled = $true
     try {
         $observer = Join-Path $PSScriptRoot 'WfpPairedCrash.ps1'
         Assert-NoReparsePath $observer
@@ -116,6 +125,7 @@ function Invoke-WfpPairedSetup([string] $ControllerPath, [string] $Stage, [strin
         $start.ArgumentList.Add('crash')
         $clock = [Diagnostics.Stopwatch]::StartNew()
         $process = [Diagnostics.Process]::Start($start)
+        $guardianSettled = $false
         $crash.state = 'CRASH_OBSERVER_UNAVAILABLE'
         $readyPath = [IO.Path]::Combine($Stage, 'crash', 'private', 'ready.json')
         $workspace = [IO.Path]::Combine($Stage, 'crash', 'workspace')
@@ -131,27 +141,55 @@ function Invoke-WfpPairedSetup([string] $ControllerPath, [string] $Stage, [strin
         if ($null -ne $process) {
             try {
                 $remaining = [Math]::Max(0, 30000 - [int] $clock.ElapsedMilliseconds)
-                if (!$process.WaitForExit($remaining)) {
+                $forced = !$process.WaitForExit($remaining)
+                if ($forced) {
                     $crash['state'] = 'CRASH_CONTROLLER_CLEANUP_UNCONFIRMED'
                     $process.Kill()
                 }
-                if ($process.WaitForExit(2000)) { $crash['controllerExitCode'] = $process.ExitCode }
+                if ($process.WaitForExit(2000)) {
+                    $crash['controllerExitCode'] = $process.ExitCode
+                    $guardianSettled = $crash['guardianExited'] -eq $true -or
+                        (!$forced -and $crash['terminationRequested'] -ne $true -and $process.ExitCode -ne 124)
+                }
             } catch { $crash['state'] = 'CRASH_CONTROLLER_CLEANUP_UNCONFIRMED' }
             finally { $process.Dispose() }
         }
         $crash['controllerState'] = $null
         $crash['controllerError'] = $null
         $crash['engineExitCode'] = $null
+        $crash['guardianJobEmpty'] = $false
+        $crash['guardianSupervisorLossObserved'] = $false
+        $crash['guardianAcknowledgementConsumed'] = $false
+        $crash['guardianRemovalVerified'] = $false
         try {
-            $record = Read-WfpPairedRecord ([IO.Path]::Combine($Stage, 'crash', 'private', 'result.json'))
+            $resultPath = [IO.Path]::Combine($Stage, 'crash', 'private', 'result.json')
+            if (!$guardianSettled) {
+                $finish = [Diagnostics.Stopwatch]::StartNew()
+                while ($finish.ElapsedMilliseconds -lt 8000 -and ![IO.File]::Exists($resultPath)) {
+                    Start-Sleep -Milliseconds 25
+                }
+            }
+            $record = Read-WfpPairedRecord $resultPath
+            $guardianSettled = $true
             $crash['controllerState'] = $record['state']
             if (Test-WfpNativeNumber ($record['engineExitCode'])) { $crash['engineExitCode'] = $record['engineExitCode'] }
+            $crash['guardianJobEmpty'] = $record['jobEmpty'] -is [bool] -and $record['jobEmpty']
+            $crash['guardianSupervisorLossObserved'] = $record['supervisorLossObserved'] -is [bool] -and $record['supervisorLossObserved']
+            $crash['guardianAcknowledgementConsumed'] = $record['observerAcknowledged'] -is [bool] -and $record['observerAcknowledged']
+            $crash['guardianRemovalVerified'] = $record['independentRemovalVerified'] -is [bool] -and $record['independentRemovalVerified']
             if ($record['error'] -is [string] -and $record['error'] -cmatch '^[A-Z0-9_]{1,96}$') {
                 $crash['controllerError'] = $record['error']
             }
         } catch { }
     }
+    if ($crash['state'] -ceq 'GUARDIAN_CLEANUP_ORDER_OBSERVED' -and
+        ($crash['controllerState'] -cne 'GUARDIAN_JOB_EMPTY_RELEASE_VERIFIED' -or
+            !$crash['guardianJobEmpty'] -or !$crash['guardianSupervisorLossObserved'] -or
+            !$crash['guardianAcknowledgementConsumed'] -or !$crash['guardianRemovalVerified'] -or
+            $crash['escapeDetected'] -ne $false)) {
+        $crash['state'] = 'GUARDIAN_FINAL_EVIDENCE_UNVERIFIED'
+    }
     # Read existing audit events after both tests to allow delivery of paired-run records.
-    $attribution = Get-WfpPairedBindAttribution $paired
-    return [ordered]@{ paired = $paired; attribution = $attribution; crash = $crash }
+    $attribution = Get-WfpPairedBindAttribution $paired $systemAudit
+    return [ordered]@{ paired = $paired; attribution = $attribution; crash = $crash; stageCleanupSafe = $guardianSettled }
 }

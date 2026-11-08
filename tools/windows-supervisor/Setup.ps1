@@ -277,6 +277,7 @@ function Get-WfpAttribution([System.Collections.IDictionary] $CanaryReport) {
 }
 
 $stage = $null
+$stageCleanupSafe = $true
 $report = $null
 $mxcHash = $null
 $mxcDownload = [ordered]@{ state = 'NOT_STARTED'; assetBytes = $null }
@@ -428,8 +429,10 @@ $diagnosticPins
         . $reader
 
         $setupStage = 'PAIRED_DIAGNOSTIC_EXECUTION'
-        Write-Host '[3/4] Running paired native binds and independent abrupt-exit observation.'
+        Write-Host '[3/4] Running paired native binds and guardian-supervised abrupt exit.'
+        $stageCleanupSafe = $false
         $experiment = Invoke-WfpPairedSetup $controller $stage $fixture
+        $stageCleanupSafe = $experiment.stageCleanupSafe
         $payload = [ordered]@{
             schemaVersion = 'clue-mxc-supervisor-diagnostic/1'
             checkedAt = [DateTime]::UtcNow.ToString('o')
@@ -443,6 +446,9 @@ $diagnosticPins
             canaryUiMode = 'CONTAINER_SCOPED_WIN32K'
             wfpDiagnostic = $true
             wfpPairedDiagnostic = $true
+            wfpGuardianDiagnostic = $true
+            guardianLossQualified = $false
+            diagnosticStageRetained = !$stageCleanupSafe
             fixtureSha256 = $fixtureHash
             canaryExitCode = $null
             canaryReport = $null
@@ -454,6 +460,7 @@ $diagnosticPins
         Write-Host ('[CLU-E paired binds] ' + $experiment.paired.state)
         Write-Host ('[CLU-E WFP attribution] ' + $experiment.attribution.state)
         Write-Host ('[CLU-E abrupt exit] ' + $experiment.crash.state)
+        if (!$stageCleanupSafe) { Write-Host 'The temporary diagnostic stage was retained because guardian exit is unverified.' }
         Write-Host "[4/4] Diagnostic report: $report"
         exit 0
     }
@@ -528,6 +535,8 @@ $diagnosticPins
                 canaryUiMode = 'CONTAINER_SCOPED_WIN32K'
                 wfpDiagnostic = [bool] ($WfpDiagnostic -or $WfpPairedDiagnostic)
                 wfpPairedDiagnostic = [bool] $WfpPairedDiagnostic
+                wfpGuardianDiagnostic = [bool] $WfpPairedDiagnostic
+                diagnosticStageRetained = !$stageCleanupSafe
                 canaryExitCode = $null
                 canaryReport = $null
                 wfpAttribution = $null
@@ -537,7 +546,7 @@ $diagnosticPins
     }
     exit 1
 } finally {
-    if ($null -ne $stage -and (Test-Path -LiteralPath $stage -PathType Container)) {
+    if ($stageCleanupSafe -and $null -ne $stage -and (Test-Path -LiteralPath $stage -PathType Container)) {
         Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
