@@ -207,7 +207,7 @@ public static class ClueGovernedWfpOperator
         Assert-Image $engine $EngineSha256 134217728 -Microsoft
         $failureExitCode = 45
         $sourcePins = [ordered]@{
-            'ProductionProofSession.cs' = '70bb11e151e7424e72b2b0d20e4f19e164199e2cfe8ccd9b071caf82963e5f1c'
+            'ProductionProofSession.cs' = 'c5dac20e25bb2bb90583c796328b2aea1164ac38a1017d4eaba66c94562a2a6e'
             'ProductionProofRequest.cs' = '22bc835b89e30d895aaedb4c7ee9d1dfc82264b4b3dc650bc17b7f188e361a99'
             'Supervisor.cs' = 'ca4c34d71bdd0e5b2fde35224e69cb36ef2531b081bf95806eb07e3c12494447'
             'Protocol.cs' = 'a8d30925039ec3307d5472d4cb3ed881ee028e9b96d8274374fa133b3d496abc'

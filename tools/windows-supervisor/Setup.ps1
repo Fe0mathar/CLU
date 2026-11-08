@@ -335,7 +335,7 @@ function Invoke-InstalledGovernedWfpBuild([string] $Stage, [string] $Node, [stri
         $sha = [Security.Cryptography.SHA256]::Create()
         try { $builderDigest = [BitConverter]::ToString($sha.ComputeHash($canonical)).Replace('-', '').ToLowerInvariant() }
         finally { $sha.Dispose() }
-        if ($builderDigest -cne 'd66c02b52f5095f87b5c743e1f4024fe0a2c564655bbcae851289beb6d740acc') { throw 'The governed WFP builder source pin does not match.' }
+        if ($builderDigest -cne 'b13fce23e5b1b4c84785f9c22c0754f994d8331d1e6521c3c57ba9b8897de2c7') { throw 'The governed WFP builder source pin does not match.' }
         Write-Host 'Approve the Windows elevation prompt for the protected supervisor build and WFP guardian.'
         $script:admissionInstallation.buildFailure = 'WFP_BUILD_LAUNCHER_START_FAILED'
         try { $process = Start-Process -FilePath $pwsh -ArgumentList $arguments -Verb RunAs -WindowStyle Hidden -PassThru }
@@ -1016,7 +1016,7 @@ try {
         $setupStage = 'MXC_RELEASE_VERIFICATION'
         $diagnosticSourceRoot = Join-Path $stage 'trusted-source'
         $faultSourceSha256 = [ordered]@{
-            'ProductionProofSession.cs' = '70bb11e151e7424e72b2b0d20e4f19e164199e2cfe8ccd9b071caf82963e5f1c'
+            'ProductionProofSession.cs' = 'c5dac20e25bb2bb90583c796328b2aea1164ac38a1017d4eaba66c94562a2a6e'
             'ProductionProofRequest.cs' = '22bc835b89e30d895aaedb4c7ee9d1dfc82264b4b3dc650bc17b7f188e361a99'
             # Pinned canonical UTF-8/LF sources. See the patch manifest for raw payload hashes.
             'NativeJob.cs' = '11db6d635accb80083b198aa2c78a49fb6b3f7952011946e4fda430e95e2618d'

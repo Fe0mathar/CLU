@@ -11,6 +11,11 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const digest = /^[a-f0-9]{64}$/u;
 const timeoutMs = 30_000;
 const expectedMarker = 'clue-production-admission\n';
+const npmErrorCodes = new Set([
+  'EACCES', 'EPERM', 'ENOENT', 'ENOTDIR', 'ENOSPC', 'EEXIST', 'EINVAL', 'EIO', 'ENAMETOOLONG',
+  'EBUSY', 'ELOOP', 'ENOBUFS', 'ENOTCACHED', 'EINTEGRITY', 'ELIFECYCLE', 'EUSAGE', 'ETIMEDOUT',
+  'ENOEXEC', 'MODULE_NOT_FOUND', 'ERR_MODULE_NOT_FOUND', 'ERR_ACCESS_DENIED', 'ERR_DLOPEN_FAILED',
+]);
 const childScript = [
   "const fs = require('node:fs'); const path = require('node:path');",
   "const [role, workspace] = process.argv.slice(1);",
@@ -74,6 +79,7 @@ function nativeDiagnostics(stderr) {
   const wfp = /^\[CLU-E governed WFP\] ([A-Za-z]{1,24}) ([A-Z0-9_]{1,90})$/mu.exec(stderr);
   const supervisor = /^\[CLU-E supervisor\] (?:REFUSED \(([A-Za-z][A-Za-z0-9]{0,63})\)\. ([A-Z_]{1,40})(?: ([A-Za-z][A-Za-z0-9_]{0,63}(?:\.[A-Za-z][A-Za-z0-9_]{0,63})?))?|(WIN32_ERROR_(-?[0-9]{1,10})) ([A-Z_]{1,40}))$/mu.exec(stderr);
   const production = /^\[CLU-E production proof\] (PRODUCTION_PROOF_[A-Z0-9_]{1,74})$/mu.exec(stderr);
+  const workloadExits = [...stderr.matchAll(/^\[CLU-E supervisor\] WORKLOAD_EXIT_0x([0-9A-F]{8})$/gmu)];
   const wfpFirst = wfp !== null && (supervisor === null || wfp.index < supervisor.index);
   return {
     nativePhase: wfpFirst ? wfp[1] : supervisor?.[2] ?? supervisor?.[6] ?? null,
@@ -82,6 +88,29 @@ function nativeDiagnostics(stderr) {
     nativeException: supervisor?.[1] ?? null,
     nativeSite: supervisor?.[3] ?? null,
     nativeWin32Error: supervisor?.[5] === undefined ? null : Number(supervisor[5]),
+    backendWorkloadExitCode: workloadExits.length === 1 ? Number.parseInt(workloadExits[0][1], 16) : null,
+  };
+}
+
+function npmDiagnostics(stdout, stderr) {
+  const trace = /^\[CLU-E production npm\] (PATH_WALK_COMPATIBILITY|PREFLIGHT_[A-Z0-9_]{1,48})$/mu.exec(stderr);
+  const nodeError = /^Error(?:: ([A-Z][A-Z0-9_]{1,31}):| \[([A-Z][A-Z0-9_]{1,31})\]:)/mu.exec(stderr);
+  const nodeCode = /^ {1,8}code: '([A-Z][A-Z0-9_]{1,31})',?$/mu.exec(stderr);
+  const npmCode = /^npm (?:error|ERR!) code ([A-Z0-9_]{1,32})$/mu.exec(stderr);
+  const code = nodeError?.[1] ?? nodeError?.[2] ?? nodeCode?.[1] ?? npmCode?.[1] ?? null;
+  const syscall = /^(?:npm (?:error|ERR!) syscall (open|lstat|stat|realpath|mkdir|spawn|uv_cwd)| {1,8}syscall: '(open|lstat|stat|realpath|mkdir|spawn|uv_cwd)',?)$/mu.exec(stderr);
+  let errorCategory = null;
+  if (/^'node' is not recognized as an internal or external command,/mu.test(stderr)) {
+    errorCategory = 'COMMAND_NOT_FOUND';
+  } else if (code !== null) {
+    errorCategory = npmErrorCodes.has(code) ? code : /^[0-9]{1,10}$/u.test(code) ? 'CHILD_EXIT' : 'OTHER';
+  }
+  return {
+    trace: trace?.[1] ?? null,
+    errorCategory,
+    syscall: syscall?.[1] ?? syscall?.[2] ?? null,
+    lifecycleHeaderSeen: /^> clue-production-admission@1\.0\.0 typecheck$/mu.test(stdout),
+    commandHeaderSeen: /^> node typecheck\.cjs$/mu.test(stdout),
   };
 }
 
@@ -136,6 +165,7 @@ function run(stage, supervisor, wrapperSha256, engineSha256, report) {
   const home = join(scratch, 'home');
   const requests = join(scratch, 'requests');
   for (const path of [temp, home, requests]) mkdirSync(path);
+  mkdirSync(join(home, 'npm-cache'));
   for (const name of ['user.npmrc', 'global.npmrc']) writeFileSync(join(home, name), '', { flag: 'wx' });
   const env = requestEnvironment(home, temp, systemRoot, search.join(';'));
   const baseline = join(fixture, 'baseline');
@@ -155,7 +185,7 @@ function run(stage, supervisor, wrapperSha256, engineSha256, report) {
     writableRoots: role === 'baseline' ? [baselineWorkspace, temp, home] : [candidateWorkspace, candidate, temp, home],
     env, timeoutMs, denyNetwork: true,
   });
-  function send(value) {
+  function send(value, inspectNpm = false) {
     const dir = mkdtempSync(join(requests, 'request-'));
     const file = join(dir, 'request.json');
     const bytes = JSON.stringify(value);
@@ -165,10 +195,13 @@ function run(stage, supervisor, wrapperSha256, engineSha256, report) {
       env: { SystemRoot: systemRoot, WINDIR: systemRoot, PATH: system32 },
     });
     const wfp = lifecycle(dir);
+    const stdout = result.stdout ?? '';
+    const stderr = result.stderr ?? '';
     return {
       exitCode: result.status, failure: result.error?.code ?? null,
-      ...nativeDiagnostics(result.stderr ?? ''),
-      unchanged: readFileSync(file, 'utf8') === bytes, wfp, stdout: result.stdout ?? '',
+      ...nativeDiagnostics(stderr),
+      ...(inspectNpm ? { npm: npmDiagnostics(stdout, stderr) } : {}),
+      unchanged: readFileSync(file, 'utf8') === bytes, wfp, stdout,
     };
   }
   try {
@@ -190,7 +223,7 @@ function run(stage, supervisor, wrapperSha256, engineSha256, report) {
       const input = role === 'npmTypecheck'
         ? { ...request('candidate'), args: [npm, 'run', 'typecheck'], readOnlyRoots: [...tools, baseline, npmRoot] }
         : request(role);
-      const { stdout, ...evidence } = send(input);
+      const { stdout, ...evidence } = send(input, role === 'npmTypecheck');
       const marker = role === 'npmTypecheck'
         ? observed(join(candidate, 'npm-observed.txt'))
         : stdout.includes('CLU_E_PRODUCTION_ADMISSION_' + role.toUpperCase()) &&

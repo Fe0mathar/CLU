@@ -59,9 +59,36 @@ internal static class ProductionProofSession
         string gate = request.productionGateDirectory;
         string prelude = ReadPrelude();
         string encodedEnvironment = Convert.ToBase64String(Encoding.UTF8.GetBytes(new JavaScriptSerializer().Serialize(request.env)));
+        bool npm = request.productionNpmCli != null;
+        if (npm) Protocol.CanonicalPath(Path.Combine(request.cwd, "package.json"), false);
         const string launch = @"
 runGovernedWfpBindPrelude(process.argv[1]).then(() => {
   const env = JSON.parse(Buffer.from(process.argv[2], 'base64').toString('utf8'));
+  if (productionNpm) {
+    const fs = require('node:fs');
+    const path = require('node:path');
+    const manifest = path.join(process.cwd(), 'package.json');
+    const permitted = ['EACCES', 'EPERM', 'ENOENT'];
+    try {
+      const info = fs.lstatSync(manifest);
+      if (!info.isFile() || info.nlink !== 1) throw new Error('Invalid npm manifest');
+      const fd = fs.openSync(manifest, 'r');
+      try {
+        if (fs.readSync(fd, Buffer.alloc(1), 0, 1, 0) !== 1) throw new Error('Empty npm manifest');
+      } finally { fs.closeSync(fd); }
+      try {
+        if (path.relative(manifest, fs.realpathSync(manifest)) !== '') throw new Error('Aliased npm manifest');
+      } catch (error) {
+        if (error.code !== 'EACCES' && error.code !== 'EPERM') throw error;
+        env.NODE_OPTIONS = '--preserve-symlinks --preserve-symlinks-main';
+        console.error('[CLU-E production npm] PATH_WALK_COMPATIBILITY');
+      }
+    } catch (error) {
+      console.error('[CLU-E production npm] PREFLIGHT_' + (permitted.includes(error.code) ? error.code : 'UNVERIFIED'));
+      process.exitCode = 125;
+      return;
+    }
+  }
   const child = require('node:child_process').spawn(process.execPath, process.argv.slice(3), {
     cwd: process.cwd(), env, shell: false, stdio: 'inherit', windowsHide: true
   });
@@ -71,7 +98,7 @@ runGovernedWfpBindPrelude(process.argv[1]).then(() => {
 ";
         var args = new string[request.args.Length + 5];
         args[0] = "-e";
-        args[1] = prelude + "\n" + launch;
+        args[1] = prelude + "\nconst productionNpm = " + (npm ? "true" : "false") + ";\n" + launch;
         args[2] = "--";
         args[3] = gate;
         args[4] = encodedEnvironment;
