@@ -70,6 +70,21 @@ function lifecycle(requestDir) {
   }
 }
 
+function nativeDiagnostics(stderr) {
+  const wfp = /^\[CLU-E governed WFP\] ([A-Za-z]{1,24}) ([A-Z0-9_]{1,90})$/mu.exec(stderr);
+  const supervisor = /^\[CLU-E supervisor\] (?:REFUSED \(([A-Za-z][A-Za-z0-9]{0,63})\)\. ([A-Z_]{1,40})(?: ([A-Za-z][A-Za-z0-9_]{0,63}(?:\.[A-Za-z][A-Za-z0-9_]{0,63})?))?|(WIN32_ERROR_(-?[0-9]{1,10})) ([A-Z_]{1,40}))$/mu.exec(stderr);
+  const production = /^\[CLU-E production proof\] (PRODUCTION_PROOF_[A-Z0-9_]{1,74})$/mu.exec(stderr);
+  const wfpFirst = wfp !== null && (supervisor === null || wfp.index < supervisor.index);
+  return {
+    nativePhase: wfpFirst ? wfp[1] : supervisor?.[2] ?? supervisor?.[6] ?? null,
+    nativeCode: wfpFirst ? wfp[2] : production?.[1] ?? supervisor?.[4] ?? null,
+    productionSessionCode: production?.[1] ?? null,
+    nativeException: supervisor?.[1] ?? null,
+    nativeSite: supervisor?.[3] ?? null,
+    nativeWin32Error: supervisor?.[5] === undefined ? null : Number(supervisor[5]),
+  };
+}
+
 function requestEnvironment(home, temp, systemRoot, path) {
   return {
     PATH: path, HOME: home, TEMP: temp, TMP: temp, TMPDIR: temp, CI: '1', NO_COLOR: '1',
@@ -149,11 +164,10 @@ function run(stage, supervisor, wrapperSha256, engineSha256, report) {
       cwd: dir, windowsHide: true, encoding: 'utf8', timeout: timeoutMs + 25_000, maxBuffer: 128 * 1024,
       env: { SystemRoot: systemRoot, WINDIR: systemRoot, PATH: system32 },
     });
-    const note = /^(?:\[CLU-E governed WFP\] ([A-Za-z]{1,24}) ([A-Z0-9_]{1,90})|\[CLU-E supervisor\] (?:REFUSED \([A-Za-z]+\)\. |WIN32_ERROR_[0-9]+ )([A-Z_]{1,40}))/mu.exec(result.stderr ?? '');
     const wfp = lifecycle(dir);
     return {
       exitCode: result.status, failure: result.error?.code ?? null,
-      nativePhase: note?.[1] ?? note?.[3] ?? null, nativeCode: note?.[2] ?? null,
+      ...nativeDiagnostics(result.stderr ?? ''),
       unchanged: readFileSync(file, 'utf8') === bytes, wfp, stdout: result.stdout ?? '',
     };
   }

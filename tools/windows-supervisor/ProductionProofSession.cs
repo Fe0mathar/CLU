@@ -220,10 +220,14 @@ internal static partial class WfpIntegratedGuardian
                             new FileInfo(Protocol.CanonicalPath(marker, false)).Length != 5 || File.ReadAllText(marker) != "READY")
                             throw new InvalidDataException("PRODUCTION_PROOF_GUARDIAN_READY_UNVERIFIED");
                         WriteLine(pipe, "READY", client, bfe);
+                        // A completed pipe write does not establish that the client read it.
+                        if (ReadLine(pipe, client, bfe, Stopwatch.StartNew(), 4000) != "ACK")
+                            throw new InvalidDataException("PRODUCTION_PROOF_SESSION_ACK_INVALID");
+                        PublishProductionMarker(RegistrationMarker(run), "ACK");
                     }
                 }
                 catch (Exception) { Console.Error.WriteLine("[CLU-E production proof] registration refused"); }
-                finally { if (pipe.IsConnected) pipe.Disconnect(); }
+                finally { pipe.Disconnect(); }
                 // The run owns its WFP leases. The registration process never terminates it.
                 if (worker != null) using (worker) worker.WaitForExit();
             }
@@ -241,12 +245,24 @@ internal static partial class WfpIntegratedGuardian
                 throw new InvalidDataException("PRODUCTION_PROOF_SESSION_MARKER_INVALID");
             return;
         }
+        PublishProductionMarker(marker, "READY");
+    }
+
+    private static string RegistrationMarker(string run)
+    {
+        if (!ProductionProofSession.ValidRun(run)) throw new InvalidDataException("PRODUCTION_PROOF_RUN_INVALID");
+        string folder = Protocol.CanonicalPath(Path.Combine(ProductionProofSession.InstallRoot, "runs", run), true);
+        return Path.Combine(folder, "registration-confirmed.txt");
+    }
+
+    private static void PublishProductionMarker(string marker, string value)
+    {
         string temporary = marker + "." + Guid.NewGuid().ToString("N") + ".tmp";
         try
         {
             using (var output = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None))
             {
-                byte[] bytes = Encoding.ASCII.GetBytes("READY");
+                byte[] bytes = Encoding.ASCII.GetBytes(value);
                 output.Write(bytes, 0, bytes.Length);
                 output.Flush(true);
             }
@@ -262,16 +278,14 @@ internal static partial class WfpIntegratedGuardian
             PipeDirection.InOut, PipeOptions.Asynchronous, TokenImpersonationLevel.Identification))
         {
             int timeout = ProductionProofSession.RendezvousTimeout;
-            pipe.Connect(timeout);
+            try { pipe.Connect(timeout); }
+            catch (TimeoutException) { throw new InvalidDataException("PRODUCTION_PROOF_SESSION_CONNECT_TIMEOUT"); }
             uint pid;
             if (!ProductionPipeServerPid(pipe.SafePipeHandle, out pid) || pid == 0 || pid > Int32.MaxValue)
                 throw new InvalidDataException("PRODUCTION_PROOF_SESSION_PEER_INVALID");
             using (var peer = OpenBackupPeer((int)pid, image, identity.User, session, true))
             {
-                byte[] bytes = Encoding.ASCII.GetBytes(run + "\n");
-                var write = pipe.BeginWrite(bytes, 0, bytes.Length, null, null);
-                if (!write.AsyncWaitHandle.WaitOne(timeout)) throw new TimeoutException();
-                pipe.EndWrite(write);
+                WriteRegistrationLine(pipe, run, timeout, "PRODUCTION_PROOF_SESSION_REQUEST_TIMEOUT");
                 var reply = new byte[1];
                 var clock = Stopwatch.StartNew();
                 foreach (char expected in "READY\n")
@@ -282,8 +296,30 @@ internal static partial class WfpIntegratedGuardian
                         reply[0] != expected) throw new InvalidDataException("PRODUCTION_PROOF_SESSION_READY_UNVERIFIED");
                 }
                 RequireLive(peer);
+                WriteRegistrationLine(pipe, "ACK", 4000, "PRODUCTION_PROOF_SESSION_ACK_TIMEOUT");
+                string marker = RegistrationMarker(run);
+                clock.Restart();
+                while (!File.Exists(marker) && clock.ElapsedMilliseconds < 4000)
+                {
+                    RequireLive(peer);
+                    System.Threading.Thread.Sleep(20);
+                }
+                if (!File.Exists(marker))
+                    throw new InvalidDataException("PRODUCTION_PROOF_SESSION_ACK_UNVERIFIED");
+                string physical = Protocol.CanonicalPath(marker, false);
+                if (new FileInfo(physical).Length != 3 || File.ReadAllText(physical) != "ACK")
+                    throw new InvalidDataException("PRODUCTION_PROOF_SESSION_ACK_INVALID");
+                RequireLive(peer);
             }
         }
+    }
+
+    private static void WriteRegistrationLine(NamedPipeClientStream pipe, string line, int timeout, string failure)
+    {
+        byte[] bytes = Encoding.ASCII.GetBytes(line + "\n");
+        var write = pipe.BeginWrite(bytes, 0, bytes.Length, null, null);
+        if (!write.AsyncWaitHandle.WaitOne(timeout)) throw new InvalidDataException(failure);
+        pipe.EndWrite(write);
     }
 
     [DllImport("kernel32.dll", EntryPoint = "GetNamedPipeServerProcessId", ExactSpelling = true, SetLastError = true)]

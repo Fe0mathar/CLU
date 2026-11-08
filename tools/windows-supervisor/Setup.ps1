@@ -335,7 +335,7 @@ function Invoke-InstalledGovernedWfpBuild([string] $Stage, [string] $Node, [stri
         $sha = [Security.Cryptography.SHA256]::Create()
         try { $builderDigest = [BitConverter]::ToString($sha.ComputeHash($canonical)).Replace('-', '').ToLowerInvariant() }
         finally { $sha.Dispose() }
-        if ($builderDigest -cne '7eab21075a920c3b4d0df6d7a0cdaccc1ce6f51c970063d2cbc41a60ba4c2d44') { throw 'The governed WFP builder source pin does not match.' }
+        if ($builderDigest -cne 'd66c02b52f5095f87b5c743e1f4024fe0a2c564655bbcae851289beb6d740acc') { throw 'The governed WFP builder source pin does not match.' }
         Write-Host 'Approve the Windows elevation prompt for the protected supervisor build and WFP guardian.'
         $script:admissionInstallation.buildFailure = 'WFP_BUILD_LAUNCHER_START_FAILED'
         try { $process = Start-Process -FilePath $pwsh -ArgumentList $arguments -Verb RunAs -WindowStyle Hidden -PassThru }
@@ -1016,12 +1016,12 @@ try {
         $setupStage = 'MXC_RELEASE_VERIFICATION'
         $diagnosticSourceRoot = Join-Path $stage 'trusted-source'
         $faultSourceSha256 = [ordered]@{
-            'ProductionProofSession.cs' = 'b2592b259d19d662ec339ae1d2929471fedb6f4a571531fedbdb659fd7e9a732'
+            'ProductionProofSession.cs' = '70bb11e151e7424e72b2b0d20e4f19e164199e2cfe8ccd9b071caf82963e5f1c'
             'ProductionProofRequest.cs' = '22bc835b89e30d895aaedb4c7ee9d1dfc82264b4b3dc650bc17b7f188e361a99'
             # Pinned canonical UTF-8/LF sources. See the patch manifest for raw payload hashes.
             'NativeJob.cs' = '11db6d635accb80083b198aa2c78a49fb6b3f7952011946e4fda430e95e2618d'
             'Protocol.cs' = 'a8d30925039ec3307d5472d4cb3ed881ee028e9b96d8274374fa133b3d496abc'
-            'Supervisor.cs' = 'b6f20a9a91820950a98af141ddf84239a67276564a123e069a8d62a5cdd00e37'
+            'Supervisor.cs' = 'ca4c34d71bdd0e5b2fde35224e69cb36ef2531b081bf95806eb07e3c12494447'
             'WfpBfeWatch.cs' = '6fa8d9c9f7865a35783082f11fb210a64f28705b8f63431c016288a34fc5ab4c'
             'WfpBootstrapRun.cs' = '92bfb701d33f672bc3788c3d67a74d0bc7baf96d11f41597989e4c869e74f990'
             'WfpContainerIdentity.cs' = 'adf701f021cba2cf6de73660e8f890ce18fa1de690cbf227059154e41442bb34'

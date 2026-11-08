@@ -132,6 +132,9 @@ internal static class Supervisor
         }
         catch (Exception error)
         {
+            if (phase == "PRODUCTION_SESSION" &&
+                Regex.IsMatch(error.Message, @"\APRODUCTION_PROOF_[A-Z0-9_]{1,72}\z", RegexOptions.CultureInvariant))
+                Console.Error.WriteLine("[CLU-E production proof] " + error.Message);
             Console.Error.WriteLine("[CLU-E supervisor] REFUSED (" + error.GetType().Name + "). " + phase + " " + LocalSite(error));
             return 125;
         }
