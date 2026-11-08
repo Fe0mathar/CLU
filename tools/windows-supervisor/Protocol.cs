@@ -33,6 +33,7 @@ public static class Protocol
 {
     private const int MaxRequestBytes = 1024 * 1024;
     private const int MaxNpmCliBytes = 1024 * 1024;
+    private const int MaxGovernedBootstrapBytes = 16 * 1024;
     private const int MaxReviewedWorkloadBytes = 4096;
     private const int MaxReviewedWorkloadTests = 64;
     private static readonly Regex ReviewedTestPath = new Regex(
@@ -97,10 +98,7 @@ public static class Protocol
         Check(Same(Path.GetFileName(r.command), "node.exe") && InRoots(r.command, r.readOnlyRoots),
             "Only the declared read-only Node executable is allowed.");
         r.args = ReadStrings(fields["args"], 256, 32766);
-        int commandLineLength = Quote(r.command).Length;
-        foreach (var arg in r.args)
-            commandLineLength += 1 + Quote(arg).Length;
-        Check(commandLineLength < 32767, "Command line exceeds the Windows limit.");
+        EnsureCommandLineLength(r);
         r.cwd = LocalPath(AsText(fields["cwd"], 4096), true, false);
         Check(InRoots(r.cwd, r.readOnlyRoots) || InRoots(r.cwd, r.writableRoots),
             "Working directory is outside the declared roots.");
@@ -180,6 +178,14 @@ public static class Protocol
         return output.Append('\\', 2 * slashes).Append('"').ToString();
     }
 
+    private static void EnsureCommandLineLength(Request r)
+    {
+        int commandLineLength = Quote(r.command).Length;
+        foreach (var arg in r.args)
+            commandLineLength += 1 + Quote(arg).Length;
+        Check(commandLineLength < 32767, "Command line exceeds the Windows limit.");
+    }
+
     private static string ProofAdmissionCaseRoot(string requestPath)
     {
         var stage = CanonicalPath(MxcPin.ProofAdmissionStage, true);
@@ -225,14 +231,6 @@ public static class Protocol
             ContainsExact(home, r.writableRoots) && (!writableCheckout || ContainsExact(checkout, r.writableRoots)),
             "Unexpected proof admission roots.");
 
-        Check(r.args.Length == 3 && r.args[0] == "-e" &&
-            r.args[2] == (candidate ? "candidate" : "baseline"), "Unexpected proof admission arguments.");
-        using (var sha = SHA256.Create())
-        {
-            var hash = BitConverter.ToString(sha.ComputeHash(Encoding.UTF8.GetBytes(r.args[1])))
-                .Replace("-", "").ToLowerInvariant();
-            Check(hash == MxcPin.ProofAdmissionScriptSha256, "Proof admission script pin mismatch.");
-        }
         Check(IsSyntheticFile(Path.Combine(trusted, "trusted.txt"), "clue-admission-source-v1\n") &&
             (reviewedWorkload || governedWorkload ||
                 IsSyntheticFile(Path.Combine(checkout, "input.txt"), "clue-admission-checkout-v1\n")) &&
@@ -241,8 +239,9 @@ public static class Protocol
             IsSyntheticFile(Path.Combine(home, "global.npmrc"), ""), "Proof admission fixture inputs do not match.");
         if (reviewedWorkload)
             EnsureReviewedWorkload(checkout, trusted);
+        string npmCli = null;
         if (governedWorkload)
-            EnsureGovernedWorkload(checkout, nodeRoot, candidate);
+            npmCli = EnsureGovernedWorkload(checkout, nodeRoot, candidate);
 
         var cache = CanonicalPath(Path.Combine(home, "npm-cache"), true);
         var interpreter = CanonicalPath(Path.Combine(systemDirectory, "cmd.exe"), false);
@@ -291,6 +290,63 @@ public static class Protocol
             env.Add(pair.Key, pair.Value);
         }
         r.env = env;
+        ReadProofAdmissionCommand(r, checkout, trusted, candidate, governedWorkload, npmCli);
+    }
+
+    private static void ReadProofAdmissionCommand(Request r, string checkout, string trusted, bool candidate,
+        bool governedWorkload, string npmCli)
+    {
+        string side = candidate ? "candidate" : "baseline";
+        Check(r.args.Length == 3, "Unexpected proof admission argument count.");
+        if (r.args[0] == "-e")
+        {
+            Check(r.args[2] == side, "Unexpected proof admission case.");
+            EnsureProofAdmissionScriptPin(Encoding.UTF8.GetBytes(r.args[1]));
+            return;
+        }
+        Check(governedWorkload, "Unexpected proof admission arguments.");
+
+        string operation;
+        if (candidate)
+        {
+            Check(Same(r.args[0], npmCli) && r.args[1] == "run" && r.args[2] == "typecheck",
+                "Unexpected governed candidate arguments.");
+            operation = "broker-typecheck";
+        }
+        else
+        {
+            Check(r.args[1] == "doctor" && r.args[2] == "--deep", "Unexpected governed baseline arguments.");
+            string cli = EnsureWorkloadFile(checkout, "dist/src/cli/index.js");
+            Check(Same(r.args[0], cli), "Unexpected governed baseline command path.");
+            operation = "broker-doctor";
+        }
+
+        string bootstrap = CanonicalPath(Path.Combine(trusted, "governed-bootstrap.cjs"), false);
+        byte[] bytes;
+        using (var stream = new FileStream(bootstrap, FileMode.Open, FileAccess.Read, FileShare.Read))
+        using (var reader = new BinaryReader(stream))
+        {
+            Check(IsSingleLink(stream) && stream.Length > 0 && stream.Length <= MaxGovernedBootstrapBytes,
+                "Invalid governed bootstrap file.");
+            int size = (int)stream.Length;
+            bytes = reader.ReadBytes(size);
+            Check(bytes.Length == size, "Incomplete governed bootstrap file.");
+        }
+        foreach (byte value in bytes)
+            Check((value >= 32 && value <= 126) || value == 9 || value == 10 || value == 13,
+                "Governed bootstrap must contain plain ASCII source.");
+        EnsureProofAdmissionScriptPin(bytes);
+        r.args = new[] { "-e", Encoding.ASCII.GetString(bytes), side, operation };
+        EnsureCommandLineLength(r);
+    }
+
+    private static void EnsureProofAdmissionScriptPin(byte[] bytes)
+    {
+        using (var sha = SHA256.Create())
+        {
+            var hash = BitConverter.ToString(sha.ComputeHash(bytes)).Replace("-", "").ToLowerInvariant();
+            Check(hash == MxcPin.ProofAdmissionScriptSha256, "Proof admission script pin mismatch.");
+        }
     }
 
     private static void EnsureReviewedWorkload(string checkout, string trusted)
@@ -322,14 +378,15 @@ public static class Protocol
         EnsureWorkloadFile(checkout, "ui/clue-dashboard/app.js");
     }
 
-    private static void EnsureWorkloadFile(string checkout, string relativePath)
+    private static string EnsureWorkloadFile(string checkout, string relativePath)
     {
         var path = CanonicalPath(Path.Combine(checkout, relativePath.Replace('/', '\\')), false);
         using (var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
             Check(IsSingleLink(stream), "Workload input must be a single-link file.");
+        return path;
     }
 
-    private static void EnsureGovernedWorkload(string checkout, string nodeRoot, bool candidate)
+    private static string EnsureGovernedWorkload(string checkout, string nodeRoot, bool candidate)
     {
         EnsureWorkloadFile(checkout, "package.json");
         EnsureWorkloadFile(checkout, "package-lock.json");
@@ -346,7 +403,9 @@ public static class Protocol
                 var hash = BitConverter.ToString(sha.ComputeHash(stream)).Replace("-", "").ToLowerInvariant();
                 Check(hash == MxcPin.ProofAdmissionNpmCliSha256, "Governed workload npm CLI pin mismatch.");
             }
+            return npmCli;
         }
+        return null;
     }
 
     private static void EnsureQualificationFixture(Request r)

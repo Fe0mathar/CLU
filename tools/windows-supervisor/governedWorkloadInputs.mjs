@@ -233,8 +233,12 @@ export function inspectGovernedBuild(root) {
   const cli = records.get(cliPath);
   const addon = records.get(addonPath);
   if (!cli?.size || !addon?.size) throw new Error('GOVERNED_BUILD_OUTPUT_REQUIRED');
+  const ordered = [...records].sort(([left], [right]) => left < right ? -1 : left === right ? 0 : 1);
+  const buildInfoPath = 'dist/.tsbuildinfo';
   return {
-    treeSha256: sha256(JSON.stringify([...records].sort(([left], [right]) => left < right ? -1 : left === right ? 0 : 1))),
+    treeSha256: sha256(JSON.stringify(ordered)),
+    protectedTreeSha256: sha256(JSON.stringify(ordered.filter(([path]) => path !== buildInfoPath))),
+    buildInfoSha256: records.get(buildInfoPath)?.sha256 ?? null,
     fileCount: records.size, totalBytes: total, cliSha256: cli.sha256, nativeAddonSha256: addon.sha256,
   };
 }

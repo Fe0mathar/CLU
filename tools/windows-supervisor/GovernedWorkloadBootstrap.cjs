@@ -6,6 +6,9 @@ const os = require('node:os');
 const { spawnSync } = require('node:child_process');
 
 const side = process.argv[1];
+const requestedOperation = process.argv[2];
+const brokerOperation = (side === 'candidate' && requestedOperation === 'broker-typecheck') ||
+  (side === 'baseline' && requestedOperation === 'broker-doctor') ? requestedOperation : undefined;
 const cwd = process.cwd();
 const root = path.dirname(cwd);
 const admission = path.dirname(root);
@@ -33,6 +36,7 @@ const result = {
   stages: Object.fromEntries(stageNames.map((name) => [name, receipt('NOT_RUN', 'NONE', null)])),
   doctorDeepVerified: false,
   doctorEvidence: null,
+  ...(brokerOperation ? { brokerOperation } : {}),
 };
 
 function receipt(state, code, exitCode) {
@@ -77,7 +81,7 @@ function readDenied(file) {
 
 function checkoutWrite() {
   try {
-    writeMarker(path.join(cwd, 'checkout-write.txt'));
+    writeMarker(path.join(cwd, brokerOperation ? 'broker-checkout-write.txt' : 'checkout-write.txt'));
   } catch (error) {
     return side === 'baseline' && ['EACCES', 'EPERM', 'EROFS'].includes(error.code);
   }
@@ -132,8 +136,10 @@ function checkedManifest() {
   if (!['package.json', 'package-lock.json', 'tsconfig.json', 'targets/clu/benchmark/master-benchmark.md']
     .every((name) => exactFile(path.join(cwd, name)))) return null;
   if (!['.npmrc', 'npm-shrinkwrap.json'].every((name) => absent(path.join(cwd, name)))) return null;
+  const generated = ['dist', 'node_modules'].map((name) => path.join(cwd, name));
+  if (brokerOperation && !generated.every(exactDirectory)) return null;
   if (side === 'baseline') return packagePath;
-  if (!['dist', 'node_modules'].every((name) => absent(path.join(cwd, name))) ||
+  if ((!brokerOperation && !generated.every(absent)) ||
       fs.statSync(packagePath).size > 128 * 1024) return null;
   const { scripts } = JSON.parse(fs.readFileSync(packagePath, 'utf8'));
   const blockedScripts = ['preinstall', 'install', 'postinstall', 'prepublish', 'preprepare', 'prepare', 'postprepare',
@@ -254,10 +260,10 @@ function readDoctorEvidence(stdout) {
 }
 
 function run() {
-  if (process.argv.length !== 2 || result.side === 'unverified' ||
+  if (process.argv.length !== (brokerOperation ? 3 : 2) || result.side === 'unverified' ||
       path.basename(cwd) !== 'checkout' || path.basename(root) !== side || path.basename(admission) !== 'admission') return;
   if (!exactDirectory(workspace)) return;
-  writeMarker(path.join(workspace, 'started.txt'));
+  writeMarker(path.join(workspace, brokerOperation ? 'broker-started.txt' : 'started.txt'));
   result.hostEnvironmentAbsent = hostEnvironmentAbsent();
   result.checkoutWriteVerified = checkoutWrite();
   result.privateReadDenied = readDenied(path.join(root, 'private', 'sealed.txt')) &&
@@ -279,6 +285,9 @@ function run() {
   const npm = path.join(path.dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js');
   const addon = path.join(cwd, 'node_modules', 'better-sqlite3', 'build', 'Release', 'better_sqlite3.node');
   if (!exactFile(side === 'candidate' ? npm : cli)) return;
+  if (brokerOperation === 'broker-typecheck' && !exactFile(cli)) return;
+  if (brokerOperation === 'broker-doctor' && !['events/events.ndjson', 'db/clue.db']
+    .every((name) => exactFile(path.join(workspace, 'mission', name)))) return;
   const steps = side === 'candidate' ? [
     ['offlineInstall', [npm, 'ci', '--offline', '--no-audit', '--no-fund'], () => exactFile(addon)],
     ['typecheck', [npm, 'run', 'typecheck']],
@@ -292,7 +301,9 @@ function run() {
   result.state = 'GOVERNED_FAILED';
   result.exitCode = 1;
   const deadline = performance.now() + (side === 'candidate' ? 350_000 : 112_000);
+  const brokerStage = brokerOperation === 'broker-typecheck' ? 'typecheck' : 'doctorDeep';
   for (const [name, args, verify] of steps) {
+    if (brokerOperation && name !== brokerStage) continue;
     const { stage, stdout } = spawnStage(args, env, deadline);
     result.stages[name] = stage;
     if (name === 'doctorDeep' && typeof stdout === 'string') result.doctorEvidence = readDoctorEvidence(stdout);

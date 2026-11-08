@@ -45,10 +45,14 @@ async function approve({ source, cache }) {
   }
 }
 
-function progress(side) {
-  console.log(side === 'candidate'
-    ? 'Running offline install, typecheck, build and native SQLite inside MXC.'
-    : 'Initializing the disposable workspace and running SCN-005 from the read-only tree.');
+function progress(phase) {
+  const message = {
+    candidate: 'Running offline install, typecheck, build and native SQLite inside MXC.',
+    baseline: 'Initializing the disposable workspace and running SCN-005 from the read-only tree.',
+    'broker-typecheck': 'Checking the direct npm typecheck request.',
+    'broker-doctor': 'Checking the direct CLU-E doctor --deep request.',
+  }[phase];
+  if (message) console.log(message);
 }
 
 const args = process.argv.slice(2);

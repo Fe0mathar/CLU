@@ -661,7 +661,7 @@ $diagnosticPins
             $admissionRunner = Join-Path $repo 'tools\p2-windows-governed-workload-diagnostic.mjs'
             $admissionSchema = 'clue-windows-governed-workload/1'
             $admissionSuccess = 'GOVERNED_WORKLOAD_OBSERVED'
-            $admissionTimeout = 900
+            $admissionTimeout = 1200
             $admissionLabel = 'CLU-E governed workload'
             $setupStage = 'GOVERNED_WORKLOAD_EXECUTION'
         } elseif ($ReviewedWorkloadDiagnostic) {

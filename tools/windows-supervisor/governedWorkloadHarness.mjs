@@ -23,6 +23,7 @@ const steps = {
   candidate: ['offlineInstall', 'typecheck', 'build', 'nativeSqlite'],
   baseline: ['initWorkspace', 'doctorDeep'],
 };
+const brokerSteps = { 'broker-typecheck': 'typecheck', 'broker-doctor': 'doctorDeep' };
 const stageNames = [...steps.candidate, ...steps.baseline];
 const stageStates = new Set(['NOT_RUN', 'PASSED', 'FAILED', 'TIMEOUT', 'OUTPUT_LIMIT', 'LAUNCH_FAILED', 'OUTPUT_UNVERIFIED']);
 const stageCodes = new Set([
@@ -174,17 +175,18 @@ function doctorEvidence(value) {
   return { eventLogState, eventLogHead, recordsVerified, artifactState, artifactsChecked, artifactsVerified };
 }
 
-function workloadEvidence(stdout, side) {
+function workloadEvidence(stdout, side, brokerOperation = null) {
   const lines = stdout.split(/\r?\n/u).filter((line) => line.startsWith(evidencePrefix));
   if (lines.length !== 1 || lines[0].length > 4096) return null;
   let value;
   try { value = JSON.parse(lines[0].slice(evidencePrefix.length)); } catch { return null; }
   if (value?.side !== side || !workloadStates.has(value.state) || !exactObject(value.stages, stageNames) ||
       !checkFields.every((name) => typeof value[name] === 'boolean')) return null;
+  if (brokerOperation === null ? Object.hasOwn(value, 'brokerOperation') : value.brokerOperation !== brokerOperation) return null;
   const checks = Object.fromEntries(checkFields.map((name) => [name, value[name]]));
   const stages = Object.fromEntries(stageNames.map((name) => [name, stageEvidence(value.stages[name])]));
   if (Object.values(stages).includes(null)) return null;
-  const selected = steps[side];
+  const selected = brokerOperation === null ? steps[side] : [brokerSteps[brokerOperation]];
   if (!stageNames.filter((name) => !selected.includes(name)).every((name) => stages[name].state === 'NOT_RUN')) return null;
   const passed = value.state === 'GOVERNED_PASSED';
   const refused = value.state === 'BOOTSTRAP_REFUSED';
@@ -203,7 +205,10 @@ function workloadEvidence(stdout, side) {
     const firstIncomplete = selected.findIndex((name) => stages[name].state !== 'PASSED');
     if (firstIncomplete === -1 || !selected.slice(firstIncomplete + 1).every((name) => stages[name].state === 'NOT_RUN')) return null;
   }
-  return { state: value.state, exitCode: value.exitCode, ...checks, stages, doctorDeepVerified: value.doctorDeepVerified, doctorEvidence: doctor };
+  return {
+    state: value.state, exitCode: value.exitCode, ...checks, stages, doctorDeepVerified: value.doctorDeepVerified, doctorEvidence: doctor,
+    ...(brokerOperation === null ? {} : { brokerOperation }),
+  };
 }
 
 function stageBaseline(paths, expected) {
@@ -239,7 +244,7 @@ function stageBaseline(paths, expected) {
 
 function inspectBaselineWorkspace(workspace) {
   const mission = join(workspace, 'mission');
-  const result = { eventLogVerified: false, eventLogHead: null, eventLogRecords: null, sqliteHeaderVerified: false };
+  const result = { eventLogVerified: false, eventLogHead: null, eventLogRecords: null, eventLogSha256: null, sqliteHeaderVerified: false };
   try {
     const db = exactFile(join(mission, 'db', 'clue.db'), 32 * 1024 * 1024);
     result.sqliteHeaderVerified = db?.subarray(0, 16).equals(Buffer.from('SQLite format 3\0')) === true;
@@ -267,6 +272,7 @@ function inspectBaselineWorkspace(workspace) {
       result.eventLogVerified = true;
       result.eventLogHead = lines.length - 1;
       result.eventLogRecords = lines.length;
+      result.eventLogSha256 = sha256(bytes);
     }
   } catch { /* The event log could not be checked. */ }
   return result;
@@ -280,11 +286,15 @@ export async function exerciseGovernedWorkload({
   const report = {
     schemaVersion, state: 'GOVERNED_INPUTS_UNVERIFIED', proofAuthorization: false, stageCleanupSafe: true,
     approval: 'NOT_REQUESTED', source: null, cache: null, prepared: null, instrumentation: [], refusals: {}, cases: {},
+    brokerConformance: { state: 'NOT_RUN', stagedBootstrapSha256: null, refusals: {}, cases: {} },
   };
   try {
     const trusted = join(stage, 'trusted-source');
     mkdirSync(trusted);
     createFile(join(trusted, 'trusted.txt'), trustedMarker);
+    const brokerBootstrapPath = join(trusted, 'governed-bootstrap.cjs');
+    createFile(brokerBootstrapPath, script);
+    report.brokerConformance.stagedBootstrapSha256 = sha256(script);
     const candidate = makeSide(stage, 'candidate');
     const baseline = makeSide(stage, 'baseline');
     const input = stageGovernedSource(repoRoot, [candidate.checkout]);
@@ -317,6 +327,7 @@ export async function exerciseGovernedWorkload({
     function protectedInputs() {
       const cli = exactFile(npmCliPath, 1024 * 1024);
       return cli?.equals(npmCli) === true && exactMarker(join(trusted, 'trusted.txt'), trustedMarker) &&
+        exactMarker(brokerBootstrapPath, script) &&
         [candidate, baseline].every((paths) =>
           exactMarker(join(paths.outside, 'forbidden.txt'), outsideMarker) &&
           exactMarker(join(paths.private, 'sealed.txt'), privateMarker) &&
@@ -339,15 +350,66 @@ export async function exerciseGovernedWorkload({
       return { native, preLaunchRefusal, stdout: nativeResult.stdout, requestUnchanged: exactMarker(requestPath, bytes) };
     }
 
-    async function refusal(id, request, paths) {
+    async function refusal(id, request, paths, destination = report.refusals, marker = 'started.txt') {
       const evidence = await send(request, paths);
-      const startMarkerAbsent = absent(join(paths.workspace, 'started.txt'));
+      const startMarkerAbsent = absent(join(paths.workspace, marker));
       if (evidence.preLaunchRefusal && !startMarkerAbsent) report.stageCleanupSafe = false;
       const passed = evidence.preLaunchRefusal && startMarkerAbsent && evidence.requestUnchanged;
-      report.refusals[id] = {
+      destination[id] = {
         ...evidence.native, state: passed ? 'REFUSED_BEFORE_LAUNCH' : 'UNVERIFIED',
         startMarkerAbsent, requestUnchanged: evidence.requestUnchanged,
       };
+      return passed;
+    }
+
+    async function runBroker(request, paths, side, operation, expectedSource, ordinaryBaseline = null) {
+      const candidate = side === 'candidate';
+      const priorBuild = report.prepared;
+      if (!protectedInputs() || !verifyGovernedSource(paths.checkout, expectedSource, { allowBuildOutputs: true }) ||
+          inspectGovernedBuild(paths.checkout).treeSha256 !== priorBuild.treeSha256) return false;
+      progress?.(operation);
+      const evidence = await send(request, paths);
+      const workload = workloadEvidence(evidence.stdout, side, operation);
+      const host = {
+        startedMarkerVerified: false, checkoutWriteVerified: false, protectedInputsUnchanged: false,
+        preparedTreeVerified: false, missionWorkspaceVerified: candidate ? null : false,
+      };
+      let afterBuild = null;
+      let workspace = null;
+      if (report.stageCleanupSafe) {
+        host.startedMarkerVerified = exactMarker(join(paths.workspace, 'broker-started.txt'), observed);
+        const marker = join(paths.checkout, 'broker-checkout-write.txt');
+        host.checkoutWriteVerified = candidate ? exactMarker(marker, observed) : absent(marker);
+        if (candidate && host.checkoutWriteVerified) unlinkSync(marker);
+        host.protectedInputsUnchanged = evidence.requestUnchanged && protectedInputs() &&
+          verifyGovernedSource(paths.checkout, expectedSource, { allowBuildOutputs: true });
+        try {
+          afterBuild = inspectGovernedBuild(paths.checkout);
+          host.preparedTreeVerified = candidate
+            ? priorBuild.protectedTreeSha256 === afterBuild.protectedTreeSha256 &&
+              (priorBuild.buildInfoSha256 === null) === (afterBuild.buildInfoSha256 === null)
+            : priorBuild.treeSha256 === afterBuild.treeSha256;
+        } catch { /* Report the unavailable generated tree evidence. */ }
+        if (ordinaryBaseline !== null) {
+          workspace = inspectBaselineWorkspace(paths.workspace);
+          const doctor = workload?.doctorEvidence;
+          host.missionWorkspaceVerified = workspace.eventLogVerified && workspace.sqliteHeaderVerified &&
+            workspace.eventLogSha256 === ordinaryBaseline.host.missionWorkspace.eventLogSha256 &&
+            doctor?.eventLogHead === workspace.eventLogHead && doctor.recordsVerified === workspace.eventLogRecords &&
+            doctor.artifactsChecked === ordinaryBaseline.workload.doctorEvidence.artifactsChecked &&
+            doctor.artifactsVerified === ordinaryBaseline.workload.doctorEvidence.artifactsVerified;
+        }
+      }
+      const passed = evidence.native.exitCode === 0 && workload?.state === 'GOVERNED_PASSED' &&
+        host.startedMarkerVerified && host.checkoutWriteVerified && host.protectedInputsUnchanged &&
+        host.preparedTreeVerified && (candidate || host.missionWorkspaceVerified);
+      report.brokerConformance.cases[side] = {
+        ...evidence.native, state: passed ? 'ADMITTED_AND_OBSERVED' : 'UNVERIFIED', operation,
+        requestSha256: sha256(JSON.stringify(request)), workload, host, workspace,
+        beforeTreeSha256: priorBuild.treeSha256, afterTreeSha256: afterBuild?.treeSha256 ?? null,
+        beforeBuildInfoSha256: priorBuild.buildInfoSha256, afterBuildInfoSha256: afterBuild?.buildInfoSha256 ?? null,
+      };
+      if (passed && candidate) report.prepared = afterBuild;
       return passed;
     }
 
@@ -390,6 +452,15 @@ export async function exerciseGovernedWorkload({
 
     report.state = 'GOVERNED_PREPARED_TREE_UNVERIFIED';
     report.prepared = inspectGovernedBuild(candidate.checkout);
+    const broker = report.brokerConformance;
+    report.state = 'GOVERNED_BROKER_CONFORMANCE_UNVERIFIED';
+    broker.state = 'BROKER_CONFORMANCE_UNVERIFIED';
+    const directCandidate = { ...candidateRequest, args: [realpathSync.native(npmCliPath), 'run', 'typecheck'] };
+    if (!await refusal('candidateAlteredArgs', { ...directCandidate, args: [...directCandidate.args, '--pretty'] },
+      candidate, broker.refusals, 'broker-started.txt') ||
+      !await runBroker(directCandidate, candidate, 'candidate', 'broker-typecheck', expected)) return report;
+
+    report.state = 'GOVERNED_PREPARED_TREE_UNVERIFIED';
     renameSync(candidate.checkout, baseline.checkout);
     const { verified, instrumentation } = stageBaseline(baseline, expected);
     report.instrumentation = instrumentation;
@@ -437,7 +508,16 @@ export async function exerciseGovernedWorkload({
       ...baselineEvidence.native, state: baselinePassed ? 'ADMITTED_AND_OBSERVED' : 'UNVERIFIED',
       workload: baselineWorkload, host: baselineHost,
     };
-    if (baselinePassed && report.stageCleanupSafe) report.state = 'GOVERNED_WORKLOAD_OBSERVED';
+    if (!baselinePassed || !report.stageCleanupSafe) return report;
+
+    report.state = 'GOVERNED_BROKER_CONFORMANCE_UNVERIFIED';
+    const cli = realpathSync.native(join(baseline.checkout, 'dist', 'src', 'cli', 'index.js'));
+    const directBaseline = { ...baselineRequest, args: [cli, 'doctor', '--deep'] };
+    if (!await refusal('baselineAlteredArgs', { ...directBaseline, args: [cli, 'doctor'] },
+      baseline, broker.refusals, 'broker-started.txt') ||
+      !await runBroker(directBaseline, baseline, 'baseline', 'broker-doctor', verified, report.cases.baseline)) return report;
+    broker.state = 'BROKER_CONFORMANCE_OBSERVED';
+    report.state = 'GOVERNED_WORKLOAD_OBSERVED';
   } catch (error) {
     if (typeof error?.message === 'string' && /^GOVERNED_[A-Z0-9_]{1,70}$/u.test(error.message)) report.inputBlocker = error.message;
   }
