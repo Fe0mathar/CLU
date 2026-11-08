@@ -13,6 +13,7 @@ internal static class WfpPairedFixture
 {
     private const int RoundWaitMs = 6000;
     private const int CrashLifetimeMs = 30000;
+    private const int EnforcementFaultLifetimeMs = 45000;
 
     private static int Main(string[] args)
     {
@@ -29,6 +30,11 @@ internal static class WfpPairedFixture
             if (args[0] == "paired")
             {
                 RunPaired(workspace);
+                return 0;
+            }
+            if (args[0] == "enforcement-fault")
+            {
+                RunEnforcementFault(workspace);
                 return 0;
             }
             if (args[0] == "crash" || args[0] == "crash-child" || args[0] == "crash-grandchild")
@@ -50,6 +56,19 @@ internal static class WfpPairedFixture
             Publish(workspace, phase + "-result.txt", Format(BindMatrix(null)));
         }
         WaitForGate(workspace, "paired-complete", Stopwatch.StartNew(), RoundWaitMs);
+    }
+
+    private static void RunEnforcementFault(string workspace)
+    {
+        var clock = Stopwatch.StartNew();
+        PublishPid(workspace, "enforcement-fault");
+        foreach (string round in new[] { "control", "armed", "fault" })
+        {
+            string phase = "enforcement-fault-" + round;
+            WaitForGate(workspace, phase, clock, EnforcementFaultLifetimeMs);
+            Publish(workspace, phase + "-result.txt", Format(BindMatrix(null)));
+        }
+        WaitForGate(workspace, "enforcement-fault-complete", clock, EnforcementFaultLifetimeMs);
     }
 
     private static void RunCrash(string workspace, string role)

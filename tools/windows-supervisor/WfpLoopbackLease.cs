@@ -51,6 +51,7 @@ internal sealed class WfpLoopbackLease : IDisposable
     }
 
     internal int Count { get { return filterKeys.Length; } }
+    internal Guid[] FilterKeys { get { return (Guid[])filterKeys.Clone(); } }
     internal ulong[] FilterIds { get { return (ulong[])filterIds.Clone(); } }
     internal Guid SublayerKey { get { return sublayerKey; } }
     internal ushort VerifiedSublayerWeight { get; private set; }
@@ -92,6 +93,38 @@ internal sealed class WfpLoopbackLease : IDisposable
             ReadFilter(engine, filterKeys[index], filterIds[index], Layers[index], sublayerKey,
                 expectedSid, staticName, false);
         VerifiedSublayerWeight = weight;
+    }
+
+    internal static void VerifyExactDynamicInstalled(byte[] packageSid, Guid sublayer, Guid[] filters, ulong[] ids)
+    {
+        byte[] sid = ValidatePackageSid(packageSid);
+        Guid[] keys = ExactKeys(sublayer, filters);
+        if (ids == null || ids.Length != keys.Length || new HashSet<ulong>(ids).Count != keys.Length ||
+            Array.Exists(ids, id => id == 0)) throw new ArgumentException("WFP_DYNAMIC_IDS_INVALID");
+        IntPtr observer = OpenEngine(false);
+        try
+        {
+            ReadSublayer(observer, sublayer, null, false);
+            for (int index = 0; index < keys.Length; index++)
+                ReadFilter(observer, keys[index], ids[index], Layers[index], sublayer, sid, null, false);
+        }
+        finally { Check(FwpmEngineClose0(observer), "WFP_DYNAMIC_OBSERVER_CLOSE"); }
+    }
+
+    internal static bool VerifyExactDynamicAbsent(Guid sublayer, Guid[] filters)
+    {
+        return VerifyAbsent(sublayer, ExactKeys(sublayer, filters));
+    }
+
+    private static Guid[] ExactKeys(Guid sublayer, Guid[] filters)
+    {
+        if (sublayer == Guid.Empty || filters == null || filters.Length != Layers.Length)
+            throw new ArgumentException("WFP_DYNAMIC_KEYS_INVALID");
+        var keys = (Guid[])filters.Clone();
+        var unique = new HashSet<Guid> { sublayer };
+        foreach (Guid key in keys)
+            if (key == Guid.Empty || !unique.Add(key)) throw new ArgumentException("WFP_DYNAMIC_KEYS_INVALID");
+        return keys;
     }
 
     internal static WfpLoopbackLease Install(byte[] packageSid, out bool failureCleanupVerified)

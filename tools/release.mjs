@@ -82,6 +82,7 @@ const REQUIRED_OPERATOR_PATHS = [
   'CLUE-Windows-Setup.bat',
   'CLUE-Windows-Supervisor.bat',
   'CLUE-Windows-WFP-Diagnostic.bat',
+  'CLUE-Windows-WFP-Enforcement-Fault.bat',
   'CLUE-Windows-Sandbox-Diagnostic.bat',
   'CLUE-Windows-Host-Test.bat',
   'CLUE-Windows-Candidate-Comparison.bat',

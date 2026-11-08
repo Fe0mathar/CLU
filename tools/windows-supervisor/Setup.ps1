@@ -7,7 +7,8 @@ param(
     [switch] $WfpBfeLab,
     [switch] $ProofAdmissionDiagnostic,
     [switch] $ReviewedWorkloadDiagnostic,
-    [switch] $GovernedWorkloadDiagnostic
+    [switch] $GovernedWorkloadDiagnostic,
+    [switch] $WfpEnforcementFaultDiagnostic
 )
 
 Set-StrictMode -Version Latest
@@ -295,6 +296,86 @@ function Write-StagedProofDiagnosticReport([string] $Path, [string] $State, $Exi
     Write-DiagnosticFile $Path $payload $maximumBytes
 }
 
+function Assert-WfpFaultStageAcl([string] $Path, [string] $Dacl) {
+    Assert-NoReparsePath $Path
+    $section = [Security.AccessControl.AccessControlSections]::Access
+    $security = [IO.FileSystemAclExtensions]::GetAccessControl([IO.DirectoryInfo]::new($Path), $section)
+    if (!$security.AreAccessRulesProtected) { throw 'The WFP diagnostic stage has inherited access.' }
+    $actual = [Security.AccessControl.RawSecurityDescriptor]::new($security.GetSecurityDescriptorSddlForm($section)).DiscretionaryAcl
+    $expected = [Security.AccessControl.RawSecurityDescriptor]::new($Dacl).DiscretionaryAcl
+    if ($null -eq $actual -or $actual.BinaryLength -ne $expected.BinaryLength) {
+        throw 'The WFP diagnostic stage access rules are unverified.'
+    }
+    $actualBytes = [byte[]]::new($actual.BinaryLength)
+    $expectedBytes = [byte[]]::new($expected.BinaryLength)
+    $actual.GetBinaryForm($actualBytes, 0)
+    $expected.GetBinaryForm($expectedBytes, 0)
+    if ([Convert]::ToBase64String($actualBytes) -cne [Convert]::ToBase64String($expectedBytes)) {
+        throw 'The WFP diagnostic stage access rules are unverified.'
+    }
+}
+
+function New-WfpFaultStage([string] $Path, [string] $Dacl) {
+    if (Test-Path -LiteralPath $Path) { throw 'The WFP diagnostic stage already exists.' }
+    $security = [Security.AccessControl.DirectorySecurity]::new()
+    $security.SetSecurityDescriptorSddlForm($Dacl, [Security.AccessControl.AccessControlSections]::Access)
+    $null = [IO.FileSystemAclExtensions]::CreateDirectory($security, $Path)
+    Assert-WfpFaultStageAcl $Path $Dacl
+}
+
+function Copy-WfpFaultPinnedInputs([string] $SourceRoot, [string] $DestinationRoot, [System.Collections.IDictionary] $Hashes) {
+    Assert-NoReparsePath $DestinationRoot -CreateDirectory
+    $encoding = [Text.UTF8Encoding]::new($false, $true)
+    foreach ($entry in $Hashes.GetEnumerator()) {
+        $source = Join-Path $SourceRoot $entry.Key
+        Assert-NoReparsePath $source
+        $stream = [IO.File]::Open($source, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+        try {
+            if ($stream.Length -lt 1 -or $stream.Length -gt 1048576) {
+                throw "WFP diagnostic source has an invalid size: $($entry.Key)"
+            }
+            $bytes = [byte[]]::new([int] $stream.Length)
+            for ($offset = 0; $offset -lt $bytes.Length; $offset += $read) {
+                $read = $stream.Read($bytes, $offset, $bytes.Length - $offset)
+                if ($read -eq 0) { throw "WFP diagnostic source changed during read: $($entry.Key)" }
+            }
+        } finally { $stream.Dispose() }
+        $canonical = $encoding.GetBytes($encoding.GetString($bytes).Replace("`r`n", "`n"))
+        $sha = [Security.Cryptography.SHA256]::Create()
+        try { $digest = [BitConverter]::ToString($sha.ComputeHash($canonical)).Replace('-', '').ToLowerInvariant() }
+        finally { $sha.Dispose() }
+        if ($digest -cne $entry.Value) { throw "WFP diagnostic source pin mismatch: $($entry.Key)" }
+        $destination = Join-Path $DestinationRoot $entry.Key
+        $copy = [IO.File]::Open($destination, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+        try { $copy.Write($canonical, 0, $canonical.Length) }
+        finally { $copy.Dispose() }
+    }
+}
+
+function Write-WfpEnforcementFaultReport([string] $Path, [string] $State) {
+    Write-DiagnosticFile $Path ([ordered]@{
+        schemaVersion = 'clue-windows-wfp-enforcement-fault-diagnostic/1'
+        checkedAt = [DateTime]::UtcNow.ToString('o')
+        state = $State
+        setupStage = $script:setupStage
+        proofAuthorization = $false
+        bfeRestartQualified = $false
+        hostTraffic = 'NOT_TESTED'
+        offHostLan = 'NOT_TESTED'
+        phaseBindOrder = @('ipv4Tcp', 'ipv6Tcp', 'ipv4Udp', 'ipv6Udp')
+        productionBlockers = @('PRODUCTION_LOOPBACK_ENFORCEMENT_UNQUALIFIED', 'NO_INDEPENDENT_LAN_PEER')
+        windowsHost = $script:windowsHost
+        engineVersion = 'v1.0.1'
+        engineSha256 = $script:mxcHash
+        mxcDownload = $script:mxcDownload
+        controllerSha256 = $script:wfpFaultControllerHash
+        fixtureSha256 = $script:wfpFaultFixtureHash
+        enforcementFault = $script:wfpFaultResult
+        cleanup = $script:wfpFaultCleanup
+        diagnosticStageRetained = $script:wfpFaultCleanup -ceq 'RETAINED_UNVERIFIED'
+    }) 32768
+}
+
 function Get-WfpAttribution([System.Collections.IDictionary] $CanaryReport) {
     $summary = [ordered]@{ state = 'FILTERED_LEASE_INCOMPLETE'; bfe = $null; security = $null; bindCases = $null }
     $wfp = $CanaryReport['wfp']
@@ -363,9 +444,15 @@ $admissionCleanupAttempted = $false
 $admissionCleanupMaximumEntries = if ($GovernedWorkloadDiagnostic) { 50000 } else { 1024 }
 $admissionExitCode = $null
 $admissionResult = $null
+$wfpFaultResult = $null
+$wfpFaultControllerHash = $null
+$wfpFaultFixtureHash = $null
+$wfpFaultCleanup = 'NOT_REQUIRED'
+$wfpFaultCleanupAttempted = $false
 $setupStage = 'HOST_PREREQUISITES'
 $operatorWorkloadDiagnostic = $ReviewedWorkloadDiagnostic -or $GovernedWorkloadDiagnostic
 $stagedProofDiagnostic = $ProofAdmissionDiagnostic -or $operatorWorkloadDiagnostic
+$stagedWfpDiagnostic = $WfpPairedDiagnostic -or $WfpEnforcementFaultDiagnostic
 $setupFailureState = $null
 try {
     if ($PSVersionTable.PSVersion.Major -lt 7 -or !$IsWindows) { throw 'Run this setup on native Windows with PowerShell 7.' }
@@ -381,6 +468,10 @@ try {
         $WfpDiagnostic -or $WfpPairedDiagnostic -or $WfpBfeLab)) {
         throw 'Run the governed workload diagnostic separately from other diagnostics.'
     }
+    if ($WfpEnforcementFaultDiagnostic -and ($stagedProofDiagnostic -or $WfpDiagnostic -or
+        $WfpPairedDiagnostic -or $WfpBfeLab)) {
+        throw 'Run the WFP enforcement fault diagnostic separately from other diagnostics.'
+    }
     $repo = Get-LocalPath (Split-Path -Parent (Split-Path -Parent $PSScriptRoot))
     Assert-NoReparsePath $repo
     if (!$InstallRoot) { $InstallRoot = Join-Path $env:LOCALAPPDATA 'CLU-E\WindowsSupervisor' }
@@ -394,14 +485,16 @@ try {
     }
     Assert-NoReparsePath $evidence -CreateDirectory
     $stamp = [DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss-fff') + '-' + [Guid]::NewGuid().ToString('N').Substring(0, 8)
-    $report = if ($GovernedWorkloadDiagnostic) {
+    $report = if ($WfpEnforcementFaultDiagnostic) {
+        Join-Path $evidence "CLU-E_WINDOWS_WFP_ENFORCEMENT_FAULT_$stamp.json"
+    } elseif ($GovernedWorkloadDiagnostic) {
         Join-Path $evidence "CLU-E_WINDOWS_GOVERNED_WORKLOAD_$stamp.json"
     } elseif ($ReviewedWorkloadDiagnostic) {
         Join-Path $evidence "CLU-E_WINDOWS_REVIEWED_WORKLOAD_$stamp.json"
     } elseif ($ProofAdmissionDiagnostic) {
         Join-Path $evidence "CLU-E_WINDOWS_PROOF_ADMISSION_$stamp.json"
     } else { Join-Path $evidence "CLU-E_MXC_SUPERVISOR_DIAGNOSTIC_$stamp.json" }
-    if (!$operatorWorkloadDiagnostic) { Assert-NoReparsePath $install -CreateDirectory }
+    if (!$operatorWorkloadDiagnostic -and !$WfpEnforcementFaultDiagnostic) { Assert-NoReparsePath $install -CreateDirectory }
 
     $arch = [Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()
     $shell = [Diagnostics.Process]::GetCurrentProcess()
@@ -417,14 +510,21 @@ try {
     if ($sessionId -eq 0 -or !$windowsHost.userInteractive) {
         throw 'Run CLUE-Windows-Supervisor.bat from your signed-in Windows desktop for this canary.'
     }
-    if ($WfpDiagnostic -or $WfpPairedDiagnostic) {
+    if ($WfpDiagnostic -or $stagedWfpDiagnostic) {
         $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
         try {
             $principal = [Security.Principal.WindowsPrincipal]::new($identity)
-            if (!$principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+            $elevated = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+            if ($WfpEnforcementFaultDiagnostic) { $windowsHost.elevated = $elevated }
+            if (!$elevated) {
+                if ($WfpEnforcementFaultDiagnostic) {
+                    $setupFailureState = 'WFP_ENFORCEMENT_FAULT_REQUIRES_ADMINISTRATOR'
+                    throw 'Right-click CLUE-Windows-WFP-Enforcement-Fault.bat and choose Run as administrator.'
+                }
                 throw 'Right-click CLUE-Windows-WFP-Diagnostic.bat and choose Run as administrator.'
             }
         } finally { $identity.Dispose() }
+        if ($WfpEnforcementFaultDiagnostic) { Assert-NoReparsePath $install -CreateDirectory }
     }
     if ($WfpBfeLab) {
         $setupStage = 'BFE_LAB_PREREQUISITES'
@@ -434,11 +534,13 @@ try {
         $bfeLabConfirmation = Read-Host 'Type DISPOSABLE OFFLINE HYPER-V GUEST to confirm the lab VM is isolated and checkpointed'
         Assert-WfpBfeLabEnvironment -Confirmation $bfeLabConfirmation
     }
-    if ($WfpPairedDiagnostic) {
+    if ($stagedWfpDiagnostic) {
         $staticDiagnosticLock = [Threading.Mutex]::new($false, 'Local\CLU-E-StaticDiagnostic-05P')
         try { $staticDiagnosticLockHeld = $staticDiagnosticLock.WaitOne(0) }
         catch [Threading.AbandonedMutexException] { $staticDiagnosticLockHeld = $true }
         if (!$staticDiagnosticLockHeld) { throw 'Another CLU-E static diagnostic is running in this session.' }
+    }
+    if ($WfpPairedDiagnostic) {
         $recordReader = Join-Path $PSScriptRoot 'WfpPairedSetup.ps1'
         Assert-NoReparsePath $recordReader
         . $recordReader
@@ -467,6 +569,10 @@ try {
         }
     }
     if ($arch -notin @('x64', 'arm64')) { throw 'Microsoft MXC requires a supported x64 or ARM64 Windows installation.' }
+    if ($WfpEnforcementFaultDiagnostic) {
+        $setupStage = 'WFP_ENFORCEMENT_FAULT_PREREQUISITES'
+        Write-Host '[1/4] Checking the Windows WFP enforcement fault diagnostic prerequisites.'
+    }
     if ($stagedProofDiagnostic) {
         if ($GovernedWorkloadDiagnostic) {
             Write-Host '[1/4] Checking the governed Windows workload diagnostic prerequisites.'
@@ -493,35 +599,46 @@ try {
             Assert-NoReparsePath $install -CreateDirectory
         }
     }
-    $node = (Get-Command node.exe -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
-    $nodeResult = @(& $node -p "require('node:fs').realpathSync.native(process.execPath)")
-    if ($LASTEXITCODE -ne 0 -or $nodeResult.Count -ne 1) { throw 'Could not resolve the selected native Node executable.' }
-    $node = Get-LocalPath $nodeResult[0]
-    Assert-NoReparsePath $node
-    if ($stagedProofDiagnostic) {
-        $admissionNodeHash = Get-Sha256 $node
-        if ($GovernedWorkloadDiagnostic) {
-            $setupStage = 'GOVERNED_WORKLOAD_NPM_PREREQUISITE'
-            $admissionNpmCli = Get-LocalPath (Join-Path (Split-Path -Parent $node) 'node_modules\npm\bin\npm-cli.js')
-            Assert-NoReparsePath $admissionNpmCli
-            $admissionNpmItem = Get-Item -LiteralPath $admissionNpmCli -Force
-            if ($admissionNpmItem.PSIsContainer -or $admissionNpmItem.Length -lt 1 -or $admissionNpmItem.Length -gt 1048576) {
-                throw 'The governed workload requires the npm CLI installed beside Node.'
+    $node = ''
+    if (!$WfpEnforcementFaultDiagnostic) {
+        $node = (Get-Command node.exe -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+        $nodeResult = @(& $node -p "require('node:fs').realpathSync.native(process.execPath)")
+        if ($LASTEXITCODE -ne 0 -or $nodeResult.Count -ne 1) { throw 'Could not resolve the selected native Node executable.' }
+        $node = Get-LocalPath $nodeResult[0]
+        Assert-NoReparsePath $node
+        if ($stagedProofDiagnostic) {
+            $admissionNodeHash = Get-Sha256 $node
+            if ($GovernedWorkloadDiagnostic) {
+                $setupStage = 'GOVERNED_WORKLOAD_NPM_PREREQUISITE'
+                $admissionNpmCli = Get-LocalPath (Join-Path (Split-Path -Parent $node) 'node_modules\npm\bin\npm-cli.js')
+                Assert-NoReparsePath $admissionNpmCli
+                $admissionNpmItem = Get-Item -LiteralPath $admissionNpmCli -Force
+                if ($admissionNpmItem.PSIsContainer -or $admissionNpmItem.Length -lt 1 -or $admissionNpmItem.Length -gt 1048576) {
+                    throw 'The governed workload requires the npm CLI installed beside Node.'
+                }
+                $admissionNpmCliHash = Get-Sha256 $admissionNpmCli
             }
-            $admissionNpmCliHash = Get-Sha256 $admissionNpmCli
-        }
-    } else {
-        $npm = Join-Path (Split-Path -Parent $node) 'node_modules\npm\bin\npm-cli.js'
-        if (!(Test-Path -LiteralPath $npm -PathType Leaf)) { throw 'Install Node.js with npm, then reopen this launcher.' }
-        if (!(Test-Path -LiteralPath (Join-Path $repo 'node_modules\typescript\bin\tsc') -PathType Leaf)) {
-            throw 'Run npm.cmd ci in the CLU-E project, then reopen this launcher.'
+        } else {
+            $npm = Join-Path (Split-Path -Parent $node) 'node_modules\npm\bin\npm-cli.js'
+            if (!(Test-Path -LiteralPath $npm -PathType Leaf)) { throw 'Install Node.js with npm, then reopen this launcher.' }
+            if (!(Test-Path -LiteralPath (Join-Path $repo 'node_modules\typescript\bin\tsc') -PathType Leaf)) {
+                throw 'Run npm.cmd ci in the CLU-E project, then reopen this launcher.'
+            }
         }
     }
-    $framework = Join-Path $env:SystemRoot 'Microsoft.NET\Framework64\v4.0.30319'
+
+    $systemRoot = if ($WfpEnforcementFaultDiagnostic) {
+        Split-Path -Parent ([Environment]::SystemDirectory)
+    } else { $env:SystemRoot }
+    $framework = Join-Path $systemRoot 'Microsoft.NET\Framework64\v4.0.30319'
     $csc = Join-Path $framework 'csc.exe'
-    $web = Join-Path $env:SystemRoot 'Microsoft.NET\assembly\GAC_MSIL\System.Web.Extensions\v4.0_4.0.0.0__31bf3856ad364e35\System.Web.Extensions.dll'
+    $web = Join-Path $systemRoot 'Microsoft.NET\assembly\GAC_MSIL\System.Web.Extensions\v4.0_4.0.0.0__31bf3856ad364e35\System.Web.Extensions.dll'
     if (!(Test-Path -LiteralPath $csc -PathType Leaf) -or !(Test-Path -LiteralPath $web -PathType Leaf)) {
         throw 'The Windows .NET Framework 4.x C# compiler and System.Web.Extensions are required.'
+    }
+    if ($WfpEnforcementFaultDiagnostic) {
+        Assert-NoReparsePath $csc
+        Assert-NoReparsePath $web
     }
     $sourceNames = @('Supervisor.cs', 'Protocol.cs', 'NativeJob.cs',
         'WfpBootstrapRun.cs', 'WfpContainerIdentity.cs', 'WfpLoopbackLease.cs', 'WfpDropObservation.cs')
@@ -535,13 +652,16 @@ try {
         'CLU_WINDOWS_SUPERVISOR_QUALIFICATION', 'CLU_WINDOWS_SUPERVISOR_QUALIFICATION_SHA256')) {
         Remove-Item -LiteralPath "Env:$key" -ErrorAction SilentlyContinue
     }
-    $env:PATH = (Split-Path -Parent $node) + ';' + (Join-Path $env:SystemRoot 'System32') + ';' + $env:PATH
-    $tempResult = @(& $node -p "require('node:fs').realpathSync.native(require('node:os').tmpdir())")
-    if ($LASTEXITCODE -ne 0 -or $tempResult.Count -ne 1) { throw 'Node could not resolve its native qualification temp root.' }
-    $qualificationTemp = Get-LocalPath $tempResult[0]
-    Assert-NoReparsePath $qualificationTemp
+    $qualificationTemp = ''
+    if (!$WfpEnforcementFaultDiagnostic) {
+        $env:PATH = (Split-Path -Parent $node) + ';' + (Join-Path $env:SystemRoot 'System32') + ';' + $env:PATH
+        $tempResult = @(& $node -p "require('node:fs').realpathSync.native(require('node:os').tmpdir())")
+        if ($LASTEXITCODE -ne 0 -or $tempResult.Count -ne 1) { throw 'Node could not resolve its native qualification temp root.' }
+        $qualificationTemp = Get-LocalPath $tempResult[0]
+        Assert-NoReparsePath $qualificationTemp
+    }
 
-    if (!$stagedProofDiagnostic) {
+    if (!$stagedProofDiagnostic -and !$WfpEnforcementFaultDiagnostic) {
         $setupStage = 'CLUE_BUILD'
         Write-Host '[1/4] Building CLU-E and checking supervisor prerequisites.'
         if ((Invoke-ExactExecutable $node @($npm, 'run', 'build') $repo) -ne 0) { throw 'CLU-E build failed.' }
@@ -549,8 +669,59 @@ try {
 
     $setupStage = 'MXC_RELEASE_VERIFICATION'
     Write-Host '[2/4] Verifying the pinned Microsoft MXC release and building the CLU-E supervisor.'
-    $stage = Join-Path $install ('.setup-' + [Guid]::NewGuid().ToString('N'))
-    Assert-NoReparsePath $stage -CreateDirectory
+    $diagnosticSourceRoot = $PSScriptRoot
+    if ($WfpEnforcementFaultDiagnostic) {
+        $faultStageRoot = Get-LocalPath ([Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles))
+        Assert-NoReparsePath $faultStageRoot
+        $stage = Join-Path $faultStageRoot ('.clue-wfp-fault-setup-' + [Guid]::NewGuid().ToString('N'))
+        if ((Test-Inside $repo $stage) -or (Test-Inside $stage $repo) -or
+            (Test-Inside $evidence $stage) -or (Test-Inside $stage $evidence) -or
+            (Test-Inside $install $stage) -or (Test-Inside $stage $install)) {
+            throw 'Keep the protected WFP diagnostic stage separate from the project, cache and evidence.'
+        }
+        # OWNER RIGHTS suppresses the owner's implicit WRITE_DAC for a filtered token.
+        $faultStageDacl = 'D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;RC;;;OW)'
+        New-WfpFaultStage $stage $faultStageDacl
+        $diagnosticSourceRoot = Join-Path $stage 'trusted-source'
+        $faultSourceSha256 = [ordered]@{
+            # Pinned canonical UTF-8/LF sources. See the patch manifest for raw payload hashes.
+            'NativeJob.cs' = '11db6d635accb80083b198aa2c78a49fb6b3f7952011946e4fda430e95e2618d'
+            'Protocol.cs' = 'ffdbdb793b4768aeaccbcf1ca91d054155f49bb74e236e9ccd3bef93d755ed63'
+            'Supervisor.cs' = 'e3fa41d71d23bd19b6d48bb78f3009b59b686668198da2d37524537750416cb3'
+            'WfpBfeWatch.cs' = '6fa8d9c9f7865a35783082f11fb210a64f28705b8f63431c016288a34fc5ab4c'
+            'WfpBootstrapRun.cs' = '92bfb701d33f672bc3788c3d67a74d0bc7baf96d11f41597989e4c869e74f990'
+            'WfpContainerIdentity.cs' = 'adf701f021cba2cf6de73660e8f890ce18fa1de690cbf227059154e41442bb34'
+            'WfpDropObservation.cs' = 'f9131d325ce6f30d77840d2f786b1ca2898e82338156aa98b7cb3f8c0946510b'
+            'WfpEnforcementFaultSetup.ps1' = 'd57aed56b5c901f64573acb47a48d86c2d318e9d393a38a9371e88bf03f93b59'
+            'WfpHostLoopbackFixture.cs' = 'bc0e7b99bab9723a2b0de32ec787dac04d5748f11b4cd844ac5e370495e38285'
+            'WfpLeaseFaultController.cs' = 'a41ee4b93448693b7883a86410764d51839172ddf102e764e7fe4ecd711ac00e'
+            'WfpLoopbackLease.cs' = 'd4aa1cc8dc472d9d8ca54c9a74350c6e8dc3ccdd9259848ae2e3bb0d74a970de'
+            'WfpPairedFixture.cs' = '7b0f9ffb806860cdb6a775f4756fe72a21805e79ff6dbc15955c6fea2d081c7d'
+            'WfpPairedSetup.ps1' = '6f9c22fc24a32db27944a32af5a8593c8e85695b783a4b79b3ac22feccd6249d'
+            'WfpPairedSupervisor.cs' = '612f8c11799d25b36bd2b938527948e40e51cfd6e5327caa73a806ce114a569a'
+            'WfpStaticRecovery.cs' = '3deae31a6212bfb98926c3e0a541ac15eeff9cc0d4c1a26510112f659c90dc03'
+        }
+        Copy-WfpFaultPinnedInputs $PSScriptRoot $diagnosticSourceRoot $faultSourceSha256
+        $sources = foreach ($sourceName in $sourceNames) { Join-Path $diagnosticSourceRoot $sourceName }
+        . (Join-Path $diagnosticSourceRoot 'WfpPairedSetup.ps1')
+        foreach ($priorStage in (Get-ChildItem -LiteralPath $faultStageRoot -Directory -Force -Filter '.clue-wfp-fault-setup-*')) {
+            if ($priorStage.FullName -ieq $stage -or $priorStage.Name -cnotmatch '^\.clue-wfp-fault-setup-[0-9a-f]{32}$') { continue }
+            Assert-WfpFaultStageAcl $priorStage.FullName $faultStageDacl
+            $priorFault = [IO.Path]::Combine($priorStage.FullName, 'enforcement-fault', 'private')
+            $priorFaultLaunch = Join-Path $priorFault 'fault-launch.txt'
+            if (![IO.File]::Exists($priorFaultLaunch)) { continue }
+            Assert-NoReparsePath $priorFaultLaunch
+            $priorFaultResult = Read-WfpPairedRecord (Join-Path $priorFault 'result.json')
+            if ($priorFaultResult['proofAuthorization'] -isnot [bool] -or $priorFaultResult['proofAuthorization'] -or
+                $priorFaultResult['stageCleanupSafe'] -isnot [bool] -or !$priorFaultResult['stageCleanupSafe'] -or
+                $priorFaultResult['jobAbsent'] -isnot [bool] -or !$priorFaultResult['jobAbsent']) {
+                throw 'A previous WFP enforcement fault diagnostic still needs scoped cleanup verification.'
+            }
+        }
+    } else {
+        $stage = Join-Path $install ('.setup-' + [Guid]::NewGuid().ToString('N'))
+        Assert-NoReparsePath $stage -CreateDirectory
+    }
     $bin = Join-Path $stage 'bin'
     Assert-NoReparsePath $bin -CreateDirectory
     $mxc = Join-Path $bin 'wxc-exec.exe'
@@ -565,13 +736,14 @@ try {
             }
             throw 'The proof admission diagnostic requires the previously verified x64 MXC engine under the current Windows account.'
         }
-        if ($WfpDiagnostic -or $WfpPairedDiagnostic) {
+        if ($WfpDiagnostic -or $stagedWfpDiagnostic) {
             $mxcDownload.state = 'VERIFIED_X64_CACHE_REQUIRED'
             throw 'The WFP diagnostic requires the previously verified x64 MXC engine under the current Windows account.'
         }
         Get-MxcExecutable $arch $stage $mxc $mxcDownload
     }
-    if (!$stagedProofDiagnostic -and (Invoke-ExactExecutable $mxc @('--help') $bin 15) -ne 0) {
+    if (!$stagedProofDiagnostic -and !$WfpEnforcementFaultDiagnostic -and
+        (Invoke-ExactExecutable $mxc @('--help') $bin 15) -ne 0) {
         throw 'The signed MXC executor could not start standalone on this Windows installation.'
     }
     $mxcHash = Get-Sha256 $mxc
@@ -606,34 +778,45 @@ try {
     $frameworkReferences = @('mscorlib.dll', 'System.dll', 'System.Core.dll') | ForEach-Object { '/reference:' + (Join-Path $framework $_) }
     $compilerBase = @('/nologo', '/noconfig', '/nostdlib+', '/target:exe', '/optimize+', '/langversion:5', '/codepage:65001')
     $diagnosticPins = ''
-    if ($WfpPairedDiagnostic) {
-        $setupStage = 'PAIRED_DIAGNOSTIC_BUILD'
-        foreach ($directory in @('fixture', 'paired\private', 'paired\workspace', 'crash\private', 'crash\workspace',
-            'static-crash\private', 'static-crash\workspace', 'static-double\private', 'static-double\workspace',
-            'host-net\private', 'host-net\workspace', 'bfe-guard\private', 'bfe-guard\workspace',
-            'bfe-lab\private', 'bfe-lab\workspace')) {
+    if ($stagedWfpDiagnostic) {
+        $diagnosticDirectories = if ($WfpEnforcementFaultDiagnostic) {
+            $setupStage = 'WFP_ENFORCEMENT_FAULT_BUILD'
+            @('fixture', 'enforcement-fault\private', 'enforcement-fault\workspace')
+        } else {
+            $setupStage = 'PAIRED_DIAGNOSTIC_BUILD'
+            @('fixture', 'paired\private', 'paired\workspace', 'crash\private', 'crash\workspace',
+                'static-crash\private', 'static-crash\workspace', 'static-double\private', 'static-double\workspace',
+                'host-net\private', 'host-net\workspace', 'bfe-guard\private', 'bfe-guard\workspace',
+                'bfe-lab\private', 'bfe-lab\workspace')
+        }
+        foreach ($directory in $diagnosticDirectories) {
             Assert-NoReparsePath (Join-Path $stage $directory) -CreateDirectory
         }
-        $fixtureSource = Join-Path $PSScriptRoot 'WfpPairedFixture.cs'
-        $hostLoopbackFixtureSource = Join-Path $PSScriptRoot 'WfpHostLoopbackFixture.cs'
-        $controllerSource = Join-Path $PSScriptRoot 'WfpPairedSupervisor.cs'
-        $staticRecoverySource = Join-Path $PSScriptRoot 'WfpStaticRecovery.cs'
-        $bfeWatchSource = Join-Path $PSScriptRoot 'WfpBfeWatch.cs'
+        $fixtureSource = Join-Path $diagnosticSourceRoot 'WfpPairedFixture.cs'
+        $hostLoopbackFixtureSource = Join-Path $diagnosticSourceRoot 'WfpHostLoopbackFixture.cs'
+        $controllerSource = Join-Path $diagnosticSourceRoot 'WfpPairedSupervisor.cs'
+        $staticRecoverySource = Join-Path $diagnosticSourceRoot 'WfpStaticRecovery.cs'
+        $bfeWatchSource = Join-Path $diagnosticSourceRoot 'WfpBfeWatch.cs'
+        $leaseFaultSource = Join-Path $diagnosticSourceRoot 'WfpLeaseFaultController.cs'
         Assert-NoReparsePath $fixtureSource
         Assert-NoReparsePath $hostLoopbackFixtureSource
         Assert-NoReparsePath $controllerSource
         Assert-NoReparsePath $staticRecoverySource
         Assert-NoReparsePath $bfeWatchSource
+        Assert-NoReparsePath $leaseFaultSource
         $fixture = Join-Path $stage 'fixture\WfpPairedFixture.exe'
         $fixtureArgs = $compilerBase + @('/platform:x64', "/out:$fixture") +
             $frameworkReferences + $fixtureSource + $hostLoopbackFixtureSource
         if ((Invoke-ExactExecutable $csc $fixtureArgs $stage 60) -ne 0) { throw 'Native bind fixture compilation failed.' }
         Assert-NoReparsePath $fixture
         $fixtureHash = Get-Sha256 $fixture
+        if ($WfpEnforcementFaultDiagnostic) { $wfpFaultFixtureHash = $fixtureHash }
         $quotedStage = $stage.Replace('"', '""')
+        $faultModePin = if ($WfpEnforcementFaultDiagnostic) { 'true' } else { 'false' }
         $diagnosticPins = @"
     internal const string WfpDiagnosticStage = @"$quotedStage";
     internal const string WfpDiagnosticFixtureSha256 = "$fixtureHash";
+    internal const bool WfpEnforcementFaultEnabled = $faultModePin;
 "@
     }
     $generatedPin = @"
@@ -757,12 +940,43 @@ $diagnosticPins
         Write-Host "[4/4] Diagnostic report: $report"
         exit $admissionProcessExit
     }
-    if ($WfpPairedDiagnostic) {
+    if ($stagedWfpDiagnostic) {
         $controller = Join-Path $bin 'CLU-E-WfpPairedDiagnostic.exe'
         $controllerArgs = $compilerBase + @('/platform:x64', '/main:WfpPairedSupervisor', "/out:$controller", "/reference:$web") +
-            $frameworkReferences + $sources + $pinSource + $controllerSource + $staticRecoverySource + $bfeWatchSource
+            $frameworkReferences + $sources + $pinSource + $controllerSource + $staticRecoverySource + $bfeWatchSource + $leaseFaultSource
         if ((Invoke-ExactExecutable $csc $controllerArgs $stage 60) -ne 0) { throw 'Native paired diagnostic compilation failed.' }
         Assert-NoReparsePath $controller
+        if ($WfpEnforcementFaultDiagnostic) {
+            $wfpFaultControllerHash = Get-Sha256 $controller
+            $faultReader = Join-Path $diagnosticSourceRoot 'WfpEnforcementFaultSetup.ps1'
+            Assert-NoReparsePath $faultReader
+            . $faultReader
+            $setupStage = 'WFP_ENFORCEMENT_FAULT_EXECUTION'
+            Write-Host '[3/4] Testing loss of the disposable WFP lease owner with an independent backup lease.'
+            $stageCleanupSafe = $false
+            $faultExperiment = Invoke-WfpEnforcementFaultSetup $controller $stage
+            $wfpFaultResult = $faultExperiment.result
+            Assert-WfpFaultStageAcl $stage $faultStageDacl
+            foreach ($faultInput in @($controller, $fixture, $mxc)) { Assert-NoReparsePath $faultInput }
+            if ((Get-Sha256 $controller) -cne $wfpFaultControllerHash -or
+                (Get-Sha256 $fixture) -cne $wfpFaultFixtureHash -or (Get-Sha256 $mxc) -cne $mxcHash) {
+                throw 'A pinned WFP enforcement fault input changed during execution.'
+            }
+            $stageCleanupSafe = $faultExperiment.stageCleanupSafe
+            $wfpFaultCleanup = Clear-ProofAdmissionStage $stage $stageCleanupSafe
+            $wfpFaultCleanupAttempted = $true
+            $setupStage = 'WFP_ENFORCEMENT_FAULT_FINISHED'
+            $faultState = $wfpFaultResult.state
+            if ($wfpFaultCleanup -ceq 'RETAINED_UNVERIFIED') {
+                $faultState = 'WFP_ENFORCEMENT_FAULT_STAGE_CLEANUP_UNVERIFIED'
+                Write-Host "The diagnostic stage was retained because cleanup is unverified: $stage"
+            }
+            Write-WfpEnforcementFaultReport $report $faultState
+            Write-Host ('[CLU-E WFP enforcement fault] ' + $faultState)
+            Write-Host "[4/4] Diagnostic report: $report"
+            if ($faultState -ceq 'WFP_LEASE_OWNER_FAULT_OBSERVED') { exit 0 }
+            exit 1
+        }
         $staticReader = Join-Path $PSScriptRoot 'WfpStaticSetup.ps1'
         Assert-NoReparsePath $staticReader
         . $staticReader
@@ -933,6 +1147,9 @@ $diagnosticPins
     if ($stagedProofDiagnostic -and !$admissionCleanupAttempted) {
         $admissionCleanup = Clear-ProofAdmissionStage $stage $stageCleanupSafe $admissionCleanupMaximumEntries
     }
+    if ($WfpEnforcementFaultDiagnostic -and !$wfpFaultCleanupAttempted) {
+        $wfpFaultCleanup = Clear-ProofAdmissionStage $stage $stageCleanupSafe
+    }
     if ($null -ne $report -and !(Test-Path -LiteralPath $report)) {
         try {
             Assert-NoReparsePath (Split-Path -Parent $report)
@@ -940,6 +1157,12 @@ $diagnosticPins
                 $admissionResult = $null
                 $admissionFailure = if ($setupFailureState) { $setupFailureState } else { $setupStage + '_FAILED' }
                 Write-StagedProofDiagnosticReport $report $admissionFailure $admissionExitCode
+                Write-Host "Diagnostic report: $report"
+                exit 1
+            }
+            if ($WfpEnforcementFaultDiagnostic) {
+                $faultFailure = if ($setupFailureState) { $setupFailureState } else { $setupStage + '_FAILED' }
+                Write-WfpEnforcementFaultReport $report $faultFailure
                 Write-Host "Diagnostic report: $report"
                 exit 1
             }
@@ -973,7 +1196,8 @@ $diagnosticPins
     }
     exit 1
 } finally {
-    if (!$stagedProofDiagnostic -and $stageCleanupSafe -and $null -ne $stage -and (Test-Path -LiteralPath $stage -PathType Container)) {
+    if (!$stagedProofDiagnostic -and !$WfpEnforcementFaultDiagnostic -and $stageCleanupSafe -and
+        $null -ne $stage -and (Test-Path -LiteralPath $stage -PathType Container)) {
         Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
     }
     if ($null -ne $staticDiagnosticLock) {

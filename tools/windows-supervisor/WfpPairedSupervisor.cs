@@ -11,7 +11,7 @@ using System.Threading;
 using System.Web.Script.Serialization;
 
 // This entry point runs fixed diagnostic modes in its compiled-in staging tree.
-internal sealed class WfpPairedSupervisor
+internal sealed partial class WfpPairedSupervisor
 {
     private const int AccessDenied = 10013;
     private const int DeadlineMs = 25000;
@@ -46,7 +46,8 @@ internal sealed class WfpPairedSupervisor
     {
         this.mode = mode;
         this.supervisor = supervisor;
-        if (mode == "static-crash" || mode == "static-double") jobName = "Local\\CLU-E-" + Guid.NewGuid().ToString("N");
+        if (mode == "static-crash" || mode == "static-double" || mode == "enforcement-fault")
+            jobName = "Local\\CLU-E-" + Guid.NewGuid().ToString("N");
         string stage = Protocol.CanonicalPath(MxcPin.WfpDiagnosticStage, true);
         root = Protocol.CanonicalPath(Path.Combine(stage, mode), true);
         workspace = Protocol.CanonicalPath(Path.Combine(root, "workspace"), true);
@@ -58,6 +59,14 @@ internal sealed class WfpPairedSupervisor
     {
         try
         {
+            if (MxcPin.WfpEnforcementFaultEnabled)
+            {
+                if (args.Length == 1 && args[0] == "enforcement-fault")
+                    return new WfpPairedSupervisor("enforcement-fault").RunEnforcementFault();
+                if (args.Length == 3 && args[0] == "enforcement-fault-owner")
+                    return RunEnforcementFaultOwner(args[1], args[2]);
+                return 125;
+            }
             if (args.Length == 1 && args[0] == "paired") return new WfpPairedSupervisor("paired").Run();
             if (args.Length == 1 && args[0] == "host-net") return new WfpPairedSupervisor("host-net").Run();
             if (args.Length == 1 && args[0] == "bfe-guard") return new WfpPairedSupervisor("bfe-guard").Run();
@@ -301,7 +310,8 @@ internal sealed class WfpPairedSupervisor
         return new Request {
             requestPath = Path.Combine(privateRoot, "request.json"),
             command = fixture,
-            args = new[] { jobName == null && mode != "bfe-guard" && mode != "bfe-lab" ? mode : "crash", workspace },
+            args = new[] { mode == "enforcement-fault" || (jobName == null && mode != "bfe-guard" && mode != "bfe-lab")
+                ? mode : "crash", workspace },
             cwd = workspace,
             readOnlyRoots = new[] { runtimeDirectory, system },
             writableRoots = new[] { workspace },
