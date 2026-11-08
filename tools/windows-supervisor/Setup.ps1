@@ -405,6 +405,8 @@ function Write-WfpEnforcementFaultReport([string] $Path, [string] $State) {
         state = $State
         setupStage = $script:setupStage
         stageAclMismatch = $script:wfpFaultStageAclMismatch
+        priorStageReconciliation = $script:wfpFaultPriorStageReconciliation
+        blockedPriorStageId = $script:wfpFaultBlockedPriorStageId
         proofAuthorization = $false
         bfeRestartQualified = $false
         hostTraffic = 'NOT_TESTED'
@@ -495,6 +497,8 @@ $wfpFaultResult = $null
 $wfpFaultControllerHash = $null
 $wfpFaultFixtureHash = $null
 $wfpFaultStageAclMismatch = $null
+$wfpFaultPriorStageReconciliation = @()
+$wfpFaultBlockedPriorStageId = $null
 $wfpFaultCleanup = 'NOT_REQUIRED'
 $wfpFaultCleanupAttempted = $false
 $setupStage = 'HOST_PREREQUISITES'
@@ -742,34 +746,19 @@ try {
             'WfpBootstrapRun.cs' = '92bfb701d33f672bc3788c3d67a74d0bc7baf96d11f41597989e4c869e74f990'
             'WfpContainerIdentity.cs' = 'adf701f021cba2cf6de73660e8f890ce18fa1de690cbf227059154e41442bb34'
             'WfpDropObservation.cs' = 'f9131d325ce6f30d77840d2f786b1ca2898e82338156aa98b7cb3f8c0946510b'
-            'WfpEnforcementFaultSetup.ps1' = 'd57aed56b5c901f64573acb47a48d86c2d318e9d393a38a9371e88bf03f93b59'
+            'WfpEnforcementFaultSetup.ps1' = '5d4b6e76d169a559f8fe01f2e154186acc5752fc7e964dae9e6a935fb23e9d5b'
+            'WfpFaultRecovery.cs' = 'f14116dcab8e4888253e314e099c30d7d93ed938a00fc7b6d510dc836b553536'
             'WfpHostLoopbackFixture.cs' = 'bc0e7b99bab9723a2b0de32ec787dac04d5748f11b4cd844ac5e370495e38285'
-            'WfpLeaseFaultController.cs' = 'a41ee4b93448693b7883a86410764d51839172ddf102e764e7fe4ecd711ac00e'
-            'WfpLoopbackLease.cs' = 'd4aa1cc8dc472d9d8ca54c9a74350c6e8dc3ccdd9259848ae2e3bb0d74a970de'
+            'WfpLeaseFaultController.cs' = '7213d6ad74f51b7c742c3f9f7da11053970f681a3af0d25c5c970b17f23092d8'
+            'WfpLoopbackLease.cs' = '8cd4e0c0e310f6d0581efb8f097cd741298f38a3fa37a3214c3bd9ff1666f194'
             'WfpPairedFixture.cs' = '7b0f9ffb806860cdb6a775f4756fe72a21805e79ff6dbc15955c6fea2d081c7d'
             'WfpPairedSetup.ps1' = '6f9c22fc24a32db27944a32af5a8593c8e85695b783a4b79b3ac22feccd6249d'
-            'WfpPairedSupervisor.cs' = '612f8c11799d25b36bd2b938527948e40e51cfd6e5327caa73a806ce114a569a'
+            'WfpPairedSupervisor.cs' = '51776524b9a2e5b968efce39bb6cfd1d6f9cde4b2175db1fca67b38796f75c15'
             'WfpStaticRecovery.cs' = '3deae31a6212bfb98926c3e0a541ac15eeff9cc0d4c1a26510112f659c90dc03'
         }
         Copy-WfpFaultPinnedInputs $PSScriptRoot $diagnosticSourceRoot $faultSourceSha256
         $sources = foreach ($sourceName in $sourceNames) { Join-Path $diagnosticSourceRoot $sourceName }
         . (Join-Path $diagnosticSourceRoot 'WfpPairedSetup.ps1')
-        foreach ($priorStage in (Get-ChildItem -LiteralPath $faultStageRoot -Directory -Force -Filter '.clue-wfp-fault-setup-*')) {
-            if ($priorStage.FullName -ieq $stage -or $priorStage.Name -cnotmatch '^\.clue-wfp-fault-setup-[0-9a-f]{32}$') { continue }
-            $setupStage = 'WFP_ENFORCEMENT_FAULT_PRIOR_STAGE_ACL'
-            Assert-WfpFaultStageAcl $priorStage.FullName $faultStageDacl
-            $setupStage = 'MXC_RELEASE_VERIFICATION'
-            $priorFault = [IO.Path]::Combine($priorStage.FullName, 'enforcement-fault', 'private')
-            $priorFaultLaunch = Join-Path $priorFault 'fault-launch.txt'
-            if (![IO.File]::Exists($priorFaultLaunch)) { continue }
-            Assert-NoReparsePath $priorFaultLaunch
-            $priorFaultResult = Read-WfpPairedRecord (Join-Path $priorFault 'result.json')
-            if ($priorFaultResult['proofAuthorization'] -isnot [bool] -or $priorFaultResult['proofAuthorization'] -or
-                $priorFaultResult['stageCleanupSafe'] -isnot [bool] -or !$priorFaultResult['stageCleanupSafe'] -or
-                $priorFaultResult['jobAbsent'] -isnot [bool] -or !$priorFaultResult['jobAbsent']) {
-                throw 'A previous WFP enforcement fault diagnostic still needs scoped cleanup verification.'
-            }
-        }
     } else {
         $stage = Join-Path $install ('.setup-' + [Guid]::NewGuid().ToString('N'))
         Assert-NoReparsePath $stage -CreateDirectory
@@ -850,12 +839,14 @@ try {
         $staticRecoverySource = Join-Path $diagnosticSourceRoot 'WfpStaticRecovery.cs'
         $bfeWatchSource = Join-Path $diagnosticSourceRoot 'WfpBfeWatch.cs'
         $leaseFaultSource = Join-Path $diagnosticSourceRoot 'WfpLeaseFaultController.cs'
+        $faultRecoverySource = Join-Path $diagnosticSourceRoot 'WfpFaultRecovery.cs'
         Assert-NoReparsePath $fixtureSource
         Assert-NoReparsePath $hostLoopbackFixtureSource
         Assert-NoReparsePath $controllerSource
         Assert-NoReparsePath $staticRecoverySource
         Assert-NoReparsePath $bfeWatchSource
         Assert-NoReparsePath $leaseFaultSource
+        Assert-NoReparsePath $faultRecoverySource
         $fixture = Join-Path $stage 'fixture\WfpPairedFixture.exe'
         $fixtureArgs = $compilerBase + @('/platform:x64', "/out:$fixture") +
             $frameworkReferences + $fixtureSource + $hostLoopbackFixtureSource
@@ -995,7 +986,8 @@ $diagnosticPins
     if ($stagedWfpDiagnostic) {
         $controller = Join-Path $bin 'CLU-E-WfpPairedDiagnostic.exe'
         $controllerArgs = $compilerBase + @('/platform:x64', '/main:WfpPairedSupervisor', "/out:$controller", "/reference:$web") +
-            $frameworkReferences + $sources + $pinSource + $controllerSource + $staticRecoverySource + $bfeWatchSource + $leaseFaultSource
+            $frameworkReferences + $sources + $pinSource + $controllerSource + $staticRecoverySource + $bfeWatchSource +
+            $leaseFaultSource + $faultRecoverySource
         if ((Invoke-ExactExecutable $csc $controllerArgs $stage 60) -ne 0) { throw 'Native paired diagnostic compilation failed.' }
         Assert-NoReparsePath $controller
         if ($WfpEnforcementFaultDiagnostic) {
@@ -1003,6 +995,46 @@ $diagnosticPins
             $faultReader = Join-Path $diagnosticSourceRoot 'WfpEnforcementFaultSetup.ps1'
             Assert-NoReparsePath $faultReader
             . $faultReader
+            $setupStage = 'WFP_ENFORCEMENT_FAULT_PRIOR_STAGE_RECONCILIATION'
+            $seenPriorStages = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+            foreach ($priorStage in (Get-ChildItem -LiteralPath $faultStageRoot -Directory -Force -Filter '.clue-wfp-fault-setup-*')) {
+                if ($priorStage.FullName -ieq $stage -or $priorStage.Name -cnotmatch '\A\.clue-wfp-fault-setup-[0-9a-f]{32}\z') { continue }
+                $wfpFaultBlockedPriorStageId = $priorStage.Name
+                $setupStage = 'WFP_ENFORCEMENT_FAULT_PRIOR_STAGE_ACL'
+                Assert-WfpFaultStageAcl $priorStage.FullName $faultStageDacl
+                $setupStage = 'WFP_ENFORCEMENT_FAULT_PRIOR_STAGE_RECONCILIATION'
+                $priorFault = [IO.Path]::Combine($priorStage.FullName, 'enforcement-fault', 'private')
+                try { $priorPrivateItem = Get-Item -LiteralPath $priorFault -Force -ErrorAction Stop }
+                catch [System.Management.Automation.ItemNotFoundException] { continue }
+                if (!$priorPrivateItem.PSIsContainer) { throw 'The previous WFP fault stage private directory is unverified.' }
+                Assert-NoReparsePath $priorFault
+                $priorFaultLaunch = Join-Path $priorFault 'fault-launch.txt'
+                try { $priorLaunchItem = Get-Item -LiteralPath $priorFaultLaunch -Force -ErrorAction Stop }
+                catch [System.Management.Automation.ItemNotFoundException] {
+                    if ([IO.File]::Exists((Join-Path $priorFault 'fault-native-started.txt')) -or
+                        [IO.File]::Exists((Join-Path $priorFault 'result.json'))) {
+                        throw 'The previous WFP fault stage launch marker is missing.'
+                    }
+                    continue
+                }
+                if ($priorLaunchItem.PSIsContainer) { throw 'The previous WFP fault stage launch marker is unverified.' }
+                if (!$seenPriorStages.Add($priorStage.Name) -or $seenPriorStages.Count -gt 8) {
+                    throw 'The number or identity of previous WFP fault stages is unverified.'
+                }
+                Assert-NoReparsePath $priorFaultLaunch
+                $priorFaultResult = Read-WfpPairedRecord (Join-Path $priorFault 'result.json')
+                if ($priorFaultResult['proofAuthorization'] -isnot [bool] -or $priorFaultResult['proofAuthorization'] -or
+                    $priorFaultResult['stageCleanupSafe'] -isnot [bool] -or $priorFaultResult['jobAbsent'] -isnot [bool]) {
+                    throw 'The previous WFP fault stage receipt is unverified.'
+                }
+                if ($priorFaultResult['stageCleanupSafe'] -and $priorFaultResult['jobAbsent']) { continue }
+                $priorReconciliation = Invoke-WfpPriorStageReconciliation $controller $stage $priorStage.Name
+                $wfpFaultPriorStageReconciliation += $priorReconciliation
+                if ($priorReconciliation.state -cne 'WFP_PRIOR_DYNAMIC_STAGE_RECONCILED') {
+                    throw 'A previous WFP enforcement fault diagnostic still needs scoped cleanup verification.'
+                }
+            }
+            $wfpFaultBlockedPriorStageId = $null
             $setupStage = 'WFP_ENFORCEMENT_FAULT_EXECUTION'
             Write-Host '[3/4] Testing loss of the disposable WFP lease owner with an independent backup lease.'
             $stageCleanupSafe = $false

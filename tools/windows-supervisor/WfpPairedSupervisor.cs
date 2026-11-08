@@ -65,6 +65,8 @@ internal sealed partial class WfpPairedSupervisor
                     return new WfpPairedSupervisor("enforcement-fault").RunEnforcementFault();
                 if (args.Length == 3 && args[0] == "enforcement-fault-owner")
                     return RunEnforcementFaultOwner(args[1], args[2]);
+                if (args.Length == 2 && args[0] == "enforcement-fault-reconcile")
+                    return RunEnforcementFaultRecovery(args[1]);
                 return 125;
             }
             if (args.Length == 1 && args[0] == "paired") return new WfpPairedSupervisor("paired").Run();

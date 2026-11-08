@@ -132,6 +132,12 @@ internal sealed class WfpLoopbackLease : IDisposable
         return Install(packageSid, null, out failureCleanupVerified);
     }
 
+    internal static WfpLoopbackLease InstallExactDynamic(byte[] packageSid, Guid sublayer, Guid[] filters,
+        out bool failureCleanupVerified)
+    {
+        return Install(packageSid, null, sublayer, ExactKeys(sublayer, filters), out failureCleanupVerified);
+    }
+
     internal static WfpLoopbackLease InstallStatic(byte[] packageSid, Action<Guid, Guid[]> publishRecoveryKeys,
         out bool failureCleanupVerified)
     {
@@ -142,12 +148,17 @@ internal sealed class WfpLoopbackLease : IDisposable
     private static WfpLoopbackLease Install(byte[] packageSid, Action<Guid, Guid[]> publishRecoveryKeys,
         out bool failureCleanupVerified)
     {
+        var filterKeys = new Guid[Layers.Length];
+        for (int index = 0; index < filterKeys.Length; index++) filterKeys[index] = Guid.NewGuid();
+        return Install(packageSid, publishRecoveryKeys, Guid.NewGuid(), filterKeys, out failureCleanupVerified);
+    }
+
+    private static WfpLoopbackLease Install(byte[] packageSid, Action<Guid, Guid[]> publishRecoveryKeys,
+        Guid sublayerKey, Guid[] filterKeys, out bool failureCleanupVerified)
+    {
         failureCleanupVerified = false;
         byte[] expectedSid = ValidatePackageSid(packageSid);
         bool staticLifetime = publishRecoveryKeys != null;
-        Guid sublayerKey = Guid.NewGuid();
-        var filterKeys = new Guid[Layers.Length];
-        for (int index = 0; index < filterKeys.Length; index++) filterKeys[index] = Guid.NewGuid();
         if (staticLifetime)
         {
             // Publish the exact recovery intent before making any WFP changes.
