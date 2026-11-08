@@ -146,10 +146,32 @@ function readTapCounts(text) {
     ? counts : null;
 }
 
+function runReviewedFile(test, env, timeout) {
+  // Node 22.16 exposes this setting under its experimental spelling.
+  const isolation = process.allowedNodeEnvironmentFlags.has('--test-isolation')
+    ? '--test-isolation=none' : '--experimental-test-isolation=none';
+  let child;
+  try {
+    child = spawnSync(process.execPath, ['--test', isolation, '--test-reporter=tap', test], {
+      cwd, env, timeout, killSignal: 'SIGKILL', maxBuffer: 2 * 1024 * 1024, windowsHide: true, encoding: 'utf8',
+    });
+  } catch {
+    return { outcome: 'LAUNCH_FAILED' };
+  }
+  if (child.error?.code === 'ETIMEDOUT') return { outcome: 'TIMEOUT' };
+  if (child.error?.code === 'ENOBUFS') return { outcome: 'OUTPUT_LIMIT' };
+  if (child.error) return { outcome: 'LAUNCH_FAILED' };
+  const counts = readTapCounts(child.stdout ?? '');
+  if (!counts) return { outcome: 'TAP_UNVERIFIED' };
+  const passed = child.status === 0 && counts.pass === counts.tests;
+  return { outcome: passed ? 'PASSED' : 'SUITE_FAILED', counts };
+}
+
 const result = {
   side: side === 'baseline' || side === 'candidate' ? side : 'unverified',
   state: 'BOOTSTRAP_REFUSED',
   exitCode: null, tests: null, pass: null, fail: null, cancelled: null, skipped: null,
+  fileOutcomes: [],
   descendantScratchVerified: false, effectiveScratchVerified: false,
   checkoutWriteDenied: false, privateReadDenied: false, hostEnvironmentAbsent: hostEnvironmentAbsent(),
 };
@@ -182,14 +204,31 @@ function run() {
   if (!result.descendantScratchVerified) return;
 
   result.state = 'WORKLOAD_FAILED';
-  const suite = spawnSync(process.execPath, ['--test', '--test-concurrency=1', '--test-reporter=tap', ...tests], {
-    cwd, env, timeout: 60_000, maxBuffer: 2 * 1024 * 1024, windowsHide: true, encoding: 'utf8',
-  });
-  result.exitCode = Number.isSafeInteger(suite.status) ? suite.status : null;
-  const counts = readTapCounts(suite.stdout ?? '');
-  if (counts === null) return;
-  for (const key of ['tests', 'pass', 'fail', 'cancelled', 'skipped']) result[key] = counts[key];
-  if (suite.error === undefined && suite.status === 0 && counts.pass === counts.tests) result.state = 'WORKLOAD_PASSED';
+  result.exitCode = 1;
+  result.fileOutcomes = tests.map(() => 'NOT_RUN');
+  const totals = { tests: 0, pass: 0, fail: 0, cancelled: 0, skipped: 0 };
+  let allCountsVerified = true;
+  const deadline = performance.now() + 70_000;
+  for (const [index, test] of tests.entries()) {
+    const remaining = Math.floor(deadline - performance.now());
+    if (remaining <= 0) {
+      allCountsVerified = false;
+      break;
+    }
+    const { outcome, counts } = runReviewedFile(test, env, remaining);
+    result.fileOutcomes[index] = outcome;
+    if (counts) {
+      for (const key of Object.keys(totals)) totals[key] += counts[key];
+    } else {
+      allCountsVerified = false;
+    }
+  }
+  if (!allCountsVerified || !Object.values(totals).every(Number.isSafeInteger)) return;
+  Object.assign(result, totals);
+  if (result.fileOutcomes.every((outcome) => outcome === 'PASSED')) {
+    result.exitCode = 0;
+    result.state = 'WORKLOAD_PASSED';
+  }
 }
 
 try {

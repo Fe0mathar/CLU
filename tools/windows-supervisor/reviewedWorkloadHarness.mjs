@@ -15,6 +15,8 @@ const trustedMarker = 'clue-admission-source-v1\n';
 const outsideMarker = 'clue-admission-outside-v1\n';
 const privateMarker = 'clue-admission-private-v1\n';
 const workloadStates = new Set(['WORKLOAD_PASSED', 'BOOTSTRAP_REFUSED', 'DESCENDANT_UNVERIFIED', 'WORKLOAD_FAILED']);
+const fileStates = new Set(['PASSED', 'LAUNCH_FAILED', 'TIMEOUT', 'OUTPUT_LIMIT', 'TAP_UNVERIFIED', 'SUITE_FAILED', 'NOT_RUN']);
+const testPathPattern = /^ui\/clue-dashboard\/test\/[A-Za-z0-9][A-Za-z0-9._-]*\.test\.mjs$/u;
 const countFields = ['tests', 'pass', 'fail', 'cancelled', 'skipped'];
 const checkFields = [
   'descendantScratchVerified', 'effectiveScratchVerified', 'checkoutWriteDenied',
@@ -121,22 +123,32 @@ function nativeEvidence({ code, failure, stderr }) {
   };
 }
 
-function workloadEvidence(stdout, side) {
+function workloadEvidence(stdout, side, testFileCount) {
   const lines = stdout.split(/\r?\n/u).filter((line) => line.startsWith(evidencePrefix));
   if (lines.length !== 1 || lines[0].length > 2048) return null;
   let value;
   try { value = JSON.parse(lines[0].slice(evidencePrefix.length)); } catch { return null; }
   if (value?.side !== side || !workloadStates.has(value.state) ||
-      (value.exitCode !== null && !Number.isSafeInteger(value.exitCode)) ||
       !checkFields.every((name) => typeof value[name] === 'boolean')) return null;
+  const suiteStarted = value.state === 'WORKLOAD_PASSED' || value.state === 'WORKLOAD_FAILED';
+  const expectedExit = suiteStarted ? value.state === 'WORKLOAD_PASSED' ? 0 : 1 : null;
+  const { fileOutcomes } = value;
+  if (value.exitCode !== expectedExit || !Array.isArray(fileOutcomes) ||
+      fileOutcomes.length !== (suiteStarted ? testFileCount : 0) ||
+      !fileOutcomes.every((outcome) => fileStates.has(outcome))) return null;
+  const firstNotRun = fileOutcomes.indexOf('NOT_RUN');
+  if (firstNotRun !== -1 && !fileOutcomes.slice(firstNotRun).every((outcome) => outcome === 'NOT_RUN')) return null;
+  const allFilesPassed = suiteStarted && fileOutcomes.every((outcome) => outcome === 'PASSED');
+  const allTapVerified = suiteStarted && fileOutcomes.every((outcome) => outcome === 'PASSED' || outcome === 'SUITE_FAILED');
   const counts = Object.fromEntries(countFields.map((name) => [name, value[name]]));
-  const countsPresent = countFields.every((name) => Number.isSafeInteger(counts[name]) && counts[name] >= 0);
-  if (!countsPresent && !countFields.every((name) => counts[name] === null)) return null;
-  if (countsPresent && (counts.tests === 0 || counts.pass + counts.fail + counts.cancelled + counts.skipped > counts.tests)) return null;
+  if (allTapVerified) {
+    if (!countFields.every((name) => Number.isSafeInteger(counts[name]) && counts[name] >= 0) ||
+        counts.tests < testFileCount || counts.pass + counts.fail + counts.cancelled + counts.skipped > counts.tests) return null;
+  } else if (!countFields.every((name) => counts[name] === null)) return null;
   const checks = Object.fromEntries(checkFields.map((name) => [name, value[name]]));
-  const passed = value.exitCode === 0 && countsPresent && counts.tests === counts.pass && checkFields.every((name) => checks[name]);
-  if ((value.state === 'WORKLOAD_PASSED') !== passed) return null;
-  return { state: value.state, exitCode: value.exitCode, ...counts, ...checks };
+  if (suiteStarted && !checkFields.every((name) => checks[name])) return null;
+  if ((value.state === 'WORKLOAD_PASSED') !== allFilesPassed || (allFilesPassed && counts.tests !== counts.pass)) return null;
+  return { state: value.state, exitCode: value.exitCode, ...counts, ...checks, fileOutcomes };
 }
 
 /** Run the already-reviewed dashboard snapshots as actual Node test workloads in native containment. */
@@ -157,7 +169,14 @@ export async function exerciseReviewedWorkloads({
     for (const path of Object.values(copies)) mkdirSync(path);
     const inputs = prepareDashboardComparisonInputs(repoRoot, copies.baseline, copies.candidate);
     for (const side of sides) renameSync(copies[side], paths[side].checkout);
-    const manifest = JSON.stringify({ schemaVersion, testPaths: inputs.trackedTestPaths });
+    const testPaths = inputs.trackedTestPaths;
+    if (testPaths.length < 1 || testPaths.length > 64 ||
+        !testPaths.every((path) => path.length <= 128 && testPathPattern.test(path)) ||
+        new Set(testPaths.map((path) => path.toLowerCase())).size !== testPaths.length) {
+      throw new Error('HOST_TEST_REVIEWED_PATHS_UNVERIFIED');
+    }
+    const manifest = JSON.stringify({ schemaVersion, testPaths });
+    if (Buffer.byteLength(manifest) > 4096) throw new Error('HOST_TEST_REVIEWED_MANIFEST_TOO_LARGE');
     const manifestPath = join(trusted, 'reviewed-workload.json');
     createFile(manifestPath, manifest);
     const digests = { baseline: inputs.baselineSha256, candidate: inputs.candidateSha256 };
@@ -165,7 +184,8 @@ export async function exerciseReviewedWorkloads({
       baseline: { kind: 'COMMITTED_HEAD', head: inputs.head, scopeSha256: digests.baseline },
       candidate: { kind: 'CURRENT_DASHBOARD', dirty: inputs.dirty, scopeSha256: digests.candidate },
       changedPaths: inputs.changedPaths, fileCount: inputs.fileCount, sameTestFiles: true,
-      testFileCount: inputs.trackedTestPaths.length, manifestSha256: createHash('sha256').update(manifest).digest('hex'),
+      testFileCount: testPaths.length, testPaths: [...testPaths],
+      manifestSha256: createHash('sha256').update(manifest).digest('hex'),
     };
     if (inputs.changedPaths.length === 0) {
       report.state = 'REVIEWED_WORKLOAD_NO_DASHBOARD_CHANGES';
@@ -237,7 +257,7 @@ export async function exerciseReviewedWorkloads({
       }
       const entries = paths[side];
       const evidence = await send(requests[side], entries);
-      const workload = workloadEvidence(evidence.stdout, side);
+      const workload = workloadEvidence(evidence.stdout, side, testPaths.length);
       const host = {
         startedMarkerVerified: exactMarker(join(entries.workspace, 'started.txt'), observed),
         descendantMarkerVerified: exactMarker(join(entries.workspace, 'descendant.txt'), observed),
