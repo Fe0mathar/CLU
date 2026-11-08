@@ -7,6 +7,13 @@ const side = process.argv[1];
 const cwd = process.cwd();
 const root = path.dirname(cwd);
 const admission = path.dirname(root);
+const filePrefix = 'CLU_E_REVIEWED_FILE ';
+const errorCodes = [
+  'EACCES', 'EPERM', 'ENOENT', 'ENOTDIR', 'EISDIR', 'ELOOP', 'EIO', 'EMFILE', 'ENFILE', 'ENOSYS', 'EINVAL',
+  'ETIMEDOUT', 'ENOBUFS', 'ERR_ACCESS_DENIED', 'ERR_MODULE_NOT_FOUND', 'ERR_INVALID_MODULE_SPECIFIER',
+  'ERR_UNSUPPORTED_ESM_URL_SCHEME', 'ERR_UNKNOWN_FILE_EXTENSION', 'ERR_INVALID_PACKAGE_CONFIG',
+  'ERR_PACKAGE_PATH_NOT_EXPORTED', 'ERR_REQUIRE_ESM', 'ERR_INVALID_ARG_VALUE', 'ERR_ASSERTION',
+];
 
 function samePath(actual, expected) {
   return typeof actual === 'string' && path.isAbsolute(actual) && path.relative(expected, actual) === '';
@@ -79,7 +86,13 @@ function checkoutWriteDenied() {
 }
 
 function exactFile(file) {
-  return fs.lstatSync(file).isFile() && samePath(fs.realpathSync.native(file), file);
+  const info = fs.lstatSync(file);
+  return info.isFile() && info.nlink === 1 && samePath(fs.realpathSync.native(file), file);
+}
+
+function reviewedPathName(name) {
+  return typeof name === 'string' && name.length <= 128 &&
+    /^ui\/clue-dashboard\/test\/[A-Za-z0-9][A-Za-z0-9._-]*\.test\.mjs$/u.test(name);
 }
 
 function reviewedPaths() {
@@ -105,8 +118,7 @@ function reviewedPaths() {
 
   const identities = new Set();
   for (const name of data.testPaths) {
-    if (typeof name !== 'string' || name.length > 128 ||
-        !/^ui\/clue-dashboard\/test\/[A-Za-z0-9][A-Za-z0-9._-]*\.test\.mjs$/u.test(name) ||
+    if (!reviewedPathName(name) ||
         identities.has(name.toLowerCase()) || !exactFile(path.join(cwd, name))) return null;
     identities.add(name.toLowerCase());
   }
@@ -146,32 +158,125 @@ function readTapCounts(text) {
     ? counts : null;
 }
 
-function runReviewedFile(test, env, timeout) {
-  // Node 22.16 exposes this setting under its experimental spelling.
-  const isolation = process.allowedNodeEnvironmentFlags.has('--test-isolation')
-    ? '--test-isolation=none' : '--experimental-test-isolation=none';
+function errorCode(error) {
+  if (errorCodes.includes(error?.code)) return error.code;
+  return error instanceof SyntaxError ? 'SYNTAX_ERROR' : 'OTHER';
+}
+
+function fileDiagnostic(phase, code) {
+  return { phase, code, canaryRealpath: 'UNVERIFIED', testRealpath: 'UNVERIFIED' };
+}
+
+async function fileWorker() {
+  const { pathToFileURL } = require('node:url');
+  const cwd = process.cwd();
+  const root = path.dirname(cwd);
+  const canary = path.join(path.dirname(root), 'trusted-source', 'reviewed-esm-canary.mjs');
+  const canaryValue = 'clue-reviewed-esm-canary-v1';
+  const canaryText = `export default '${canaryValue}';\n`;
+  const evidence = fileDiagnostic('CHILD_ENVIRONMENT', 'MISMATCH');
+  function plainRealpath(file) {
+    try {
+      return samePath(fs.realpathSync(file), file) ? 'MATCH' : 'MISMATCH';
+    } catch (error) {
+      return errorCode(error);
+    }
+  }
+  async function importApprovedFile() {
+    const name = process.argv[1];
+    if (process.argv.length !== 2 || !reviewedPathName(name) || !hostEnvironmentAbsent() ||
+        !verifyScratch(scratchLayout(root))) return;
+    evidence.phase = 'CANARY_PATH';
+    if (!exactFile(canary)) return;
+    evidence.canaryRealpath = plainRealpath(canary);
+    if (evidence.canaryRealpath === 'MISMATCH') return;
+    evidence.phase = 'CANARY_READ';
+    if (fs.statSync(canary).size !== Buffer.byteLength(canaryText) || fs.readFileSync(canary, 'utf8') !== canaryText) return;
+    evidence.phase = 'CANARY_IMPORT';
+    if ((await import(pathToFileURL(canary).href)).default !== canaryValue) return;
+
+    const test = path.join(cwd, name);
+    evidence.phase = 'TEST_PATH';
+    if (!exactFile(test)) return;
+    evidence.testRealpath = plainRealpath(test);
+    if (evidence.testRealpath === 'MISMATCH') return;
+    evidence.phase = 'TEST_READ';
+    const fd = fs.openSync(test, 'r');
+    try {
+      if (fs.readSync(fd, Buffer.alloc(1), 0, 1, 0) !== 1) return;
+    } finally {
+      fs.closeSync(fd);
+    }
+    evidence.phase = 'TEST_IMPORT';
+    await import(pathToFileURL(test).href);
+    evidence.phase = 'TEST_RUN';
+    evidence.code = 'NONE';
+  }
+  try {
+    await importApprovedFile();
+  } catch (error) {
+    evidence.code = errorCode(error);
+  }
+  console.error(filePrefix + JSON.stringify(evidence));
+  if (evidence.phase !== 'TEST_RUN') process.exitCode = 1;
+}
+
+const workerSource = [
+  "'use strict';const fs=require('node:fs'),path=require('node:path');",
+  'const errorCodes=' + JSON.stringify(errorCodes) + ', filePrefix=' + JSON.stringify(filePrefix) + ';',
+  samePath, canonicalDirectory, matchesDirectory, scratchLayout, hostEnvironmentAbsent, verifyScratch,
+  exactFile, reviewedPathName, errorCode, fileDiagnostic, fileWorker, 'fileWorker();',
+].join('\n');
+const childPhases = ['CHILD_ENVIRONMENT', 'CANARY_PATH', 'CANARY_READ', 'CANARY_IMPORT',
+  'TEST_PATH', 'TEST_READ', 'TEST_IMPORT', 'TEST_RUN'];
+
+function readFileDiagnostic(stderr) {
+  const lines = stderr.split(/\r?\n/u).filter((line) => line.startsWith(filePrefix));
+  if (lines.length !== 1 || lines[0].length > 512) return null;
+  try {
+    const { phase, code, canaryRealpath, testRealpath } = JSON.parse(lines[0].slice(filePrefix.length));
+    const pathCodes = ['UNVERIFIED', 'MATCH', 'MISMATCH', 'OTHER', ...errorCodes];
+    if (!childPhases.includes(phase) ||
+        !(phase === 'TEST_RUN' ? code === 'NONE' : ['MISMATCH', 'SYNTAX_ERROR', 'OTHER', ...errorCodes].includes(code)) ||
+        !pathCodes.includes(canaryRealpath) || !pathCodes.includes(testRealpath)) return null;
+    return { phase, code, canaryRealpath, testRealpath };
+  } catch {
+    return null;
+  }
+}
+
+function runReviewedFile(test, env, timeout, preserveSymlinks) {
+  const args = ['--test-reporter=tap'];
+  if (preserveSymlinks) args.push('--preserve-symlinks');
+  args.push('-e', workerSource, test);
   let child;
   try {
-    child = spawnSync(process.execPath, ['--test', isolation, '--test-reporter=tap', test], {
+    child = spawnSync(process.execPath, args, {
       cwd, env, timeout, killSignal: 'SIGKILL', maxBuffer: 2 * 1024 * 1024, windowsHide: true, encoding: 'utf8',
     });
-  } catch {
-    return { outcome: 'LAUNCH_FAILED' };
+  } catch (error) {
+    child = { error };
   }
-  if (child.error?.code === 'ETIMEDOUT') return { outcome: 'TIMEOUT' };
-  if (child.error?.code === 'ENOBUFS') return { outcome: 'OUTPUT_LIMIT' };
-  if (child.error) return { outcome: 'LAUNCH_FAILED' };
+  if (child.error) {
+    const code = errorCode(child.error);
+    const outcome = code === 'ETIMEDOUT' ? 'TIMEOUT' : code === 'ENOBUFS' ? 'OUTPUT_LIMIT' : 'LAUNCH_FAILED';
+    return { outcome, diagnostic: fileDiagnostic('SPAWN', code) };
+  }
+  const diagnostic = readFileDiagnostic(child.stderr ?? '');
+  if (!diagnostic) return { outcome: 'TAP_UNVERIFIED', diagnostic: fileDiagnostic('CHILD_START', 'UNVERIFIED') };
+  if (diagnostic.phase !== 'TEST_RUN') return { outcome: 'CHILD_REFUSED', diagnostic };
   const counts = readTapCounts(child.stdout ?? '');
-  if (!counts) return { outcome: 'TAP_UNVERIFIED' };
+  if (!counts) return { outcome: 'TAP_UNVERIFIED', diagnostic: { ...diagnostic, code: 'UNVERIFIED' } };
   const passed = child.status === 0 && counts.pass === counts.tests;
-  return { outcome: passed ? 'PASSED' : 'SUITE_FAILED', counts };
+  return { outcome: passed ? 'PASSED' : 'SUITE_FAILED', counts,
+    diagnostic: { ...diagnostic, code: passed ? 'NONE' : 'TEST_FAILURE' } };
 }
 
 const result = {
   side: side === 'baseline' || side === 'candidate' ? side : 'unverified',
   state: 'BOOTSTRAP_REFUSED',
   exitCode: null, tests: null, pass: null, fail: null, cancelled: null, skipped: null,
-  fileOutcomes: [],
+  fileOutcomes: [], fileDiagnostics: [], executionMode: 'DIRECT_IMPORT', fallback: null, esmCanaryVerified: false,
   descendantScratchVerified: false, effectiveScratchVerified: false,
   checkoutWriteDenied: false, privateReadDenied: false, hostEnvironmentAbsent: hostEnvironmentAbsent(),
 };
@@ -206,8 +311,10 @@ function run() {
   result.state = 'WORKLOAD_FAILED';
   result.exitCode = 1;
   result.fileOutcomes = tests.map(() => 'NOT_RUN');
+  result.fileDiagnostics = tests.map(() => fileDiagnostic('NOT_RUN', 'NONE'));
   const totals = { tests: 0, pass: 0, fail: 0, cancelled: 0, skipped: 0 };
   let allCountsVerified = true;
+  let preserveSymlinks = false;
   const deadline = performance.now() + 70_000;
   for (const [index, test] of tests.entries()) {
     const remaining = Math.floor(deadline - performance.now());
@@ -215,14 +322,33 @@ function run() {
       allCountsVerified = false;
       break;
     }
-    const { outcome, counts } = runReviewedFile(test, env, remaining);
+    let execution = runReviewedFile(test, env, remaining, preserveSymlinks);
+    const { phase, code, canaryRealpath } = execution.diagnostic;
+    const retryBudget = Math.floor(deadline - performance.now());
+    const permissionCodes = ['EACCES', 'EPERM'];
+    // Retry only the first, untouched test after a trusted canary path failure.
+    // The host stages and verifies regular copies; each child still checks native paths.
+    if (index === 0 && retryBudget > 0 && phase === 'CANARY_IMPORT' &&
+        permissionCodes.includes(code) && permissionCodes.includes(canaryRealpath)) {
+      preserveSymlinks = true;
+      result.executionMode = 'DIRECT_IMPORT_PRESERVE_SYMLINKS';
+      result.fallback = { code, realpathCode: canaryRealpath };
+      execution = runReviewedFile(test, env, retryBudget, preserveSymlinks);
+    }
+    const { outcome, counts, diagnostic } = execution;
     result.fileOutcomes[index] = outcome;
+    result.fileDiagnostics[index] = diagnostic;
+    if (index === 0 && diagnostic.phase.startsWith('CANARY_')) {
+      allCountsVerified = false;
+      break;
+    }
     if (counts) {
       for (const key of Object.keys(totals)) totals[key] += counts[key];
     } else {
       allCountsVerified = false;
     }
   }
+  result.esmCanaryVerified = result.fileDiagnostics.every(({ phase }) => phase.startsWith('TEST_'));
   if (!allCountsVerified || !Object.values(totals).every(Number.isSafeInteger)) return;
   Object.assign(result, totals);
   if (result.fileOutcomes.every((outcome) => outcome === 'PASSED')) {

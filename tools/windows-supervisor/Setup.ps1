@@ -637,7 +637,9 @@ $diagnosticPins
             '--supervisor', $admissionSupervisor, '--output', $admissionOutput) $repo $admissionTimeout
         Assert-NoReparsePath $admissionOutput
         $admissionOutputItem = Get-Item -LiteralPath $admissionOutput -Force
-        if ($admissionOutputItem.PSIsContainer -or $admissionOutputItem.Length -lt 1 -or $admissionOutputItem.Length -gt 32768) {
+        $admissionMaximumReportBytes = if ($ReviewedWorkloadDiagnostic) { 65536 } else { 32768 }
+        if ($admissionOutputItem.PSIsContainer -or $admissionOutputItem.Length -lt 1 -or
+            $admissionOutputItem.Length -gt $admissionMaximumReportBytes) {
             throw 'Staged diagnostic runner report has an invalid size or type.'
         }
         $admissionRead = [IO.File]::ReadAllText($admissionOutput) | ConvertFrom-Json -AsHashtable -Depth 12

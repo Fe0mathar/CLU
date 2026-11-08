@@ -12,10 +12,25 @@ const evidencePrefix = 'CLU_E_REVIEWED_WORKLOAD ';
 const timeoutMs = 90_000;
 const observed = 'clue-admission-observed-v1\n';
 const trustedMarker = 'clue-admission-source-v1\n';
+const esmCanary = "export default 'clue-reviewed-esm-canary-v1';\n";
 const outsideMarker = 'clue-admission-outside-v1\n';
 const privateMarker = 'clue-admission-private-v1\n';
 const workloadStates = new Set(['WORKLOAD_PASSED', 'BOOTSTRAP_REFUSED', 'DESCENDANT_UNVERIFIED', 'WORKLOAD_FAILED']);
-const fileStates = new Set(['PASSED', 'LAUNCH_FAILED', 'TIMEOUT', 'OUTPUT_LIMIT', 'TAP_UNVERIFIED', 'SUITE_FAILED', 'NOT_RUN']);
+const fileStates = new Set(['PASSED', 'LAUNCH_FAILED', 'TIMEOUT', 'OUTPUT_LIMIT', 'TAP_UNVERIFIED', 'SUITE_FAILED', 'CHILD_REFUSED', 'NOT_RUN']);
+const filePhases = new Set([
+  'NOT_RUN', 'SPAWN', 'CHILD_START', 'CHILD_ENVIRONMENT', 'CANARY_PATH', 'CANARY_READ', 'CANARY_IMPORT',
+  'TEST_PATH', 'TEST_READ', 'TEST_IMPORT', 'TEST_RUN',
+]);
+const fileCodes = new Set([
+  'NONE', 'UNVERIFIED', 'MISMATCH', 'TEST_FAILURE', 'EACCES', 'EPERM', 'ENOENT', 'ENOTDIR', 'EISDIR', 'ELOOP',
+  'EIO', 'EMFILE', 'ENFILE', 'ENOSYS', 'EINVAL', 'ETIMEDOUT', 'ENOBUFS', 'ERR_ACCESS_DENIED', 'ERR_MODULE_NOT_FOUND',
+  'ERR_INVALID_MODULE_SPECIFIER', 'ERR_UNSUPPORTED_ESM_URL_SCHEME', 'ERR_UNKNOWN_FILE_EXTENSION',
+  'ERR_INVALID_PACKAGE_CONFIG', 'ERR_PACKAGE_PATH_NOT_EXPORTED', 'ERR_REQUIRE_ESM', 'ERR_INVALID_ARG_VALUE',
+  'ERR_ASSERTION', 'SYNTAX_ERROR', 'OTHER',
+]);
+const fallbackCodes = new Set(['EACCES', 'EPERM']);
+const canaryVerifiedPhases = new Set(['TEST_PATH', 'TEST_READ', 'TEST_IMPORT', 'TEST_RUN']);
+const childRefusalPhases = new Set(['CHILD_ENVIRONMENT', 'CANARY_PATH', 'CANARY_READ', 'CANARY_IMPORT', 'TEST_PATH', 'TEST_READ', 'TEST_IMPORT']);
 const testPathPattern = /^ui\/clue-dashboard\/test\/[A-Za-z0-9][A-Za-z0-9._-]*\.test\.mjs$/u;
 const countFields = ['tests', 'pass', 'fail', 'cancelled', 'skipped'];
 const checkFields = [
@@ -123,19 +138,53 @@ function nativeEvidence({ code, failure, stderr }) {
   };
 }
 
+function exactObject(value, keys) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value) &&
+    Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key));
+}
+
+function fileDiagnostic(value, outcome) {
+  if (!exactObject(value, ['phase', 'code', 'canaryRealpath', 'testRealpath'])) return null;
+  const { phase, code, canaryRealpath, testRealpath } = value;
+  const validRealpath = (state) => state === 'MATCH' || fileCodes.has(state);
+  if (!filePhases.has(phase) || !fileCodes.has(code) || !validRealpath(canaryRealpath) || !validRealpath(testRealpath)) return null;
+  const realpathsUnverified = canaryRealpath === 'UNVERIFIED' && testRealpath === 'UNVERIFIED';
+  const coherent = {
+    PASSED: phase === 'TEST_RUN' && code === 'NONE',
+    SUITE_FAILED: phase === 'TEST_RUN' && code === 'TEST_FAILURE',
+    TAP_UNVERIFIED: code === 'UNVERIFIED' && (phase === 'TEST_RUN' || (phase === 'CHILD_START' && realpathsUnverified)),
+    CHILD_REFUSED: childRefusalPhases.has(phase) && code !== 'NONE' && code !== 'TEST_FAILURE',
+    LAUNCH_FAILED: phase === 'SPAWN' && realpathsUnverified && !['NONE', 'ETIMEDOUT', 'ENOBUFS'].includes(code),
+    TIMEOUT: phase === 'SPAWN' && code === 'ETIMEDOUT' && realpathsUnverified,
+    OUTPUT_LIMIT: phase === 'SPAWN' && code === 'ENOBUFS' && realpathsUnverified,
+    NOT_RUN: phase === 'NOT_RUN' && code === 'NONE' && realpathsUnverified,
+  };
+  if (!coherent[outcome]) return null;
+  return { phase, code, canaryRealpath, testRealpath };
+}
+
 function workloadEvidence(stdout, side, testFileCount) {
   const lines = stdout.split(/\r?\n/u).filter((line) => line.startsWith(evidencePrefix));
-  if (lines.length !== 1 || lines[0].length > 2048) return null;
+  if (lines.length !== 1 || lines[0].length > 12 * 1024) return null;
   let value;
   try { value = JSON.parse(lines[0].slice(evidencePrefix.length)); } catch { return null; }
   if (value?.side !== side || !workloadStates.has(value.state) ||
       !checkFields.every((name) => typeof value[name] === 'boolean')) return null;
   const suiteStarted = value.state === 'WORKLOAD_PASSED' || value.state === 'WORKLOAD_FAILED';
   const expectedExit = suiteStarted ? value.state === 'WORKLOAD_PASSED' ? 0 : 1 : null;
-  const { fileOutcomes } = value;
+  const { executionMode, fallback, esmCanaryVerified, fileOutcomes } = value;
+  if (executionMode === 'DIRECT_IMPORT_PRESERVE_SYMLINKS') {
+    if (!suiteStarted || !exactObject(fallback, ['code', 'realpathCode']) ||
+        !fallbackCodes.has(fallback.code) || !fallbackCodes.has(fallback.realpathCode)) return null;
+  } else if (executionMode !== 'DIRECT_IMPORT' || fallback !== null) return null;
   if (value.exitCode !== expectedExit || !Array.isArray(fileOutcomes) ||
       fileOutcomes.length !== (suiteStarted ? testFileCount : 0) ||
-      !fileOutcomes.every((outcome) => fileStates.has(outcome))) return null;
+      !fileOutcomes.every((outcome) => fileStates.has(outcome)) ||
+      !Array.isArray(value.fileDiagnostics) || value.fileDiagnostics.length !== fileOutcomes.length) return null;
+  const fileDiagnostics = value.fileDiagnostics.map((item, index) => fileDiagnostic(item, fileOutcomes[index]));
+  if (fileDiagnostics.includes(null)) return null;
+  const allCanariesVerified = suiteStarted && fileDiagnostics.every(({ phase }) => canaryVerifiedPhases.has(phase));
+  if (esmCanaryVerified !== allCanariesVerified) return null;
   const firstNotRun = fileOutcomes.indexOf('NOT_RUN');
   if (firstNotRun !== -1 && !fileOutcomes.slice(firstNotRun).every((outcome) => outcome === 'NOT_RUN')) return null;
   const allFilesPassed = suiteStarted && fileOutcomes.every((outcome) => outcome === 'PASSED');
@@ -147,8 +196,13 @@ function workloadEvidence(stdout, side, testFileCount) {
   } else if (!countFields.every((name) => counts[name] === null)) return null;
   const checks = Object.fromEntries(checkFields.map((name) => [name, value[name]]));
   if (suiteStarted && !checkFields.every((name) => checks[name])) return null;
-  if ((value.state === 'WORKLOAD_PASSED') !== allFilesPassed || (allFilesPassed && counts.tests !== counts.pass)) return null;
-  return { state: value.state, exitCode: value.exitCode, ...counts, ...checks, fileOutcomes };
+  if ((value.state === 'WORKLOAD_PASSED') !== allFilesPassed ||
+      (allFilesPassed && (!esmCanaryVerified || counts.tests !== counts.pass))) return null;
+  return {
+    state: value.state, exitCode: value.exitCode, ...counts, ...checks, executionMode,
+    fallback: fallback === null ? null : { code: fallback.code, realpathCode: fallback.realpathCode },
+    esmCanaryVerified, fileOutcomes, fileDiagnostics,
+  };
 }
 
 /** Run the already-reviewed dashboard snapshots as actual Node test workloads in native containment. */
@@ -163,6 +217,8 @@ export async function exerciseReviewedWorkloads({
     const trusted = join(stage, 'trusted-source');
     mkdirSync(trusted);
     createFile(join(trusted, 'trusted.txt'), trustedMarker);
+    const esmCanaryPath = join(trusted, 'reviewed-esm-canary.mjs');
+    createFile(esmCanaryPath, esmCanary);
     const sides = ['baseline', 'candidate'];
     const paths = Object.fromEntries(sides.map((side) => [side, makeSide(stage, side)]));
     const copies = Object.fromEntries(sides.map((side) => [side, join(stage, 'stage-' + side)]));
@@ -186,6 +242,7 @@ export async function exerciseReviewedWorkloads({
       changedPaths: inputs.changedPaths, fileCount: inputs.fileCount, sameTestFiles: true,
       testFileCount: testPaths.length, testPaths: [...testPaths],
       manifestSha256: createHash('sha256').update(manifest).digest('hex'),
+      esmCanarySha256: createHash('sha256').update(esmCanary).digest('hex'),
     };
     if (inputs.changedPaths.length === 0) {
       report.state = 'REVIEWED_WORKLOAD_NO_DASHBOARD_CHANGES';
@@ -198,6 +255,7 @@ export async function exerciseReviewedWorkloads({
 
     function verifiedInputs() {
       return exactMarker(manifestPath, manifest) && exactMarker(join(trusted, 'trusted.txt'), trustedMarker) &&
+        exactMarker(esmCanaryPath, esmCanary) &&
         sides.every((side) => verifyDashboardComparisonSnapshot(paths[side].checkout, digests[side], inputs.fileCount) &&
           exactMarker(join(paths[side].outside, 'forbidden.txt'), outsideMarker) &&
           exactMarker(join(paths[side].private, 'sealed.txt'), privateMarker));
@@ -271,8 +329,14 @@ export async function exerciseReviewedWorkloads({
       if (!report.stageCleanupSafe || !host.protectedInputsUnchanged) return report;
     }
     if (sides.every((side) => report.cases[side].state === 'ADMITTED_AND_OBSERVED')) {
-      report.state = report.cases.baseline.workload.tests === report.cases.candidate.workload.tests
-        ? 'REVIEWED_WORKLOADS_OBSERVED' : 'REVIEWED_WORKLOAD_TEST_COUNT_CHANGED';
+      const baselineWorkload = report.cases.baseline.workload;
+      const candidateWorkload = report.cases.candidate.workload;
+      if (baselineWorkload.executionMode !== candidateWorkload.executionMode) {
+        report.state = 'REVIEWED_WORKLOAD_RESOLVER_MODE_CHANGED';
+      } else {
+        report.state = baselineWorkload.tests === candidateWorkload.tests
+          ? 'REVIEWED_WORKLOADS_OBSERVED' : 'REVIEWED_WORKLOAD_TEST_COUNT_CHANGED';
+      }
     }
   } catch (error) {
     if (typeof error?.message === 'string' && /^HOST_TEST_[A-Z0-9_]{1,64}$/u.test(error.message)) {

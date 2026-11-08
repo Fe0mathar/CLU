@@ -73,7 +73,7 @@ if (args.length === 1 && args[0] === '--help') {
       const systemRoot = checkedPath(realpathSync.native(process.env.SystemRoot ?? 'C:\\Windows'), true);
       const fixture = checkedPath(join(physicalRoot, 'tools', 'windows-supervisor', 'ReviewedWorkloadBootstrap.cjs'), false);
       const bytes = readFileSync(fixture);
-      if (bytes.length < 1 || bytes.length > 12 * 1024 || bytes.some((byte) => byte === 0 || byte > 127)) throw new Error('BOOTSTRAP_BYTES_UNVERIFIED');
+      if (bytes.length < 1 || bytes.length > 16 * 1024 || bytes.some((byte) => byte === 0 || byte > 127)) throw new Error('BOOTSTRAP_BYTES_UNVERIFIED');
       report = await exerciseReviewedWorkloads({ repoRoot: physicalRoot, stage, supervisor, node, systemRoot, script: bytes.toString('ascii'), approve });
     }
     writeExternalReport(physicalRoot, output, report);
