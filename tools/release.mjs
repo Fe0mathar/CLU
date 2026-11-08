@@ -80,6 +80,8 @@ const DOCUMENTATION_PACKS = {
 const REQUIRED_OPERATOR_PATHS = [
   'CLUE-Dashboard.bat',
   'CLUE-Windows-Setup.bat',
+  'CLUE-Windows-Supervisor.bat',
+  'CLUE-Windows-WFP-Diagnostic.bat',
   'CONFIG-EDIT.md',
   'MANIFEST.txt',
   'clue-status.md',
@@ -91,6 +93,8 @@ const REQUIRED_OPERATOR_PATHS = [
   'templates/p2-closure/P2_DEFERRED_POST_P2_AUTHORITY_MANIFEST.template.json',
   'templates/p2-closure/candidate-patch.template.json',
   'templates/p2-closure/proof-contract.template.json',
+  'templates/project-profiles/governed-document.operator-input.template.json',
+  'templates/project-profiles/project-profile.operator-input.template.json',
 ];
 
 const DEFAULT_TIMEOUTS = Object.freeze({
@@ -127,7 +131,7 @@ const EXCLUDED_ANYWHERE = [
 ];
 
 /** npm's pack rules are not the release contract; these are mandatory source inputs. */
-const ALWAYS_INCLUDED = ['package.json', 'package-lock.json', '.gitignore', CONFIG_PATH, DOCUMENTATION_PACK_SELECTOR];
+const ALWAYS_INCLUDED = ['package.json', 'package-lock.json', '.gitignore', '.gitattributes', CONFIG_PATH, DOCUMENTATION_PACK_SELECTOR];
 
 function envPositiveInt(name, fallback) {
   const value = Number(process.env[name]);
@@ -480,6 +484,9 @@ function releaseExclusions(root, config, outputDirectory = null) {
   const protectedRoots = outputDirectory === null ? liveRoots : [...liveRoots, outputDirectory];
   return (path) => {
     if (path.split('/').some(isExcludedAnywhere)) return true;
+    // These Configuration-v3 files describe this installation and can contain local state.
+    if (path.toLowerCase() === 'config/project-profiles.yaml' ||
+      /^config\/backups\/clue\.config\.v2\.[^/]*\.yaml$/iu.test(path)) return true;
     const absolute = resolve(root, path);
     return protectedRoots.some((directory) => relative(directory, absolute) === '' || pathInside(directory, absolute));
   };

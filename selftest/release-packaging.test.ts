@@ -22,6 +22,15 @@ const excludedFromFixture = new Set(['.git', 'dist', 'node_modules', 'workspace'
 const sealNames = ['SHA256SUMS_v9.txt', 'SHA256SUMS_v10.txt'];
 const proofTemplate = 'templates/p2-closure/proof-contract.template.json';
 const selector = 'config/documentation-pack.json';
+const localProfileSelector = 'config/project-profiles.yaml';
+const localConfigBackup = 'config/backups/clue.config.v2.1bd8e5d20223.yaml';
+const operatorPaths = [
+  '.gitattributes',
+  'CLUE-Windows-Supervisor.bat',
+  'CLUE-Windows-WFP-Diagnostic.bat',
+  'templates/project-profiles/governed-document.operator-input.template.json',
+  'templates/project-profiles/project-profile.operator-input.template.json',
+];
 
 interface ReleaseReport {
   readonly verdict: string;
@@ -33,6 +42,7 @@ interface ReleaseReport {
     readonly tree?: string;
     readonly dirty?: boolean;
     readonly archiveBound?: boolean;
+    readonly reason?: string;
   };
   readonly releaseQualification: {
     readonly cleanGitTree: boolean;
@@ -47,7 +57,10 @@ function fixture(t: TestContext): { readonly root: string; readonly parent: stri
   const root = join(parent, 'CLU');
   cpSync(projectRoot, root, {
     recursive: true,
-    filter: (file) => !excludedFromFixture.has(basename(file)),
+    filter: (file) => !excludedFromFixture.has(basename(file)) &&
+      file !== join(projectRoot, localProfileSelector) &&
+      !(dirname(file) === join(projectRoot, 'config', 'backups') &&
+        /^clue\.config\.v2\..*\.yaml$/iu.test(basename(file))),
   });
   cpSync(join(projectRoot, 'node_modules', 'yaml'), join(root, 'node_modules', 'yaml'), { recursive: true });
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^GIT_/iu.test(key)));
@@ -130,10 +143,17 @@ function git(cwd: string, env: NodeJS.ProcessEnv, ...args: string[]): string {
   return run.stdout.trim();
 }
 
+function addLocalProfileState(root: string, canary: string): void {
+  mkdirSync(dirname(join(root, localConfigBackup)), { recursive: true });
+  writeFileSync(join(root, localProfileSelector), `# ${canary}\nregistry_root: F:/CLU/profiles\n`);
+  writeFileSync(join(root, localConfigBackup), `# ${canary}\n`);
+}
+
 test('release archive carries both verified packs, v9 selector, and operator inputs without local state', (t) => {
   const { root, parent, env } = fixture(t);
   const canary = randomBytes(24).toString('hex');
   env['OPENAI_API_KEY'] = canary;
+  addLocalProfileState(root, canary);
   for (const path of [
     '.env.local', 'config/.env', 'src/.env', 'config/.npmrc', 'config/local-test.pem',
     'workspace/events/events.ndjson', 'release/old.zip',
@@ -169,13 +189,15 @@ test('release archive carries both verified packs, v9 selector, and operator inp
     'tools/p2-closure-preflight.mjs',
     'tools/p2-closure-inventory.mjs',
   ]) assert.ok(entries.has(file), file);
+  for (const path of operatorPaths) assert.deepEqual(entries.get(path), readFileSync(join(root, path)), path);
+  for (const path of [localProfileSelector, localConfigBackup]) assert.equal(entries.has(path), false, path);
   for (const [path, data] of entries) {
     assert.doesNotMatch(path, /(?:^|\/)(?:\.env(?:\.|$)|\.npmrc$|workspace\/|release\/|\.git\/|node_modules\/)|\.pem$/iu);
     assert.equal(data.includes(canary), false, path);
   }
 });
 
-test('release refuses a broken v10 seal, a missing proof template, and a promoted selector', (t) => {
+test('release refuses broken seals, missing operator inputs, and a promoted selector', (t) => {
   const { root, parent, env } = fixture(t);
   const v10Path = join(root, 'CLUE_Architecture_v10.md');
   const v10Bytes = readFileSync(v10Path);
@@ -187,6 +209,11 @@ test('release refuses a broken v10 seal, a missing proof template, and a promote
   rmSync(templatePath);
   expectRefusal(root, join(parent, 'missing-template'), env, /proof-contract\.template\.json/iu);
   writeFileSync(templatePath, templateBytes);
+  const launcherPath = join(root, 'CLUE-Windows-WFP-Diagnostic.bat');
+  const launcherBytes = readFileSync(launcherPath);
+  rmSync(launcherPath);
+  expectRefusal(root, join(parent, 'missing-launcher'), env, /CLUE-Windows-WFP-Diagnostic\.bat/u);
+  writeFileSync(launcherPath, launcherBytes);
   writeFileSync(join(root, selector), JSON.stringify({
     schemaVersion: 'clue-documentation-pack-selector/1',
     releaseName: 'CLU-E RPI Documentation Pack v10',
@@ -209,13 +236,31 @@ test('release Git binding requires exact archived bytes at the clean local repos
   git(root, env, 'add', '-A');
   git(root, env, '-c', 'user.email=clue-release@example.invalid', '-c', 'user.name=CLU-E fixture',
     '-c', 'commit.gpgsign=false', 'commit', '-qm', 'fixture');
-  const { report: clean } = inspectRelease(root, join(parent, 'clean'), env);
+  addLocalProfileState(root, randomBytes(24).toString('hex'));
+  assert.deepEqual(git(root, env, 'check-ignore', localProfileSelector, localConfigBackup).split(/\r?\n/u),
+    [localProfileSelector, localConfigBackup]);
+  const { report: clean, entries } = inspectRelease(root, join(parent, 'clean'), env);
   assert.equal(clean.tree.available, true);
   assert.equal(clean.tree.commit, git(root, env, 'rev-parse', 'HEAD'));
   assert.equal(clean.tree.tree, git(root, env, 'rev-parse', 'HEAD^{tree}'));
   assert.equal(clean.tree.dirty, false);
   assert.equal(clean.tree.archiveBound, true);
   assert.equal(clean.releaseQualification.cleanGitTree, true);
+  for (const path of [localProfileSelector, localConfigBackup]) assert.equal(entries.has(path), false, path);
+
+  const manifest = join(root, 'MANIFEST.txt');
+  const manifestBytes = readFileSync(manifest);
+  assert.equal(manifestBytes.includes(13), false);
+  git(root, env, 'update-index', '--assume-unchanged', 'MANIFEST.txt');
+  writeFileSync(manifest, manifestBytes.toString('utf8').replace(/\n/gu, '\r\n'));
+  assert.equal(git(root, env, 'status', '--porcelain'), '');
+  const { report: converted } = inspectRelease(root, join(parent, 'manifest-crlf'), env);
+  assert.equal(converted.tree.archiveBound, false);
+  assert.match(converted.tree.reason ?? '', /archive bytes differ from the Git blob at HEAD: MANIFEST\.txt/u);
+  git(root, env, 'update-index', '--no-assume-unchanged', 'MANIFEST.txt');
+  rmSync(manifest);
+  git(root, env, 'checkout', '--', 'MANIFEST.txt');
+  assert.deepEqual(readFileSync(manifest), manifestBytes);
 
   const tracked = join(root, 'src', 'shared', 'ids.ts');
   const original = readFileSync(tracked);

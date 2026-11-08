@@ -11,7 +11,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
 
-import { loadConfig } from '../src/control/runtime.js';
+import { loadLegacyConfig } from '../src/control/runtime.js';
 import { buildNextCycleVitalInput } from '../src/cycle/nextCycleVitalInput.js';
 import type { RegistrySource } from '../src/daemon/consoleStateCollector.js';
 import type { Runtime } from '../src/control/runtime.js';
@@ -305,7 +305,7 @@ test('DEV-P2-04: a registered project remote enters the §19 identity without a 
 
 test('DEV-P2-04: the shipped active profile resolves the exact Creator NO_REMOTE_YET record', () => {
   const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
-  const config = loadConfig(repoRoot);
+  const config = loadLegacyConfig(repoRoot);
   assert.equal(config.project.active_target, 'clu');
   assert.equal(config.project.remote, null);
   assert.equal(config.project.credential_env, null);

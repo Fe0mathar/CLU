@@ -61,7 +61,7 @@ import {
   scenariosFromConfig,
 } from '../src/analysis/scenarios/scenarioRunner.js';
 import {
-  loadConfig as loadRuntimeConfig,
+  loadLegacyConfig,
   withRuntime,
   withRuntimeAsync,
 } from '../src/control/runtime.js';
@@ -483,7 +483,7 @@ test('P2-ZIP-03 scenarios: direct CLU-E child shapes are refused before executio
 });
 
 test('P2-ZIP-03 scenarios: shipped governed set is finite build/selftest/typecheck', () => {
-  const config = loadRuntimeConfig(REPO_ROOT);
+  const config = loadLegacyConfig(REPO_ROOT);
   const { scenarios, skipped } = scenariosFromConfig(config);
   assert.deepEqual(
     scenarios.map((scenario) => scenario.id),

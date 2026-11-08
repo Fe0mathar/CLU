@@ -53,7 +53,7 @@ import {
 } from '../src/ai/gateway/modelGateway.js';
 import { authorityFor } from '../src/cli/commandAuthority.js';
 import { buildProgram } from '../src/cli/index.js';
-import { loadConfig, withRuntime } from '../src/control/runtime.js';
+import { loadConfig, loadLegacyConfig, withRuntime } from '../src/control/runtime.js';
 import { ProjectProfileRegistry } from '../src/control/projectProfiles/profileRegistry.js';
 import { windowsOpenAiCredentialReference } from '../src/control/projectProfiles/windowsOpenAiCredential.js';
 import { EventLog, type AppendEventInput } from '../src/memory/eventLog.js';
@@ -459,7 +459,7 @@ function append(log: EventLog, input: AppendEventInput): void {
 }
 
 test('DEV-P2-09: shipped policies are complete, content-addressed and fail-closed', () => {
-  const config = loadConfig(process.cwd());
+  const config = loadLegacyConfig(process.cwd());
   const policies = loadGatewayPolicies(process.cwd(), config);
   const assessment = assessGatewayPolicy(config, policies, { OPENAI_API_KEY: SECRET });
   assert.equal(config.gateway.enabled, true);

@@ -11,7 +11,7 @@ import {
 } from 'node:fs';
 import { join } from 'node:path';
 
-import { loadConfig } from '../src/control/runtime.js';
+import { loadConfig, loadLegacyConfig } from '../src/control/runtime.js';
 import {
   disableProjectProfileStartup,
   enableProjectProfileStartup,
@@ -138,6 +138,39 @@ test('Batch 6: malformed Configuration-v3 selectors fail closed', () => {
       (error: unknown) =>
         error instanceof ProjectProfileStartupError &&
         error.code === 'STARTUP_SELECTOR_MALFORMED',
+    );
+  } finally {
+    fixture.dispose();
+  }
+});
+
+test('a foreign registry selector is refused by startup while shipped defaults stay readable', {
+  skip: process.platform === 'win32' ? 'Windows-drive registry paths are native to Windows' : false,
+}, () => {
+  const fixture = makeProjectProfileFixture();
+  try {
+    installLegacyConfiguration(fixture.root);
+    const shipped = loadLegacyConfig(fixture.root);
+    const registry = new ProjectProfileRegistry(fixture.profilesRoot, { now: () => FIXED_AT });
+    const record = registry.create(fixture.profile);
+    const { selector, selectorPath } = enableProjectProfileStartup({
+      repoRoot: fixture.root,
+      registry,
+      projectId: record.profile.projectId,
+      confirmation: projectProfileCutoverConfirmation(record),
+      now: () => FIXED_AT,
+    });
+    writeFileSync(selectorPath, JSON.stringify({
+      ...selector,
+      profiles: { ...selector.profiles, registry_root: 'F:/CLU/profiles' },
+    }), 'utf8');
+
+    assert.deepEqual(loadLegacyConfig(fixture.root), shipped);
+    assert.throws(
+      () => loadConfig(fixture.root),
+      (error: unknown) =>
+        error instanceof ProjectProfileStartupError &&
+        error.code === 'STARTUP_REGISTRY_PATH_FOREIGN',
     );
   } finally {
     fixture.dispose();

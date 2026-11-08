@@ -6,7 +6,7 @@ import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { loadGatewayPolicies } from '../src/ai/gateway/policy.js';
-import { loadConfig } from '../src/control/runtime.js';
+import { loadLegacyConfig } from '../src/control/runtime.js';
 import { testProjectGatewayReadiness } from '../src/control/projectProfiles/gatewayReadiness.js';
 import { ProjectProfileRegistry } from '../src/control/projectProfiles/profileRegistry.js';
 import { resolveProjectRuntimeBinding } from '../src/control/projectProfiles/projectRuntimeBinding.js';
@@ -18,7 +18,7 @@ const CHECKED_AT = '2026-08-15T01:00:00.000Z';
 function setup() {
   const fixture = makeProjectProfileFixture();
   const record = new ProjectProfileRegistry(fixture.profiles).create(fixture.profile, { actor: 'creator' });
-  const config = loadConfig(process.cwd());
+  const config = loadLegacyConfig(process.cwd());
   const policies = loadGatewayPolicies(process.cwd(), config);
   return { fixture, record, config, policies };
 }
@@ -223,7 +223,7 @@ test('PP-26: credential-store references remain profile authority and resolve on
     credential['value'] = 'credential-store:openai-primary';
   });
   const record = registry.create(profile, { actor: 'creator' });
-  const config = loadConfig(process.cwd());
+  const config = loadLegacyConfig(process.cwd());
   const policies = loadGatewayPolicies(process.cwd(), config);
   mkdirSync(join(fixture.target, 'src'), { recursive: true });
   assert.doesNotThrow(() => resolveProjectRuntimeBinding(config, record));
