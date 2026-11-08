@@ -8,7 +8,8 @@ param(
     [Parameter(Mandatory)] [string] $EngineSha256,
     [Parameter(Mandatory)] [string] $OperatorSid,
     [Parameter(Mandatory)] [int] $OperatorSessionId,
-    [Parameter(Mandatory)] [int] $OperatorPid
+    [Parameter(Mandatory)] [int] $OperatorPid,
+    [switch] $OwnerLoss
 )
 
 Set-StrictMode -Version Latest
@@ -195,7 +196,7 @@ public static class ClueGovernedWfpOperator
         Assert-Image $engine $EngineSha256 134217728 -Microsoft
         $failureExitCode = 45
         $sourcePins = [ordered]@{
-            'Supervisor.cs' = '11fc51e50823a80edcb99ff93bc808c8026e687e01bb061bbb0e272c3157e6f3'
+            'Supervisor.cs' = 'c1445035f33a21ab09179124e19925c3fba775f3d4899656a06c7593237c8ce2'
             'Protocol.cs' = '5cb1fe80aa78cc8f8f0ecc9f6fa7a5a4c5de22bd82901d44e5525794f2f9194a'
             'NativeJob.cs' = '11db6d635accb80083b198aa2c78a49fb6b3f7952011946e4fda430e95e2618d'
             'WfpBootstrapRun.cs' = '92bfb701d33f672bc3788c3d67a74d0bc7baf96d11f41597989e4c869e74f990'
@@ -203,8 +204,8 @@ public static class ClueGovernedWfpOperator
             'WfpLoopbackLease.cs' = '22f6da4c0a380763e00c17892b10452c3746a42c346e63467e997d077e60c9d0'
             'WfpDropObservation.cs' = 'f9131d325ce6f30d77840d2f786b1ca2898e82338156aa98b7cb3f8c0946510b'
             'WfpBfeWatch.cs' = '6fa8d9c9f7865a35783082f11fb210a64f28705b8f63431c016288a34fc5ab4c'
-            'WfpIntegratedRun.cs' = '54d0c4c5365c4559373ff3a0a583c6f4eeddc1179e99079afe220004c505fd1d'
-            'WfpIntegratedGuardian.cs' = '40b513253d0b1740469ec3604cbb75063a900379ed5b1b2fad203d0753bbd4c5'
+            'WfpIntegratedRun.cs' = '813d3e74991c9aa4ed2b03b7a66164ca6328b54484b24a2a5d9dc2e6e75f01bf'
+            'WfpIntegratedGuardian.cs' = 'dc5cc80ceb0cc9929ff883aaffeb9e24394f2367695c06b93175e6c7288b4400'
             'GovernedWorkloadBootstrap.cjs' = '1350631e94c3fa7ce45a74ca298d5e8bea6b983fab1c0c465be97b90bf871ae6'
             'GovernedWfpBindPrelude.cjs' = '2951a6d40a48426c31dd678c74d0d89627f7ea1638898cf1e1c7c3161d907f65'
         }
@@ -217,6 +218,7 @@ public static class ClueGovernedWfpOperator
         $bootstrapHash = Copy-PinnedSource 'GovernedWorkloadBootstrap.cjs' $sourcePins['GovernedWorkloadBootstrap.cjs'] $sourceDir
         $preludeHash = Copy-PinnedSource 'GovernedWfpBindPrelude.cjs' $sourcePins['GovernedWfpBindPrelude.cjs'] $sourceDir
         $pinSource = Join-Path $sourceDir 'MxcPin.cs'
+        $ownerLossPin = if ($OwnerLoss) { 'true' } else { 'false' }
         $generatedPin = @"
 internal static class MxcPin {
     internal const string Sha256 = "$EngineSha256";
@@ -228,6 +230,7 @@ internal static class MxcPin {
     internal const bool ProofAdmissionGovernedWorkload = true;
     internal const string ProofAdmissionNpmCliSha256 = "$NpmCliSha256";
     internal const bool GovernedWfpIntegration = true;
+    internal const bool GovernedWfpOwnerLoss = $ownerLossPin;
     internal const string GovernedWfpPreludeSha256 = "$preludeHash";
     internal const int GovernedWfpOperatorPid = $OperatorPid;
 }
@@ -311,7 +314,9 @@ internal static class MxcPin {
             }
             $failureExitCode = 50
             $receipt = [ordered]@{
-                schemaVersion = 'clue-governed-wfp-installed-image/1'
+                schemaVersion = if ($OwnerLoss) {
+                    'clue-governed-wfp-owner-loss-installed-image/1'
+                } else { 'clue-governed-wfp-installed-image/1' }
                 wrapperSha256 = $wrapperHash
                 engineSha256 = $EngineSha256
                 guardianPid = $guardian.Id
@@ -323,6 +328,37 @@ internal static class MxcPin {
             try { $file.Write($bytes, 0, $bytes.Length); $file.Flush($true) }
             finally { $file.Dispose() }
             [IO.File]::Move($temporary, $ready)
+            if ($OwnerLoss) {
+                $failureExitCode = 51
+                # Hold this exact process handle until Windows reports the deliberate owner-loss exit.
+                # A timeout is not evidence of lease removal and does not authorize killing the guardian.
+                if (!$guardian.WaitForExit(1240000) -or $guardian.ExitCode -ne 0x06E00001) {
+                    throw 'WFP_BUILD_OWNER_LOSS_EXIT_UNVERIFIED'
+                }
+                $failureExitCode = 52
+                Assert-ProtectedRoot $protectedRoot $dacl
+                Assert-Image $wrapper $wrapperHash 134217728
+                Assert-Image $engine $EngineSha256 134217728 -Microsoft
+                $start.ArgumentList.Clear()
+                $start.ArgumentList.Add('--governed-wfp-owner-loss-readback')
+                $observer = [Diagnostics.Process]::Start($start)
+                if ($null -eq $observer) { throw 'WFP_BUILD_OWNER_LOSS_READBACK_UNAVAILABLE' }
+                try {
+                    if (!$observer.WaitForExit(12000)) {
+                        $observer.Kill()
+                        throw 'WFP_BUILD_OWNER_LOSS_READBACK_TIMEOUT'
+                    }
+                    if ($observer.ExitCode -ne 0) { throw 'WFP_BUILD_OWNER_LOSS_READBACK_REFUSED' }
+                } finally { $observer.Dispose() }
+                $failureExitCode = 53
+                $cleanup = Join-Path $protectedRoot 'owner-loss-cleanup.txt'
+                $temporary = Join-Path $protectedRoot ('owner-loss-cleanup-' + [Guid]::NewGuid().ToString('N') + '.tmp')
+                $bytes = [Text.Encoding]::ASCII.GetBytes('REMOVED')
+                $file = [IO.File]::Open($temporary, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+                try { $file.Write($bytes, 0, $bytes.Length); $file.Flush($true) }
+                finally { $file.Dispose() }
+                [IO.File]::Move($temporary, $cleanup)
+            }
         } finally { $guardian.Dispose() }
     } finally { $operator.Dispose() }
     exit 0

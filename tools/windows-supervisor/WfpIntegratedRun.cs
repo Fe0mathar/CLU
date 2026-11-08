@@ -17,12 +17,14 @@ internal sealed class WfpIntegratedRun : IDisposable
 {
     private const int PipeTimeoutMs = 4000;
     private const int MarkerTimeoutMs = 15000;
+    private const int OwnerLossCleanupTimeoutMs = 25000;
     private const uint ProcessQueryLimitedInformation = 0x1000;
     private const uint Synchronize = 0x00100000;
     private const uint TokenQuery = 0x0008;
     private const int TokenUser = 1;
     private const int TokenSessionId = 12;
     private const int TokenElevation = 20;
+    private const uint WaitObject = 0;
     private const uint WaitTimeout = 258;
 
     private readonly Request request;
@@ -32,7 +34,7 @@ internal sealed class WfpIntegratedRun : IDisposable
     private readonly Stopwatch stageClock = Stopwatch.StartNew();
     private readonly byte[] responseByte = new byte[1];
 
-    private enum Phase { NodeStart, Control, Armed, Workload }
+    private enum Phase { NodeStart, Control, Armed, Workload, OwnerLoss }
     private Phase phase;
     private int nodePid;
     private int[] control, armed;
@@ -42,6 +44,7 @@ internal sealed class WfpIntegratedRun : IDisposable
     private NamedPipeClientStream pipe;
     private IAsyncResult pendingResponse;
     private bool identityVerified, leaseVerified, removalVerified, failed, finished, passed;
+    private bool guardianLossDetected, ownerExitVerified, nodeExited, releaseWithheld, ownerLossObserved;
 
     internal WfpIntegratedRun(Request request)
     {
@@ -99,10 +102,18 @@ internal sealed class WfpIntegratedRun : IDisposable
                     leaseVerified = true;
                     pendingResponse = BeginReadResponse();
                     RequireGuardian();
+                    if (MxcPin.GovernedWfpOwnerLoss)
+                    {
+                        RequireReleaseAbsent();
+                        WriteLine("FAULT");
+                        phase = Phase.OwnerLoss;
+                        break;
+                    }
                     Release("wfp-release-go.txt");
                     phase = Phase.Workload;
                     break;
                 case Phase.Workload:
+                case Phase.OwnerLoss:
                     RequireGuardian();
                     return;
             }
@@ -111,6 +122,8 @@ internal sealed class WfpIntegratedRun : IDisposable
         catch (Exception failure)
         {
             failed = true;
+            guardianLossDetected = phase == Phase.OwnerLoss && failure is InvalidDataException &&
+                failure.Message == "GOVERNED_WFP_GUARDIAN_LOST";
             ReportFailure(phase.ToString(), failure);
             throw;
         }
@@ -123,7 +136,11 @@ internal sealed class WfpIntegratedRun : IDisposable
         finished = true;
         try
         {
-            if (!failed && jobEmpty && phase == Phase.Workload)
+            if (MxcPin.GovernedWfpOwnerLoss)
+            {
+                if (guardianLossDetected && jobEmpty) VerifyOwnerLoss();
+            }
+            else if (!failed && jobEmpty && phase == Phase.Workload)
             {
                 RequireGuardian();
                 WriteLine("DRAIN");
@@ -143,6 +160,45 @@ internal sealed class WfpIntegratedRun : IDisposable
             WriteResult(jobEmpty);
         }
         return passed;
+    }
+
+    private void VerifyOwnerLoss()
+    {
+        uint exit;
+        ownerExitVerified = WaitForSingleObject(guardian, PipeTimeoutMs) == WaitObject &&
+            GetExitCodeProcess(guardian, out exit) && exit == WfpIntegratedGuardian.OwnerLossExitCode;
+        nodeExited = WaitForSingleObject(node, 0) == WaitObject;
+        RequireReleaseAbsent();
+        releaseWithheld = true;
+        if (!ownerExitVerified || !nodeExited)
+            throw new InvalidDataException("GOVERNED_WFP_OWNER_LOSS_EXIT_UNVERIFIED");
+
+        string imageDirectory = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
+        string root = Protocol.CanonicalPath(Path.GetDirectoryName(imageDirectory), true);
+        string marker = Path.Combine(root, "owner-loss-cleanup.txt");
+        var clock = Stopwatch.StartNew();
+        while (!File.Exists(marker) && clock.ElapsedMilliseconds < OwnerLossCleanupTimeoutMs)
+            Thread.Sleep(30);
+        if (!File.Exists(marker)) throw new TimeoutException("GOVERNED_WFP_OWNER_LOSS_CLEANUP_TIMEOUT");
+        using (var input = new FileStream(Protocol.CanonicalPath(marker, false), FileMode.Open, FileAccess.Read, FileShare.Read))
+        {
+            const string expected = "REMOVED";
+            if (input.Length != expected.Length)
+                throw new InvalidDataException("GOVERNED_WFP_OWNER_LOSS_CLEANUP_INVALID");
+            foreach (char value in expected)
+                if (input.ReadByte() != value)
+                    throw new InvalidDataException("GOVERNED_WFP_OWNER_LOSS_CLEANUP_INVALID");
+        }
+        removalVerified = true;
+        ownerLossObserved = true;
+    }
+
+    private void RequireReleaseAbsent()
+    {
+        string physical = Protocol.CanonicalPath(workspace, true);
+        try { File.GetAttributes(Path.Combine(physical, "wfp-release-go.txt")); }
+        catch (FileNotFoundException) { return; }
+        throw new InvalidDataException("GOVERNED_WFP_RELEASE_GATE_PRESENT");
     }
 
     public void Dispose()
@@ -312,6 +368,16 @@ internal sealed class WfpIntegratedRun : IDisposable
         string directory = Protocol.CanonicalPath(Path.GetDirectoryName(request.requestPath), true);
         string path = Path.Combine(directory, "wfp-integration-result.json");
         var serializer = new JavaScriptSerializer { MaxJsonLength = 4096 };
+        if (MxcPin.GovernedWfpOwnerLoss)
+        {
+            WriteNew(path, serializer.Serialize(new {
+                schemaVersion = "clue-windows-governed-wfp-owner-loss/1",
+                state = ownerLossObserved ? "GOVERNED_WFP_OWNER_LOSS_OBSERVED" : "GOVERNED_WFP_OWNER_LOSS_UNVERIFIED",
+                identityVerified, leaseVerified, jobEmpty, removalVerified, control, armed, proofAuthorization = false,
+                ownerExitVerified, nodeExited, releaseWithheld,
+            }));
+            return;
+        }
         WriteNew(path, serializer.Serialize(new {
             schemaVersion = "clue-windows-governed-wfp-integration/1",
             state = passed ? "GOVERNED_WFP_LEASE_OBSERVED" : "GOVERNED_WFP_LEASE_UNVERIFIED",
@@ -379,6 +445,9 @@ internal sealed class WfpIntegratedRun : IDisposable
 
     [DllImport("kernel32.dll", ExactSpelling = true, SetLastError = true)]
     private static extern uint WaitForSingleObject(WfpContainerIdentity.OwnedHandle handle, uint milliseconds);
+
+    [DllImport("kernel32.dll", ExactSpelling = true, SetLastError = true)]
+    private static extern bool GetExitCodeProcess(WfpContainerIdentity.OwnedHandle process, out uint exitCode);
 
     [DllImport("kernel32.dll", ExactSpelling = true, CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern bool QueryFullProcessImageNameW(WfpContainerIdentity.OwnedHandle process, uint flags,

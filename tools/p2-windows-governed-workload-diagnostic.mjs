@@ -9,7 +9,7 @@ import { externalReportPath, writeExternalReport } from './verification-support.
 import { exerciseGovernedWorkload } from './windows-supervisor/governedWorkloadHarness.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const usage = 'Usage: node tools/p2-windows-governed-workload-diagnostic.mjs --stage <staged admission dir> --supervisor <supervisor> --output <staged report> [--installed|--installed-wfp <wrapper SHA-256> <engine SHA-256>]';
+const usage = 'Usage: node tools/p2-windows-governed-workload-diagnostic.mjs --stage <staged admission dir> --supervisor <supervisor> --output <staged report> [--installed|--installed-wfp|--installed-wfp-owner-loss <wrapper SHA-256> <engine SHA-256>]';
 const sha256Pattern = /^[0-9a-f]{64}$/u;
 const supervisorName = 'CLU-E-Windows-Supervisor.exe';
 const engineName = 'wxc-exec.exe';
@@ -69,21 +69,36 @@ function verifyInstalledPair(supervisor, wrapperSha256, engineSha256) {
   verifyInstalledImage(join(directory, engineName), engineSha256);
 }
 
-async function approve({ source, cache, integratedWfp = false }) {
+function verifyOwnerLossMode(supervisor, wrapperSha256, engineSha256) {
+  const ready = checkedPath(join(dirname(dirname(supervisor)), 'ready.json'), false);
+  const size = lstatSync(ready).size;
+  if (size < 2 || size > 4096) throw new Error('OWNER_LOSS_IMAGE_MODE_UNVERIFIED');
+  const receipt = JSON.parse(readFileSync(ready, 'utf8'));
+  if (receipt === null || typeof receipt !== 'object' || Object.keys(receipt).length !== 4 ||
+      receipt.schemaVersion !== 'clue-governed-wfp-owner-loss-installed-image/1' ||
+      receipt.wrapperSha256 !== wrapperSha256 || receipt.engineSha256 !== engineSha256 ||
+      !Number.isInteger(receipt.guardianPid) || receipt.guardianPid < 1 || receipt.guardianPid > 2147483647) {
+    throw new Error('OWNER_LOSS_IMAGE_MODE_UNVERIFIED');
+  }
+}
+
+async function approve({ source, cache, integratedWfp = false, ownerLoss = false }) {
   console.log(`Committed Git HEAD ${source.head.slice(0, 12)} | ${source.scopeSha256}`);
   console.log(`Dependency lock | ${source.lockSha256}`);
   console.log(`Master Benchmark contract | ${source.benchmarkSha256}`);
   console.log(`Installed npm CLI | ${source.npmCliSha256}`);
   console.log(`Native SQLite cache archive | ${cache.prebuild.sha256}`);
-  if (integratedWfp) console.log('The direct npm typecheck runs with the scoped WFP lease after the control and deny checks.');
+  if (ownerLoss) console.log('The owner-loss test terminates the disposable WFP guardian while the direct npm typecheck is held.');
+  else if (integratedWfp) console.log('The direct npm typecheck runs with the scoped WFP lease after the control and deny checks.');
   if (!process.stdin.isTTY || !process.stdout.isTTY) return false;
   const consoleInput = createInterface({ input: process.stdin, output: process.stdout });
   const cancel = new AbortController();
   const deadline = setTimeout(() => cancel.abort(), 120_000);
   consoleInput.once('SIGINT', () => cancel.abort());
   try {
-    const answer = await consoleInput.question('Type RUN GOVERNED to approve this committed source and the staged offline inputs: ', { signal: cancel.signal });
-    return answer.trim() === 'RUN GOVERNED';
+    const confirmation = ownerLoss ? 'RUN OWNER LOSS' : 'RUN GOVERNED';
+    const answer = await consoleInput.question(`Type ${confirmation} to approve this committed source and the staged offline inputs: `, { signal: cancel.signal });
+    return answer.trim() === confirmation;
   } catch {
     return false;
   } finally {
@@ -97,13 +112,15 @@ function progress(phase) {
     candidate: 'Running offline install, typecheck, build and native SQLite inside MXC.',
     baseline: 'Initializing the disposable workspace and running SCN-005 from the read-only tree.',
     'broker-typecheck': 'Checking the direct npm typecheck request.',
+    'broker-owner-loss': 'Testing WFP guardian loss while the direct npm typecheck remains held.',
     'broker-doctor': 'Checking the direct CLU-E doctor --deep request.',
   }[phase];
   if (message) console.log(message);
 }
 
 const args = process.argv.slice(2);
-const integratedWfp = args[6] === '--installed-wfp';
+const ownerLoss = args[6] === '--installed-wfp-owner-loss';
+const integratedWfp = args[6] === '--installed-wfp' || ownerLoss;
 const installed = args.length === 9 && (args[6] === '--installed' || integratedWfp) &&
   args[7].length === 64 && args[8].length === 64 && sha256Pattern.test(args[7]) && sha256Pattern.test(args[8]);
 if (args.length === 1 && args[0] === '--help') {
@@ -147,6 +164,7 @@ if (args.length === 1 && args[0] === '--help') {
       const bytes = readFileSync(fixture);
       if (bytes.length < 1 || bytes.length > 16 * 1024 || bytes.some((byte) => byte === 0 || byte > 127)) throw new Error('BOOTSTRAP_BYTES_UNVERIFIED');
       if (installed) verifyInstalledPair(supervisor, args[7], args[8]);
+      if (ownerLoss) verifyOwnerLossMode(supervisor, args[7], args[8]);
       let wfpPrelude;
       if (integratedWfp) {
         const prelude = checkedPath(join(physicalRoot, 'tools', 'windows-supervisor', 'GovernedWfpBindPrelude.cjs'), false);
@@ -159,7 +177,7 @@ if (args.length === 1 && args[0] === '--help') {
       }
       report = await exerciseGovernedWorkload({
         repoRoot: physicalRoot, stage, supervisor, node, systemRoot, script: bytes.toString('ascii'), approve, progress,
-        ...(integratedWfp ? { integratedWfp, wfpPrelude } : {}),
+        ...(integratedWfp ? { integratedWfp, wfpPrelude } : {}), ...(ownerLoss ? { ownerLoss } : {}),
       });
       if (installed) {
         verifyInstalledPair(supervisor, args[7], args[8]);
@@ -168,7 +186,8 @@ if (args.length === 1 && args[0] === '--help') {
     }
     writeExternalReport(physicalRoot, output, report);
     console.log(`Windows governed workload ${report.state}`);
-    if (report.state !== 'GOVERNED_WORKLOAD_OBSERVED') process.exitCode = 1;
+    const expectedState = ownerLoss ? 'GOVERNED_WORKLOAD_OWNER_LOSS_OBSERVED' : 'GOVERNED_WORKLOAD_OBSERVED';
+    if (report.state !== expectedState) process.exitCode = 1;
   } catch {
     console.error('Windows governed workload diagnostic could not produce a staged report.');
     process.exitCode = 2;

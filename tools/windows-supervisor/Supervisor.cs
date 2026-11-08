@@ -17,6 +17,9 @@ internal static class Supervisor
         {
             if (MxcPin.GovernedWfpIntegration && args.Length == 1 && args[0] == "--governed-wfp-guardian")
                 return WfpIntegratedGuardian.Run();
+            if (MxcPin.GovernedWfpIntegration && MxcPin.GovernedWfpOwnerLoss && args.Length == 1 &&
+                args[0] == "--governed-wfp-owner-loss-readback")
+                return WfpIntegratedGuardian.ReadBackOwnerLoss();
             if (args.Length != 2 || args[0] != "--request-file")
                 return Refuse("REQUEST_ARGUMENTS_INVALID");
 

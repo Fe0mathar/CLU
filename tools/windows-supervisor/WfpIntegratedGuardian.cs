@@ -20,6 +20,9 @@ internal static class WfpIntegratedGuardian
     private const int HandshakeTimeoutMs = 20000;
     private const int WorkloadTimeoutMs = 360000;
     private const int AbortDrainTimeoutMs = 8000;
+    private const int OwnerLossReadbackTimeoutMs = 8000;
+    internal const uint OwnerLossExitCode = 0x06E00001;
+    private const string OwnerLossKeysFile = "owner-loss-keys.txt";
     private const int SampleIntervalMs = 100;
     private const int MaxLineBytes = 96;
     private const ushort LeaseSublayerWeight = 0xFFFE;
@@ -68,13 +71,7 @@ internal static class WfpIntegratedGuardian
             using (var identity = WindowsIdentity.GetCurrent())
             using (var self = Process.GetCurrentProcess())
             {
-                if (!new WindowsPrincipal(identity).IsInRole(WindowsBuiltInRole.Administrator) ||
-                    TokenValue(identity.Token, TokenElevation) != 1 || identity.User == null)
-                    throw new InvalidDataException("GUARDIAN_ELEVATION_REQUIRED");
-                if (MxcPin.GovernedWfpOperatorPid < 1) throw new InvalidDataException("GUARDIAN_OPERATOR_PIN_INVALID");
-                operatorProcess = OpenProcess(ProcessQueryLimitedInformation | Synchronize, false, (uint)MxcPin.GovernedWfpOperatorPid);
-                if (operatorProcess.IsInvalid) throw LastError();
-                RequireStandardToken(operatorProcess, identity.User, self.SessionId);
+                operatorProcess = OpenOperatorProcess(identity, self.SessionId);
                 string expectedNode = Protocol.CanonicalPath(MxcPin.QualificationNodeExe, false);
                 phase = "CONNECT";
                 pipe = OpenLocalPipe(PipeName(), identity.User);
@@ -134,7 +131,19 @@ internal static class WfpIntegratedGuardian
                         checkedOnce = true;
                         continue;
                     }
-                    if (command != "DRAIN" || !checkedOnce) throw new InvalidDataException("GUARDIAN_COMMAND_INVALID");
+                    if (command == "FAULT" && checkedOnce && MxcPin.GovernedWfpOwnerLoss)
+                    {
+                        phase = "OWNER_LOSS";
+                        VerifyLiveScope(client, sourceJob, node, expectedNode, sid, lease);
+                        string keys = lease.SublayerKey.ToString("D") + " " +
+                            String.Join(" ", Array.ConvertAll(lease.FilterKeys, key => key.ToString("D")));
+                        PublishProtectedMarker(image, OwnerLossKeysFile, keys);
+                        bfe.RequireHealthy();
+                        if (!TerminateProcess(GetCurrentProcess(), OwnerLossExitCode)) throw LastError();
+                        throw new InvalidOperationException("GUARDIAN_SELF_TERMINATION_RETURNED");
+                    }
+                    if (command != "DRAIN" || !checkedOnce || MxcPin.GovernedWfpOwnerLoss)
+                        throw new InvalidDataException("GUARDIAN_COMMAND_INVALID");
                     phase = "DRAIN";
                     using (var query = DuplicateJob(client, sourceJob))
                     {
@@ -183,6 +192,74 @@ internal static class WfpIntegratedGuardian
             if (bfe != null) bfe.Dispose();
         }
         return 125;
+    }
+
+    internal static int ReadBackOwnerLoss()
+    {
+        if (!MxcPin.GovernedWfpOwnerLoss) return 125;
+        try
+        {
+            string image = ProtectedImage();
+            using (var imagePin = OpenPinnedImage(image))
+            using (var identity = WindowsIdentity.GetCurrent())
+            using (var self = Process.GetCurrentProcess())
+            using (var operatorProcess = OpenOperatorProcess(identity, self.SessionId))
+            using (var bfe = new WfpBfeWatch())
+            {
+                string path = Protocol.CanonicalPath(Path.Combine(ProtectedRunRoot(image), OwnerLossKeysFile), false);
+                Guid[] keys = ReadOwnerLossKeys(path);
+                var filters = new Guid[keys.Length - 1];
+                Array.Copy(keys, 1, filters, 0, filters.Length);
+                var clock = Stopwatch.StartNew();
+                while (clock.ElapsedMilliseconds < OwnerLossReadbackTimeoutMs)
+                {
+                    RequireLive(operatorProcess);
+                    bfe.RequireHealthy();
+                    if (WfpLoopbackLease.VerifyExactDynamicAbsent(keys[0], filters))
+                    {
+                        bfe.RequireHealthy();
+                        RequireLive(operatorProcess);
+                        return clock.ElapsedMilliseconds < OwnerLossReadbackTimeoutMs ? 0 : 125;
+                    }
+                    long remaining = OwnerLossReadbackTimeoutMs - clock.ElapsedMilliseconds;
+                    if (remaining <= 0) break;
+                    Thread.Sleep((int)Math.Min(SampleIntervalMs, remaining));
+                }
+            }
+        }
+        catch (Win32Exception error)
+        {
+            Console.Error.WriteLine("[CLU-E WFP guardian] OWNER_LOSS_READBACK WIN32_ERROR_" + error.NativeErrorCode);
+            return 125;
+        }
+        catch (Exception) { }
+        Console.Error.WriteLine("[CLU-E WFP guardian] OWNER_LOSS_READBACK UNVERIFIED");
+        return 125;
+    }
+
+    private static Guid[] ReadOwnerLossKeys(string path)
+    {
+        const int count = 7;
+        const int expectedLength = count * 36 + count - 1;
+        string content;
+        using (var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
+        using (var reader = new BinaryReader(stream))
+        {
+            if (stream.Length != expectedLength) throw new InvalidDataException("GUARDIAN_OWNER_LOSS_KEYS_INVALID");
+            byte[] bytes = reader.ReadBytes(expectedLength);
+            if (bytes.Length != expectedLength) throw new InvalidDataException("GUARDIAN_OWNER_LOSS_KEYS_INVALID");
+            content = Encoding.ASCII.GetString(bytes);
+        }
+        string[] fields = content.Split(' ');
+        if (fields.Length != count) throw new InvalidDataException("GUARDIAN_OWNER_LOSS_KEYS_INVALID");
+        var keys = new Guid[count];
+        for (int index = 0; index < keys.Length; index++)
+        {
+            if (!Guid.TryParseExact(fields[index], "D", out keys[index]) || keys[index] == Guid.Empty ||
+                keys[index].ToString("D") != fields[index] || Array.IndexOf(keys, keys[index], 0, index) >= 0)
+                throw new InvalidDataException("GUARDIAN_OWNER_LOSS_KEYS_INVALID");
+        }
+        return keys;
     }
 
     private static void VerifyLiveScope(OwnedHandle client, IntPtr sourceJob, WfpContainerIdentity.OwnedHandle node,
@@ -250,20 +327,50 @@ internal static class WfpIntegratedGuardian
 
     private static void PublishReady(string image)
     {
-        string root = Protocol.CanonicalPath(Path.GetDirectoryName(Path.GetDirectoryName(image)), true);
-        string marker = Path.Combine(root, "guardian-listening.txt");
+        PublishProtectedMarker(image, "guardian-listening.txt", "READY");
+    }
+
+    private static string ProtectedRunRoot(string image)
+    {
+        return Protocol.CanonicalPath(Path.GetDirectoryName(Path.GetDirectoryName(image)), true);
+    }
+
+    private static void PublishProtectedMarker(string image, string name, string value)
+    {
+        string marker = Path.Combine(ProtectedRunRoot(image), name);
         string temporary = marker + "." + Guid.NewGuid().ToString("N") + ".tmp";
         try
         {
             using (var stream = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None))
             {
-                byte[] ready = Encoding.ASCII.GetBytes("READY");
-                stream.Write(ready, 0, ready.Length);
+                byte[] bytes = Encoding.ASCII.GetBytes(value);
+                stream.Write(bytes, 0, bytes.Length);
                 stream.Flush(true);
             }
             File.Move(temporary, marker);
         }
         finally { File.Delete(temporary); }
+    }
+
+    private static OwnedHandle OpenOperatorProcess(WindowsIdentity identity, int session)
+    {
+        if (!new WindowsPrincipal(identity).IsInRole(WindowsBuiltInRole.Administrator) ||
+            TokenValue(identity.Token, TokenElevation) != 1 || identity.User == null)
+            throw new InvalidDataException("GUARDIAN_ELEVATION_REQUIRED");
+        if (MxcPin.GovernedWfpOperatorPid < 1) throw new InvalidDataException("GUARDIAN_OPERATOR_PIN_INVALID");
+        var process = OpenProcess(ProcessQueryLimitedInformation | Synchronize, false, (uint)MxcPin.GovernedWfpOperatorPid);
+        try
+        {
+            if (process.IsInvalid) throw LastError();
+            RequireLive(process);
+            RequireStandardToken(process, identity.User, session);
+            return process;
+        }
+        catch
+        {
+            process.Dispose();
+            throw;
+        }
     }
 
     private static NamedPipeServerStream OpenLocalPipe(string name, SecurityIdentifier operatorSid)
@@ -444,6 +551,10 @@ internal static class WfpIntegratedGuardian
 
     [DllImport("kernel32.dll", ExactSpelling = true)]
     private static extern IntPtr GetCurrentProcess();
+
+    [DllImport("kernel32.dll", ExactSpelling = true, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool TerminateProcess(IntPtr process, uint exitCode);
 
     [DllImport("kernel32.dll", ExactSpelling = true, SetLastError = true)]
     private static extern uint WaitForSingleObject(SafeHandle handle, uint milliseconds);
