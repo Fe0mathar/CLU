@@ -1,7 +1,9 @@
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { closeSync, fstatSync, lstatSync, openSync, readSync, realpathSync } from 'node:fs';
-import { delimiter, isAbsolute, join, relative, sep } from 'node:path';
+import {
+  closeSync, fstatSync, lstatSync, mkdirSync, opendirSync, openSync, readSync, realpathSync, writeFileSync,
+} from 'node:fs';
+import { delimiter, dirname, isAbsolute, join, relative, sep } from 'node:path';
 
 const DASHBOARD = 'ui/clue-dashboard';
 const HTML = DASHBOARD + '/index.html';
@@ -38,7 +40,7 @@ function gitExecutable(root) {
   throw new Error('HOST_TEST_GIT_UNAVAILABLE');
 }
 
-function runGit(git, root, args) {
+function runGit(git, root, args, batchInput) {
   const env = {
     GIT_OPTIONAL_LOCKS: '0',
     GIT_CONFIG_NOSYSTEM: '1',
@@ -53,8 +55,10 @@ function runGit(git, root, args) {
     return execFileSync(git, [
       '--no-pager', '-c', 'core.fsmonitor=false', '-c', 'core.untrackedCache=false', ...args,
     ], {
-      cwd: root, env, windowsHide: true, timeout: 8000, maxBuffer: 1024 * 1024,
-      encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+      cwd: root, env, windowsHide: true, timeout: 8000,
+      ...(batchInput === undefined
+        ? { encoding: 'utf8', maxBuffer: 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] }
+        : { input: batchInput, maxBuffer: MAX_SCOPE_BYTES + MAX_FILES * 128, stdio: ['pipe', 'pipe', 'pipe'] }),
     });
   } catch {
     throw new Error('HOST_TEST_GIT_QUERY_FAILED');
@@ -129,8 +133,7 @@ function readLocalFile(root, path, remaining) {
   }
 }
 
-/** Capture committed dashboard input paths and their exact local bytes, including existing edits. */
-export function captureDashboardTestInputs(repoRoot) {
+function resolveDashboardScope(repoRoot) {
   let root;
   try {
     root = realpathSync.native(repoRoot);
@@ -158,20 +161,212 @@ export function captureDashboardTestInputs(repoRoot) {
   if (trackedTestPaths.length === 0 || ![HTML, APP, 'package.json'].every((path) => committed.includes(path))) {
     throw new Error('HOST_TEST_SCOPE_INCOMPLETE');
   }
+  return { root, git, head, committed, trackedTestPaths };
+}
 
+function scopeFingerprint(digests) {
+  return createHash('sha256').update(JSON.stringify([...digests])).digest('hex');
+}
+
+function captureScope({ root, git, head, committed, trackedTestPaths }, onFile) {
   const digests = new Map();
   let remaining = MAX_SCOPE_BYTES;
   for (const path of committed) {
     const bytes = readLocalFile(root, path, remaining);
     remaining -= bytes.length;
     digests.set(path, createHash('sha256').update(bytes).digest('hex'));
+    onFile?.(path, bytes);
   }
   const dirty = runGit(git, root, ['status', '--porcelain=v1', '-z', '--untracked-files=normal', '--ignore-submodules=all']) !== '';
   return {
     head, dirty, trackedTestPaths,
-    scopeSha256: createHash('sha256').update(JSON.stringify([...digests])).digest('hex'),
+    scopeSha256: scopeFingerprint(digests),
     htmlSha256: digests.get(HTML),
     appSha256: digests.get(APP),
     fileCount: committed.length,
   };
+}
+
+/** Capture committed dashboard input paths and their exact local bytes, including existing edits. */
+export function captureDashboardTestInputs(repoRoot) {
+  return captureScope(resolveDashboardScope(repoRoot));
+}
+
+function requirePhysicalDirectory(path) {
+  if (!isAbsolute(path) || !lstatSync(path).isDirectory() || relative(path, realpathSync.native(path)) !== '') {
+    throw new Error('HOST_TEST_COMPARISON_ROOT_UNSAFE');
+  }
+}
+
+function requireEmptyDirectory(path) {
+  requirePhysicalDirectory(path);
+  const directory = opendirSync(path);
+  try {
+    if (directory.readSync() !== null) throw new Error('HOST_TEST_COMPARISON_ROOT_NOT_EMPTY');
+  } finally {
+    directory.closeSync();
+  }
+}
+
+function readCommittedFiles({ git, root, head, committed }) {
+  const tree = runGit(git, root, ['--no-replace-objects', 'ls-tree', '-r', '-z', head, '--', 'package.json', DASHBOARD]);
+  const ids = new Map();
+  if (!tree.endsWith('\0')) throw new Error('HOST_TEST_COMPARISON_TREE_INVALID');
+  for (const row of tree.slice(0, -1).split('\0')) {
+    const record = /^100(?:644|755) blob ([0-9a-f]{40}|[0-9a-f]{64})\t([^\n\r\t]+)$/u.exec(row);
+    if (record === null || record[1].length !== head.length || ids.has(record[2])) {
+      throw new Error('HOST_TEST_COMPARISON_TREE_INVALID');
+    }
+    ids.set(record[2], record[1]);
+  }
+  if (ids.size !== committed.length || committed.some((path) => !ids.has(path))) {
+    throw new Error('HOST_TEST_COMPARISON_TREE_INVALID');
+  }
+
+  const bytes = runGit(git, root, ['--no-replace-objects', 'cat-file', '--batch'],
+    committed.map((path) => ids.get(path) + '\n').join(''));
+  const files = new Map();
+  let offset = 0;
+  let remaining = MAX_SCOPE_BYTES;
+  for (const path of committed) {
+    const lineEnd = bytes.indexOf(10, offset);
+    const id = ids.get(path);
+    const header = id + ' blob ';
+    if (lineEnd < offset || lineEnd - offset > header.length + 9) {
+      throw new Error('HOST_TEST_COMPARISON_BLOB_INVALID');
+    }
+    const line = bytes.toString('ascii', offset, lineEnd);
+    const sizeText = line.slice(header.length);
+    if (!line.startsWith(header) || !/^(?:0|[1-9][0-9]{0,8})$/u.test(sizeText)) {
+      throw new Error('HOST_TEST_COMPARISON_BLOB_INVALID');
+    }
+    const size = Number(sizeText);
+    const end = lineEnd + 1 + size;
+    if (size > Math.min(MAX_FILE_BYTES, remaining) || bytes[end] !== 10) {
+      throw new Error('HOST_TEST_COMPARISON_BLOB_INVALID');
+    }
+    files.set(path, bytes.subarray(lineEnd + 1, end));
+    remaining -= size;
+    offset = end + 1;
+  }
+  if (offset !== bytes.length) throw new Error('HOST_TEST_COMPARISON_BLOB_INVALID');
+  return files;
+}
+
+function writeSnapshot(root, files) {
+  requireEmptyDirectory(root);
+  for (const [path, bytes] of files) {
+    const components = path.split('/');
+    const name = components.pop();
+    let parent = root;
+    for (const component of components) {
+      requirePhysicalDirectory(parent);
+      parent = join(parent, component);
+      if (lstatSync(parent, { throwIfNoEntry: false }) === undefined) mkdirSync(parent);
+    }
+    requirePhysicalDirectory(parent);
+    writeFileSync(join(parent, name), bytes, { flag: 'wx' });
+  }
+}
+
+function snapshotPaths(root) {
+  const files = [];
+  const directories = [{ path: root, prefix: '' }];
+  let visited = 0;
+  while (directories.length > 0) {
+    const { path, prefix } = directories.pop();
+    requirePhysicalDirectory(path);
+    const directory = opendirSync(path);
+    try {
+      let entry = directory.readSync();
+      if (entry === null) throw new Error('HOST_TEST_COMPARISON_SNAPSHOT_UNSAFE');
+      while (entry !== null) {
+        if (++visited > MAX_FILES * 2) throw new Error('HOST_TEST_SCOPE_TOO_LARGE');
+        const name = entry.name;
+        if (!SAFE_COMPONENT.test(name) || DEVICE.test(name) || name.endsWith('.')) {
+          throw new Error('HOST_TEST_COMPARISON_SNAPSHOT_UNSAFE');
+        }
+        const scoped = prefix + name;
+        if (entry.isDirectory() && (scoped === 'ui' || scoped === DASHBOARD || scoped.startsWith(DASHBOARD + '/'))) {
+          directories.push({ path: join(path, name), prefix: scoped + '/' });
+        } else if (entry.isFile() && (scoped === 'package.json' || scoped.startsWith(DASHBOARD + '/'))) {
+          files.push(scoped);
+        } else {
+          throw new Error('HOST_TEST_COMPARISON_SNAPSHOT_UNSAFE');
+        }
+        entry = directory.readSync();
+      }
+    } finally {
+      directory.closeSync();
+    }
+  }
+  return listPaths(files.join('\0') + '\0');
+}
+
+function comparisonError(error) {
+  if (error instanceof Error && /^HOST_TEST_[A-Z_]+$/u.test(error.message)) return error;
+  return new Error('HOST_TEST_COMPARISON_SNAPSHOT_UNAVAILABLE');
+}
+
+/** Verify the full materialized scope by file count and exact byte fingerprint. */
+export function verifyDashboardComparisonSnapshot(root, expectedSha256, expectedFileCount) {
+  try {
+    const paths = snapshotPaths(root);
+    if (paths.length !== expectedFileCount) return false;
+    const digests = new Map();
+    let remaining = MAX_SCOPE_BYTES;
+    for (const path of paths) {
+      const bytes = readLocalFile(root, path, remaining);
+      remaining -= bytes.length;
+      digests.set(path, createHash('sha256').update(bytes).digest('hex'));
+    }
+    if (scopeFingerprint(digests) !== expectedSha256) return false;
+    const finalPaths = snapshotPaths(root);
+    return finalPaths.length === paths.length && paths.every((path, index) => path === finalPaths[index]);
+  } catch (error) {
+    throw comparisonError(error);
+  }
+}
+
+/** Stage the same approved dashboard paths from committed HEAD and the current working files. */
+export function prepareDashboardComparisonInputs(repoRoot, baselineRoot, candidateRoot) {
+  try {
+    const scope = resolveDashboardScope(repoRoot);
+    for (const destination of [baselineRoot, candidateRoot]) {
+      requireEmptyDirectory(destination);
+      if (inside(scope.root, destination) || inside(destination, scope.root)) {
+        throw new Error('HOST_TEST_COMPARISON_ROOT_UNSAFE');
+      }
+    }
+    if (inside(baselineRoot, candidateRoot) || inside(candidateRoot, baselineRoot) ||
+        relative(dirname(baselineRoot), dirname(candidateRoot)) !== '') {
+      throw new Error('HOST_TEST_COMPARISON_ROOT_UNSAFE');
+    }
+
+    const baseline = readCommittedFiles(scope);
+    const candidate = new Map();
+    const captured = captureScope(scope, (path, bytes) => candidate.set(path, bytes));
+    const changedPaths = scope.committed.filter((path) => !baseline.get(path).equals(candidate.get(path)));
+    if (changedPaths.some((path) => path === 'package.json' || path.startsWith(DASHBOARD + '/test/'))) {
+      throw new Error('HOST_TEST_COMPARISON_TEST_SCOPE_CHANGED');
+    }
+
+    const baselineSha256 = scopeFingerprint([...baseline].map(([path, bytes]) =>
+      [path, createHash('sha256').update(bytes).digest('hex')]));
+    const candidateSha256 = captured.scopeSha256;
+    writeSnapshot(baselineRoot, baseline);
+    writeSnapshot(candidateRoot, candidate);
+    const current = captureDashboardTestInputs(repoRoot);
+    if (current.head !== captured.head || current.scopeSha256 !== candidateSha256 ||
+        !verifyDashboardComparisonSnapshot(baselineRoot, baselineSha256, captured.fileCount) ||
+        !verifyDashboardComparisonSnapshot(candidateRoot, candidateSha256, captured.fileCount)) {
+      throw new Error('HOST_TEST_COMPARISON_SOURCE_CHANGED');
+    }
+    return {
+      head: captured.head, dirty: captured.dirty, baselineSha256, candidateSha256,
+      trackedTestPaths: captured.trackedTestPaths, fileCount: captured.fileCount, changedPaths,
+    };
+  } catch (error) {
+    throw comparisonError(error);
+  }
 }

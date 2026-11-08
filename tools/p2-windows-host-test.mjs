@@ -1,65 +1,25 @@
 #!/usr/bin/env node
-import { execFile } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { lstatSync, realpathSync } from 'node:fs';
 import { availableParallelism, release, totalmem } from 'node:os';
-import { delimiter, dirname, join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { readTapCounts } from './release-readiness.mjs';
 import { externalReportPath, writeExternalReport } from './verification-support.mjs';
 import { measureDashboardHttpBaseline } from './windows-host-test/dashboardHttpBaseline.mjs';
 import { captureDashboardTestInputs } from './windows-host-test/dashboardTestInputs.mjs';
+import { runDashboardTests } from './windows-host-test/dashboardTestRunner.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const stamp = new Date().toISOString().replace(/[:.]/gu, '-');
 const defaultReport = join(dirname(root), 'release-evidence', `CLU-E_WINDOWS_HOST_TEST_${stamp}_${randomBytes(4).toString('hex')}.json`);
 const usage = 'Usage: node tools/p2-windows-host-test.mjs --approved-dashboard-tests [--output <new external .json>]';
-const nodeOptions = ['--test', '--test-concurrency=1', '--test-reporter=tap'];
 
 function readOptions(args) {
   if (args[0] !== '--approved-dashboard-tests') throw new Error('HOST_TEST_APPROVAL_REQUIRED');
   if (args.length === 1) return defaultReport;
   if (args.length === 3 && args[1] === '--output' && /\.json$/iu.test(args[2])) return args[2];
   throw new Error('HOST_TEST_OPTIONS_INVALID');
-}
-
-function testEnvironment(node) {
-  const env = {};
-  for (const name of ['SystemRoot', 'WINDIR', 'SystemDrive', 'TEMP', 'TMP']) {
-    if (process.env[name] !== undefined) env[name] = process.env[name];
-  }
-  const system32 = env.SystemRoot === undefined ? [] : [join(env.SystemRoot, 'System32')];
-  env.PATH = [dirname(node), ...system32].join(delimiter);
-  return env;
-}
-
-function runDashboardTests(node, testPaths, signal) {
-  const began = performance.now();
-  return new Promise((done) => {
-    execFile(node, [...nodeOptions, ...testPaths], {
-      cwd: root,
-      env: testEnvironment(node),
-      encoding: 'utf8',
-      maxBuffer: 2 * 1024 * 1024,
-      timeout: 75_000,
-      signal,
-      windowsHide: true,
-    }, (error, stdout) => {
-      const counts = readTapCounts(stdout ?? '');
-      const exitCode = error === null ? 0 : Number.isInteger(error.code) ? error.code : null;
-      let state;
-      if (signal.aborted) state = 'INTERRUPTED';
-      else if (error?.killed || error?.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') state = 'TIME_OR_OUTPUT_LIMIT';
-      else if (counts === null) state = 'TAP_UNVERIFIED';
-      else if (counts.fail > 0 || counts.cancelled > 0 || exitCode !== 0) state = 'FAILED';
-      else state = counts.pass === counts.tests ? 'PASSED' : 'INCOMPLETE';
-      done({
-        state, exitCode, counts, fileCount: testPaths.length,
-        elapsedMs: Math.round(performance.now() - began),
-      });
-    });
-  });
 }
 
 async function hostTest(signal) {
@@ -94,7 +54,7 @@ async function hostTest(signal) {
     head: before.head, dirty: before.dirty, scopeSha256: before.scopeSha256, fileCount: before.fileCount, stable: false,
   };
   console.log(`[1/2] Running ${before.trackedTestPaths.length} approved dashboard test files on Windows.`);
-  Object.assign(report.suite, await runDashboardTests(node, before.trackedTestPaths, signal));
+  Object.assign(report.suite, await runDashboardTests({ node, cwd: root, testPaths: before.trackedTestPaths, signal }));
   if (signal.aborted) {
     report.state = 'HOST_TEST_INTERRUPTED';
     return report;
