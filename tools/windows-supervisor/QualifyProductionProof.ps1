@@ -12,6 +12,7 @@ $nodeSha = 'c5ff4c736112dd483c750fd4149d30c8a116db1a49b8b3ec88be4b65e6c86c19'
 $npmSha = '3ce7cba6f5128dd5f54c98b6a5036b0f850496878cc2e21044b675fe3c594e3e'
 $preludeSha = '334ca86fb237c565f38b17a7b84485c5fc1b603d1b16e07a68a3278cf42a37e9'
 $qualifierSha = 'e10c2243df0c1d88e66140199efea5915606867e07102629c41086d72b6aadda'
+$qualifierCrlfSha = 'ba61c41dbb35d54cbf838704157abce99be73628fc6081938502a092b32bd070'
 
 function Assert-ExactPath([string] $Path, [bool] $Directory) {
     if ($Path.Length -gt 1024 -or $Path -cnotmatch '^[A-Za-z]:\\(?!\\)' -or
@@ -198,22 +199,20 @@ try {
     $npm = Join-Path ([IO.Path]::GetDirectoryName($node)) 'node_modules\npm\bin\npm-cli.js'
     $locks.Add((Open-PinnedFile $npm $npmSha 1MB))
 
-    $phase = 'QUALIFY_CANARY_SOURCE_UNVERIFIED'
-    $script = Join-Path $repo 'tools\p2-windows-supervisor-qualify.mjs'
+    $phase = 'QUALIFY_CANARY_SOURCE_PATH_INVALID'
+    $script = Join-Path $repo 'tools\p2-windows-supervisor-qualify-06h1.mjs'
     Assert-ExactPath $script $false
+    $phase = 'QUALIFY_CANARY_SOURCE_OPEN_FAILED'
     $scriptLock = [IO.File]::Open($script, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
     $locks.Add($scriptLock)
-    if ($scriptLock.Length -lt 1 -or $scriptLock.Length -gt 1MB) { throw 'QUALIFY_CANARY_SOURCE_UNVERIFIED' }
-    $encoding = [Text.UTF8Encoding]::new($false, $true)
-    $reader = [IO.StreamReader]::new($scriptLock, $encoding, $false, 4096, $true)
-    try {
-        $lf = [string][char]10
-        $canonical = $encoding.GetBytes($reader.ReadToEnd().Replace(([string][char]13 + $lf), $lf))
-    } finally { $reader.Dispose() }
-    $canonicalStream = [IO.MemoryStream]::new($canonical)
-    try { $scriptDigest = Get-Digest $canonicalStream }
-    finally { $canonicalStream.Dispose() }
-    if ($scriptDigest -cne $qualifierSha) { throw 'QUALIFY_CANARY_SOURCE_UNVERIFIED' }
+    if ($scriptLock.Length -lt 1 -or $scriptLock.Length -gt 1MB) { throw 'QUALIFY_CANARY_SOURCE_SIZE_INVALID' }
+    $phase = 'QUALIFY_CANARY_SOURCE_HASH_READ_FAILED'
+    $scriptDigest = Get-Digest $scriptLock
+    if ($scriptDigest -cne $qualifierSha -and $scriptDigest -cne $qualifierCrlfSha) {
+        Write-Host "Qualification source SHA-256: $scriptDigest"
+        throw 'QUALIFY_CANARY_SOURCE_PIN_MISMATCH'
+    }
+    $phase = 'QUALIFY_BUILD_REQUIRED'
     foreach ($file in @('windowsExecutionSupervisor.js', 'containedProcess.js', 'windowsSupervisorQualification.js')) {
         if (!(Test-Path -LiteralPath (Join-Path $repo "dist\src\benchmark\$file") -PathType Leaf)) {
             throw 'QUALIFY_BUILD_REQUIRED'
