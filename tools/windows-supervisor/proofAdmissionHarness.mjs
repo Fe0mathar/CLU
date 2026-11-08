@@ -10,7 +10,8 @@ const outsideMarker = 'clue-admission-outside-v1\n';
 const privateMarker = 'clue-admission-private-v1\n';
 const booleans = [
   'cwdMatches', 'checkoutRead', 'trustedSourceRead', 'workspaceWrite', 'tempWrite', 'homeWrite',
-  'sourceWriteDenied', 'outsideReadDenied', 'privateReadDenied', 'hostEnvironmentAbsent', 'scratchEnvironmentMatches',
+  'sourceWriteDenied', 'outsideReadDenied', 'privateReadDenied', 'hostEnvironmentAbsent',
+  'effectiveScratchEnvironmentMatches', 'effectivePathUseVerified',
 ];
 const scratchKeys = [
   'TEMP', 'TMP', 'TMPDIR', 'HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA',
@@ -20,6 +21,8 @@ const scratchStates = new Set([
   'MATCH', 'MISSING', 'EMPTY', 'RELATIVE', 'EXTENDED_PATH_ALIAS', 'APP_CONTAINER_PROFILE',
   'APP_CONTAINER_TEMP', 'OTHER_PATH',
 ]);
+const remappableKeys = new Set(['TEMP', 'TMP', 'LOCALAPPDATA']);
+const absoluteScratchStates = new Set(['MATCH', 'EXTENDED_PATH_ALIAS', 'APP_CONTAINER_PROFILE', 'APP_CONTAINER_TEMP', 'OTHER_PATH']);
 
 function createFile(path, value) {
   writeFileSync(path, value, { flag: 'wx' });
@@ -114,6 +117,13 @@ function nativeEvidence(result) {
   };
 }
 
+function scratchEvidence(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) ||
+      Object.keys(value).length !== scratchKeys.length ||
+      !scratchKeys.every((name) => Object.hasOwn(value, name) && scratchStates.has(value[name]))) return null;
+  return Object.fromEntries(scratchKeys.map((name) => [name, value[name]]));
+}
+
 function fixtureEvidence(stdout, side) {
   const lines = stdout.split(/\r?\n/u).filter((line) => line.startsWith(fixturePrefix));
   if (lines.length !== 1 || lines[0].length > 2048) return null;
@@ -121,16 +131,26 @@ function fixtureEvidence(stdout, side) {
   try { value = JSON.parse(lines[0].slice(fixturePrefix.length)); } catch { return null; }
   if (value?.side !== side || !booleans.every((name) => typeof value[name] === 'boolean') ||
       !['ALLOWED', 'DENIED', 'UNVERIFIED'].includes(value.checkoutWrite)) return null;
-  const scratch = value.scratchEnvironment;
-  if (!scratch || typeof scratch !== 'object' || Array.isArray(scratch) ||
-      Object.keys(scratch).length !== scratchKeys.length ||
-      !scratchKeys.every((name) => Object.hasOwn(scratch, name) && scratchStates.has(scratch[name]))) return null;
-  const allScratchPathsMatch = scratchKeys.every((name) => scratch[name] === 'MATCH');
-  if (value.scratchEnvironmentMatches !== allScratchPathsMatch) return null;
+  const initial = scratchEvidence(value.scratchEnvironment);
+  const effective = scratchEvidence(value.effectiveScratchEnvironment);
+  const bootstrap = value.scratchBootstrap;
+  if (initial === null || effective === null || !['UNCHANGED', 'NORMALIZED', 'REFUSED'].includes(bootstrap)) return null;
+  const initialMatches = scratchKeys.every((name) => initial[name] === 'MATCH');
+  const effectiveMatches = scratchKeys.every((name) => effective[name] === 'MATCH');
+  if (value.scratchEnvironmentMatches !== initialMatches || value.effectiveScratchEnvironmentMatches !== effectiveMatches) return null;
+  if (bootstrap === 'NORMALIZED') {
+    if (initialMatches || !scratchKeys.every((name) => remappableKeys.has(name) ? absoluteScratchStates.has(initial[name])
+      : initial[name] === 'MATCH' && effective[name] === 'MATCH')) return null;
+  } else if (scratchKeys.some((name) => initial[name] !== effective[name]) ||
+      (bootstrap === 'UNCHANGED' && !initialMatches)) return null;
+  if (value.effectivePathUseVerified && (!effectiveMatches || bootstrap === 'REFUSED')) return null;
   return {
     ...Object.fromEntries(booleans.map((name) => [name, value[name]])),
     checkoutWrite: value.checkoutWrite,
-    scratchEnvironment: Object.fromEntries(scratchKeys.map((name) => [name, scratch[name]])),
+    scratchBootstrap: bootstrap,
+    scratchEnvironmentMatches: initialMatches,
+    scratchEnvironment: initial,
+    effectiveScratchEnvironment: effective,
   };
 }
 
@@ -203,6 +223,8 @@ export async function exerciseProofAdmissionFixtures({ stage, supervisor, node, 
           exactMarker(join(entries.workspace, 'workspace-write.txt'), observed) &&
           exactMarker(join(entries['scratch-temp'], 'temp-write.txt'), observed) &&
           exactMarker(join(entries['scratch-home'], 'home-write.txt'), observed),
+        effectiveTempWriteVerified: exactMarker(join(entries['scratch-temp'], 'node-temp-write.txt'), observed),
+        effectiveHomeWriteVerified: exactMarker(join(entries['scratch-home'], 'node-home-write.txt'), observed),
         checkoutWriteVerified: side === 'candidate' ? exactMarker(marker, observed) : absent(marker),
         protectedInputsUnchanged: evidence.requestUnchanged &&
           exactMarker(join(trusted, 'trusted.txt'), trustedMarker) &&
@@ -213,6 +235,7 @@ export async function exerciseProofAdmissionFixtures({ stage, supervisor, node, 
       };
       const passed = evidence.native.exitCode === 0 && workload !== null &&
         booleans.every((name) => workload[name]) &&
+        workload.scratchBootstrap !== 'REFUSED' &&
         workload.checkoutWrite === (side === 'candidate' ? 'ALLOWED' : 'DENIED') &&
         Object.values(host).every(Boolean);
       report.cases[side] = {

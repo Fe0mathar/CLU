@@ -81,6 +81,40 @@ function classifyScratchPath(actual, expected, kind) {
   return 'OTHER_PATH';
 }
 
+function trustedScratchDirectory(expected) {
+  try {
+    if (!fs.lstatSync(expected).isDirectory()) return null;
+    const canonical = fs.realpathSync.native(expected);
+    return samePath(canonical, expected) ? canonical : null;
+  } catch {
+    return null;
+  }
+}
+
+function matchesTrustedDirectory(actual, expected, canonical) {
+  if (!samePath(actual, expected) || path.normalize(actual) !== actual) return false;
+  try {
+    return fs.realpathSync.native(actual) === canonical;
+  } catch {
+    return false;
+  }
+}
+
+function verifyEffectivePathUse(temp, home, canonicalTemp, canonicalHome) {
+  try {
+    const os = require('node:os');
+    const actualTemp = os.tmpdir();
+    const actualHome = os.homedir();
+    if (!matchesTrustedDirectory(actualTemp, temp, canonicalTemp) ||
+        !matchesTrustedDirectory(actualHome, home, canonicalHome)) return false;
+    const tempWritten = writeMarker(path.join(actualTemp, 'node-temp-write.txt')) === 'ALLOWED';
+    const homeWritten = writeMarker(path.join(actualHome, 'node-home-write.txt')) === 'ALLOWED';
+    return tempWritten && homeWritten;
+  } catch {
+    return false;
+  }
+}
+
 const cwdMatches = process.argv.length === 2 && (side === 'baseline' || side === 'candidate') &&
   path.basename(cwd) === 'checkout' && path.basename(caseRoot) === side &&
   path.basename(admissionRoot) === 'admission';
@@ -90,29 +124,58 @@ const scratchHome = path.join(caseRoot, 'scratch-home');
 const trustedSource = path.join(admissionRoot, 'trusted-source');
 
 const started = cwdMatches && writeMarker(path.join(workspace, 'started.txt')) === 'ALLOWED';
-const scratchEnvironment = Object.fromEntries([
+const hostEnvironmentAbsent = ['CLU_ADMISSION_HOST_SENTINEL', 'OPENAI_API_KEY', 'CLU_WINDOWS_SUPERVISOR_PATH']
+  .every((key) => process.env[key] === undefined);
+const scratchKeys = [
   ...['TEMP', 'TMP', 'TMPDIR'].map((key) => [key, scratchTemp, 'temp']),
   ...['HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA'].map((key) => [key, scratchHome, 'home']),
   ['NPM_CONFIG_CACHE', path.join(scratchHome, 'npm-cache')],
   ['NPM_CONFIG_USERCONFIG', path.join(scratchHome, 'user.npmrc')],
   ['NPM_CONFIG_GLOBALCONFIG', path.join(scratchHome, 'global.npmrc')],
-].map(([key, expected, kind]) => [key, classifyScratchPath(process.env[key], expected, kind)]));
+];
+const readScratchEnvironment = () => Object.fromEntries(scratchKeys.map(([key, expected, kind]) =>
+  [key, classifyScratchPath(process.env[key], expected, kind)]));
+const allMatch = (checks) => Object.values(checks).every((value) => value === 'MATCH');
+const scratchEnvironment = readScratchEnvironment();
+const normalizationKeys = new Set(['TEMP', 'TMP', 'LOCALAPPDATA']);
+const normalizableStates = new Set(['OTHER_PATH', 'EXTENDED_PATH_ALIAS', 'APP_CONTAINER_TEMP', 'APP_CONTAINER_PROFILE']);
+const canonicalTemp = started ? trustedScratchDirectory(scratchTemp) : null;
+const canonicalHome = started ? trustedScratchDirectory(scratchHome) : null;
+let scratchBootstrap = 'REFUSED';
+if (canonicalTemp !== null && canonicalHome !== null && hostEnvironmentAbsent &&
+    scratchKeys.every(([key]) => scratchEnvironment[key] === 'MATCH' ||
+    (normalizationKeys.has(key) && normalizableStates.has(scratchEnvironment[key])))) {
+  scratchBootstrap = 'UNCHANGED';
+  for (const [key, expected] of scratchKeys) {
+    if (normalizationKeys.has(key) && scratchEnvironment[key] !== 'MATCH') {
+      process.env[key] = expected;
+      scratchBootstrap = 'NORMALIZED';
+    }
+  }
+}
+const effectiveScratchEnvironment = readScratchEnvironment();
+const effectiveScratchEnvironmentMatches = allMatch(effectiveScratchEnvironment);
+const effectivePathUseVerified = scratchBootstrap !== 'REFUSED' && effectiveScratchEnvironmentMatches &&
+  verifyEffectivePathUse(scratchTemp, scratchHome, canonicalTemp, canonicalHome);
 const result = {
   side: side === 'baseline' || side === 'candidate' ? side : 'unverified',
   cwdMatches,
   checkoutRead: started && readMarker(path.join(cwd, 'input.txt'), 'clue-admission-checkout-v1\n'),
   trustedSourceRead: started && readMarker(path.join(trustedSource, 'trusted.txt'), 'clue-admission-source-v1\n'),
   workspaceWrite: started && writeMarker(path.join(workspace, 'workspace-write.txt')) === 'ALLOWED',
-  tempWrite: started && writeMarker(path.join(scratchTemp, 'temp-write.txt')) === 'ALLOWED',
-  homeWrite: started && writeMarker(path.join(scratchHome, 'home-write.txt')) === 'ALLOWED',
+  tempWrite: canonicalTemp !== null && writeMarker(path.join(scratchTemp, 'temp-write.txt')) === 'ALLOWED',
+  homeWrite: canonicalHome !== null && writeMarker(path.join(scratchHome, 'home-write.txt')) === 'ALLOWED',
   checkoutWrite: started ? writeMarker(path.join(cwd, 'checkout-write.txt')) : 'UNVERIFIED',
   sourceWriteDenied: started && writeMarker(path.join(trustedSource, 'source-write.txt')) === 'DENIED',
   outsideReadDenied: started && readDenied(path.join(caseRoot, 'outside', 'forbidden.txt')),
   privateReadDenied: started && readDenied(path.join(caseRoot, 'private', 'sealed.txt')),
-  hostEnvironmentAbsent: ['CLU_ADMISSION_HOST_SENTINEL', 'OPENAI_API_KEY', 'CLU_WINDOWS_SUPERVISOR_PATH']
-    .every((key) => process.env[key] === undefined),
-  scratchEnvironmentMatches: Object.values(scratchEnvironment).every((value) => value === 'MATCH'),
+  hostEnvironmentAbsent,
+  scratchEnvironmentMatches: allMatch(scratchEnvironment),
   scratchEnvironment,
+  effectiveScratchEnvironmentMatches,
+  effectiveScratchEnvironment,
+  scratchBootstrap,
+  effectivePathUseVerified,
 };
 
 console.log('CLU_E_ADMISSION_FIXTURE ' + JSON.stringify(result));
@@ -120,6 +183,7 @@ const expectedCheckout = side === 'baseline' ? 'DENIED' : 'ALLOWED';
 process.exitCode = Object.entries(result).every(([key, value]) => {
   if (key === 'side') return cwdMatches;
   if (key === 'checkoutWrite') return value === expectedCheckout;
-  if (key === 'scratchEnvironment') return true;
+  if (key === 'scratchBootstrap') return value !== 'REFUSED';
+  if (['scratchEnvironmentMatches', 'scratchEnvironment', 'effectiveScratchEnvironment'].includes(key)) return true;
   return value === true;
 }) ? 0 : 1;
