@@ -4,7 +4,8 @@ param(
     [Parameter(Mandatory = $true)][string] $SupervisorPath,
     [Parameter(Mandatory = $true)][string] $FixturePath,
     [Parameter(Mandatory = $true)][string] $ReadyPath,
-    [Parameter(Mandatory = $true)][string] $Workspace
+    [Parameter(Mandatory = $true)][string] $Workspace,
+    [switch] $DoubleLoss
 )
 
 Set-StrictMode -Version Latest
@@ -82,6 +83,8 @@ function Write-RecoveryAcknowledgement([string] $Path) {
 $report = [ordered]@{
     state = 'STATIC_OBSERVER_PREREQUISITE_FAILED'
     terminationRequested = $false
+    supervisorTerminationRequested = $false
+    supervisorExited = $false
     supervisorLive = $null
     supervisorLiveBeforeRecovery = $false
     guardianExited = $false
@@ -111,8 +114,9 @@ try {
     $ackPath = [IO.Path]::Combine($privateRoot, 'static-recovery-allowed.txt')
     $intentPath = [IO.Path]::Combine($privateRoot, 'static-intent.json')
     $stageRoot = [IO.Path]::GetDirectoryName($caseRoot)
+    $caseName = if ($DoubleLoss) { 'static-double' } else { 'static-crash' }
     if (![string]::Equals([IO.Path]::GetFileName($Workspace), 'workspace', [StringComparison]::OrdinalIgnoreCase) -or
-        ![string]::Equals([IO.Path]::GetFileName($caseRoot), 'static-crash', [StringComparison]::OrdinalIgnoreCase) -or
+        ![string]::Equals([IO.Path]::GetFileName($caseRoot), $caseName, [StringComparison]::OrdinalIgnoreCase) -or
         [IO.Path]::GetFileName($stageRoot) -cnotmatch '^\.setup-[0-9a-f]{32}$' -or
         ![string]::Equals([IO.Path]::Combine($privateRoot, 'ready.json'), $ReadyPath,
             [StringComparison]::OrdinalIgnoreCase)) { throw 'STATIC_READY_SCOPE_INVALID' }
@@ -149,6 +153,7 @@ namespace Clue.Diagnostics
         private const uint SublayerNotFound = 0x80320007;
         // Persistent, boot-time, provider context, permit on unavailable callout, or disabled.
         private const uint UnsafeFilterFlags = 1 | 2 | 4 | 16 | 32;
+        private readonly bool doubleLoss;
         private readonly IntPtr[] fixtures = new IntPtr[3];
         private IntPtr[] additionalJobMembers = new IntPtr[0];
         private IntPtr supervisor;
@@ -156,9 +161,12 @@ namespace Clue.Diagnostics
         private IntPtr engine;
         private Guid[] filterKeys;
 
-        public WfpStaticCrashWatch(int supervisorPid, string supervisorImage)
+        public WfpStaticCrashWatch(int supervisorPid, string supervisorImage, bool doubleLoss)
         {
-            supervisor = OpenExact(supervisorPid, supervisorImage, QueryLimitedInformation | Synchronize);
+            this.doubleLoss = doubleLoss;
+            uint access = QueryLimitedInformation | Synchronize;
+            if (doubleLoss) access |= Terminate;
+            supervisor = OpenExact(supervisorPid, supervisorImage, access);
         }
 
         public bool SupervisorLive { get { return IsLive(supervisor); } }
@@ -167,6 +175,8 @@ namespace Clue.Diagnostics
         {
             public string State = "STATIC_PREFLIGHT_UNVERIFIED";
             public bool TerminationRequested;
+            public bool SupervisorTerminationRequested;
+            public bool SupervisorExited;
             public bool GuardianExited;
             public bool FixtureTreeExited;
             public int JobMembersObserved;
@@ -197,6 +207,30 @@ namespace Clue.Diagnostics
                     CountLive(fixtures) + CountLive(additionalJobMembers) != evidence.JobMembersObserved ||
                     !SupervisorLive || !IsLive(guardian)) return evidence;
                 // The observer retains process handles only. It never opens or duplicates the job handle.
+                if (doubleLoss)
+                {
+                    if (!TerminateProcess(supervisor, 125))
+                    {
+                        evidence.State = "STATIC_COORDINATOR_TERMINATION_REFUSED";
+                        return evidence;
+                    }
+                    evidence.SupervisorTerminationRequested = true;
+                    if (WaitForSingleObject(supervisor, 2000) != WaitSignaled)
+                    {
+                        evidence.State = "STATIC_COORDINATOR_EXIT_UNCONFIRMED";
+                        return evidence;
+                    }
+                    evidence.SupervisorExited = true;
+                    // Reconfirm the fault target and policy after the first kill. A guardian
+                    // that already exited or drained the job cannot qualify as a second fault.
+                    if (!IsLive(guardian) ||
+                        CountLive(fixtures) + CountLive(additionalJobMembers) != evidence.JobMembersObserved ||
+                        ReadFilters(filterIds, sublayerKey, false) != filterIds.Length + 1)
+                    {
+                        evidence.State = "STATIC_DOUBLE_LOSS_SECOND_FAULT_UNVERIFIED";
+                        return evidence;
+                    }
+                }
                 if (!TerminateProcess(guardian, 125))
                 {
                     evidence.State = "STATIC_GUARDIAN_TERMINATION_REFUSED";
@@ -216,7 +250,7 @@ namespace Clue.Diagnostics
                         evidence.State = "STATIC_POLICY_LOST_BEFORE_RECOVERY";
                         return evidence;
                     }
-                    if (!SupervisorLive)
+                    if (!doubleLoss && !SupervisorLive)
                     {
                         evidence.State = "STATIC_COORDINATOR_EXITED_DURING_OBSERVATION";
                         return evidence;
@@ -255,7 +289,7 @@ namespace Clue.Diagnostics
 
         public bool VerifyRetained(ulong[] filterIds, Guid sublayerKey)
         {
-            return SupervisorLive && !IsLive(guardian) && CountLive(fixtures) == 0 &&
+            return SupervisorLive != doubleLoss && !IsLive(guardian) && CountLive(fixtures) == 0 &&
                 CountLive(additionalJobMembers) == 0 &&
                 ReadFilters(filterIds, sublayerKey, false) == filterIds.Length + 1;
         }
@@ -399,7 +433,7 @@ namespace Clue.Diagnostics
     }
 
     $report.state = 'STATIC_COORDINATOR_IDENTITY_UNVERIFIED'
-    $watch = [Clue.Diagnostics.WfpStaticCrashWatch]::new($SupervisorPid, $SupervisorPath)
+    $watch = [Clue.Diagnostics.WfpStaticCrashWatch]::new($SupervisorPid, $SupervisorPath, [bool] $DoubleLoss)
     $report.state = 'STATIC_READY_NOT_OBSERVED'
     $clock = [Diagnostics.Stopwatch]::StartNew()
     $ready = $null
@@ -465,6 +499,8 @@ namespace Clue.Diagnostics
         $FixturePath, [int[]] $additionalJobPids, [uint64[]] $filterIds, $sublayer)
     $report.state = $result.State
     $report.terminationRequested = $result.TerminationRequested
+    $report.supervisorTerminationRequested = $result.SupervisorTerminationRequested
+    $report.supervisorExited = $result.SupervisorExited
     $report.guardianExited = $result.GuardianExited
     $report.fixtureTreeExited = $result.FixtureTreeExited
     $report.jobMembersObserved = $result.JobMembersObserved
@@ -489,7 +525,7 @@ namespace Clue.Diagnostics
     if (!$watch.VerifyRetained([uint64[]] $filterIds, $sublayer)) {
         throw $report.state
     }
-    $report.supervisorLiveBeforeRecovery = $true
+    $report.supervisorLiveBeforeRecovery = $watch.SupervisorLive
 
     $report.state = 'STATIC_RECOVERY_AUTHORIZATION_FAILED'
     Write-RecoveryAcknowledgement $ackPath
@@ -499,7 +535,8 @@ namespace Clue.Diagnostics
     $start.FileName = $SupervisorPath
     $start.WorkingDirectory = $stageRoot
     $start.UseShellExecute = $false
-    $start.ArgumentList.Add('recover')
+    $recoveryMode = if ($DoubleLoss) { 'recover-double' } else { 'recover' }
+    $start.ArgumentList.Add($recoveryMode)
     $start.ArgumentList.Add($SupervisorPid.ToString([Globalization.CultureInfo]::InvariantCulture))
     $recovery = [Diagnostics.Process]::Start($start)
     if ($null -eq $recovery) { throw $report.state }
@@ -512,7 +549,8 @@ namespace Clue.Diagnostics
     $report.state = 'STATIC_FILTER_REMOVAL_UNCONFIRMED'
     $report.filtersRemoved = $watch.VerifyRemoved([uint64[]] $filterIds, $sublayer)
     if (!$report.filtersRemoved) { throw $report.state }
-    $report.state = 'STATIC_GUARDIAN_LOSS_AND_RECOVERY_OBSERVED'
+    $report.state = if ($DoubleLoss) { 'STATIC_DOUBLE_LOSS_AND_RECOVERY_OBSERVED' }
+        else { 'STATIC_GUARDIAN_LOSS_AND_RECOVERY_OBSERVED' }
 } catch {
     if ($_.Exception.Message -cmatch '^(?:STATIC|CRASH)_[A-Z0-9_]{1,90}$') { $report.error = $_.Exception.Message }
 } finally {

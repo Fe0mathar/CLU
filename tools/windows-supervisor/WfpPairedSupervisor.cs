@@ -39,7 +39,7 @@ internal sealed class WfpPairedSupervisor
     {
         this.mode = mode;
         this.supervisor = supervisor;
-        if (mode == "static-crash") jobName = "Local\\CLU-E-" + Guid.NewGuid().ToString("N");
+        if (mode == "static-crash" || mode == "static-double") jobName = "Local\\CLU-E-" + Guid.NewGuid().ToString("N");
         string stage = Protocol.CanonicalPath(MxcPin.WfpDiagnosticStage, true);
         root = Protocol.CanonicalPath(Path.Combine(stage, mode), true);
         workspace = Protocol.CanonicalPath(Path.Combine(root, "workspace"), true);
@@ -52,16 +52,24 @@ internal sealed class WfpPairedSupervisor
         try
         {
             if (args.Length == 1 && args[0] == "paired") return new WfpPairedSupervisor("paired").Run();
-            if (args.Length == 1 && args[0] == "crash") return StartGuardian(false);
-            if (args.Length == 1 && args[0] == "static-crash") return StartGuardian(true);
+            if (args.Length == 1 && args[0] == "host-net") return new WfpPairedSupervisor("host-net").Run();
+            if (args.Length == 1 && (args[0] == "crash" || args[0] == "static-crash" || args[0] == "static-double"))
+                return StartGuardian(args[0]);
             if (args.Length == 1 && args[0] == "recover-retained")
-                return WfpStaticRecovery.Run(StaticPrivateRoot(), DiagnosticImage(), 0);
+                return WfpStaticRecovery.Run(StaticPrivateRoot("static-crash"), DiagnosticImage(), 0);
+            if (args.Length == 1 && args[0] == "recover-double-retained")
+                return WfpStaticRecovery.Run(StaticPrivateRoot("static-double"), DiagnosticImage(), 0);
             int pid;
             if (args.Length != 2 ||
                 !Int32.TryParse(args[1], NumberStyles.None, CultureInfo.InvariantCulture, out pid) || pid < 1)
                 return 125;
-            if (args[0] == "recover") return WfpStaticRecovery.Run(StaticPrivateRoot(), DiagnosticImage(), pid);
-            if (args[0] != "guardian" && args[0] != "static-guardian") return 125;
+            if (args[0] == "recover") return WfpStaticRecovery.Run(StaticPrivateRoot("static-crash"), DiagnosticImage(), pid);
+            if (args[0] == "recover-double")
+                return WfpStaticRecovery.Run(StaticPrivateRoot("static-double"), DiagnosticImage(), pid, true);
+            string guardianMode = args[0] == "guardian" ? "crash" :
+                args[0] == "static-guardian" ? "static-crash" :
+                args[0] == "double-guardian" ? "static-double" : null;
+            if (guardianMode == null) return 125;
             using (var owner = Process.GetProcessById(pid))
             {
                 // Opening the handle pins this exact supervisor across the entire run.
@@ -69,12 +77,12 @@ internal sealed class WfpPairedSupervisor
                     !String.Equals(Protocol.CanonicalPath(owner.MainModule.FileName, false), DiagnosticImage(),
                         StringComparison.OrdinalIgnoreCase))
                     return 125;
-                return new WfpPairedSupervisor(args[0] == "guardian" ? "crash" : "static-crash", owner).Run();
+                return new WfpPairedSupervisor(guardianMode, owner).Run();
             }
         }
         catch (Exception)
         {
-            Console.Error.WriteLine("[CLU-E 05P] CONTROLLER_STARTUP_REFUSED");
+            Console.Error.WriteLine("[CLU-E 05Q] CONTROLLER_STARTUP_REFUSED");
             return 125;
         }
     }
@@ -88,26 +96,28 @@ internal sealed class WfpPairedSupervisor
         return expected;
     }
 
-    private static string StaticPrivateRoot()
+    private static string StaticPrivateRoot(string scenario)
     {
-        return Protocol.CanonicalPath(Path.Combine(MxcPin.WfpDiagnosticStage, "static-crash", "private"), true);
+        return Protocol.CanonicalPath(Path.Combine(MxcPin.WfpDiagnosticStage, scenario, "private"), true);
     }
 
-    private static int StartGuardian(bool useStatic)
+    private static int StartGuardian(string scenario)
     {
         var clock = Stopwatch.StartNew();
+        string guardianArgument = scenario == "static-double" ? "double-guardian" :
+            scenario == "static-crash" ? "static-guardian" : "guardian";
         using (var self = Process.GetCurrentProcess())
         using (var guardian = Process.Start(new ProcessStartInfo {
             FileName = DiagnosticImage(),
-            Arguments = (useStatic ? "static-guardian " : "guardian ") + self.Id.ToString(CultureInfo.InvariantCulture),
+            Arguments = guardianArgument + " " + self.Id.ToString(CultureInfo.InvariantCulture),
             WorkingDirectory = MxcPin.WfpDiagnosticStage,
             UseShellExecute = false,
         }))
         {
             if (guardian == null || !guardian.WaitForExit(DeadlineMs + AcknowledgementMs + 4000)) return 124;
-            if (useStatic)
+            if (scenario == "static-crash")
             {
-                string stage = StaticPrivateRoot();
+                string stage = StaticPrivateRoot(scenario);
                 if (File.Exists(Path.Combine(stage, "ready.json")) && !File.Exists(Path.Combine(stage, "result.json")))
                 {
                     string receipt = Path.Combine(stage, WfpStaticRecovery.ResultFile);
@@ -139,8 +149,11 @@ internal sealed class WfpPairedSupervisor
                 string log = Path.Combine(privateRoot, "mxc.log");
                 WriteNew(config, Protocol.BuildConfig(request));
                 bool expired;
+                Action<IntPtr> observe = ObserveCrash;
+                if (mode == "paired") observe = ObservePaired;
+                if (mode == "host-net") observe = ObserveHostLoopback;
                 int exit = NativeJob.Run(engine, log, config, request.systemRoot, DeadlineMs, out expired,
-                    mode == "paired" ? (Action<IntPtr>)ObservePaired : ObserveCrash, () => jobEmpty = true, jobName);
+                    observe, () => jobEmpty = true, jobName);
                 engineExitCode = exit;
                 if (mode == "paired")
                 {
@@ -149,6 +162,12 @@ internal sealed class WfpPairedSupervisor
                         identityVerified && removalVerified && jobEmpty;
                     state = passed ? "PAIRED_BIND_CAUSALITY_OBSERVED" : "PAIRED_BIND_CAUSALITY_UNPROVEN";
                     result = passed ? 0 : expired ? 124 : 1;
+                }
+                else if (mode == "host-net")
+                {
+                    bool completed = !expired && exit == 0 && identityVerified && jobEmpty;
+                    state = completed ? "HOST_LOOPBACK_FIXTURE_COMPLETED" : "HOST_LOOPBACK_FIXTURE_UNVERIFIED";
+                    result = completed ? 0 : expired ? 124 : 1;
                 }
                 else
                 {
@@ -271,6 +290,9 @@ internal sealed class WfpPairedSupervisor
     {
         if (supervisor.HasExited)
         {
+            // Keep this disposable job under its original deadline while the observer
+            // confirms the first death and prepares the second injection.
+            if (mode == "static-double" && crashReady) return;
             supervisorLossObserved = true;
             // NativeJob catches this signal, terminates the entire job and calls its
             // empty-job callback only after native accounting reports zero processes.
@@ -320,6 +342,16 @@ internal sealed class WfpPairedSupervisor
             WriteNew(Path.Combine(privateRoot, "ready.json"), json.Serialize(ready));
         }
         crashReady = true;
+    }
+
+    private void ObserveHostLoopback(IntPtr job)
+    {
+        if (identityVerified) return;
+        int pid = ReadPid("host-net");
+        if (pid == 0) return;
+        PinProcesses(job, new[] { pid });
+        ReleaseGate("host-net");
+        identityVerified = true;
     }
 
     private bool WaitForAcknowledgement()

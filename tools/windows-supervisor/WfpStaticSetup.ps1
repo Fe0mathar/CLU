@@ -1,4 +1,4 @@
-function Invoke-WfpStaticSetup([string] $ControllerPath, [string] $Stage, [string] $FixturePath) {
+function Invoke-WfpStaticSetup([string] $ControllerPath, [string] $Stage, [string] $FixturePath, [switch] $DoubleLoss) {
     $result = [ordered]@{
         state = 'STATIC_COORDINATOR_UNAVAILABLE'
         observerState = $null
@@ -23,11 +23,25 @@ function Invoke-WfpStaticSetup([string] $ControllerPath, [string] $Stage, [strin
         naturalCleanupVerified = $false
         recoveryIntentPresent = $null
     }
+    $observerFlags = @('terminationRequested', 'supervisorLive', 'guardianExited', 'fixtureTreeExited',
+        'jobMembersExited', 'staticProtectionRetained', 'recoveryAcknowledgementWritten', 'filtersRemoved',
+        'escapeDetected')
+    $caseName = 'static-crash'
+    $expectedState = 'STATIC_GUARDIAN_LOSS_AND_RECOVERY_OBSERVED'
+    $expectedCoordinatorExit = 0
+    if ($DoubleLoss) {
+        $caseName = 'static-double'
+        $expectedState = 'STATIC_DOUBLE_LOSS_AND_RECOVERY_OBSERVED'
+        $expectedCoordinatorExit = 125
+        $observerFlags += @('supervisorTerminationRequested', 'supervisorExited')
+        $result['supervisorTerminationRequested'] = $null
+        $result['supervisorExited'] = $null
+    }
     $process = $null
     $coordinatorExited = $false
     $clock = $null
-    $private = [IO.Path]::Combine($Stage, 'static-crash', 'private')
-    $workspace = [IO.Path]::Combine($Stage, 'static-crash', 'workspace')
+    $private = [IO.Path]::Combine($Stage, $caseName, 'private')
+    $workspace = [IO.Path]::Combine($Stage, $caseName, 'workspace')
 
     try {
         $observer = Join-Path $PSScriptRoot 'WfpStaticCrash.ps1'
@@ -41,7 +55,7 @@ function Invoke-WfpStaticSetup([string] $ControllerPath, [string] $Stage, [strin
         $start.FileName = $ControllerPath
         $start.WorkingDirectory = $Stage
         $start.UseShellExecute = $false
-        $start.ArgumentList.Add('static-crash')
+        $start.ArgumentList.Add($caseName)
         $clock = [Diagnostics.Stopwatch]::StartNew()
         $process = [Diagnostics.Process]::Start($start)
         if ($null -eq $process) { throw 'STATIC_COORDINATOR_START_FAILED' }
@@ -49,7 +63,7 @@ function Invoke-WfpStaticSetup([string] $ControllerPath, [string] $Stage, [strin
         $result.state = 'STATIC_OBSERVER_EVIDENCE_UNAVAILABLE'
         $readyPath = [IO.Path]::Combine($private, 'ready.json')
         $lines = @(& $observer -SupervisorPid $process.Id -SupervisorPath $ControllerPath `
-            -FixturePath $FixturePath -ReadyPath $readyPath -Workspace $workspace)
+            -FixturePath $FixturePath -ReadyPath $readyPath -Workspace $workspace -DoubleLoss:$DoubleLoss)
         if ($lines.Count -ne 1 -or $lines[0] -isnot [string] -or $lines[0].Length -gt 16384) {
             throw 'STATIC_OBSERVER_EVIDENCE_INVALID'
         }
@@ -60,9 +74,7 @@ function Invoke-WfpStaticSetup([string] $ControllerPath, [string] $Stage, [strin
         }
         $result.observerState = $record['state']
         $result.state = $result.observerState
-        foreach ($flag in @('terminationRequested', 'supervisorLive', 'guardianExited', 'fixtureTreeExited',
-            'jobMembersExited', 'staticProtectionRetained', 'recoveryAcknowledgementWritten', 'filtersRemoved',
-            'escapeDetected')) {
+        foreach ($flag in $observerFlags) {
             if ($record[$flag] -is [bool]) { $result[$flag] = $record[$flag] }
         }
         foreach ($number in @('recoveryExitCode', 'samples', 'jobMembersObserved')) {
@@ -110,8 +122,10 @@ function Invoke-WfpStaticSetup([string] $ControllerPath, [string] $Stage, [strin
         $result.state = 'STATIC_COORDINATOR_TIMEOUT'
     } elseif ($null -ne $process -and !$coordinatorExited) {
         $result.state = 'STATIC_COORDINATOR_EXIT_UNVERIFIED'
-    } elseif ($result.observerState -ceq 'STATIC_GUARDIAN_LOSS_AND_RECOVERY_OBSERVED' -and
-        (!$result.recoveryVerified -or $result.coordinatorExitCode -ne 0 -or
+    } elseif ($result.observerState -cin @('STATIC_GUARDIAN_LOSS_AND_RECOVERY_OBSERVED', 'STATIC_DOUBLE_LOSS_AND_RECOVERY_OBSERVED') -and
+        ($result.observerState -cne $expectedState -or !$result.recoveryVerified -or
+            $result.coordinatorExitCode -ne $expectedCoordinatorExit -or
+            ($DoubleLoss -and ($result['supervisorTerminationRequested'] -ne $true -or $result['supervisorExited'] -ne $true)) -or
             $result.terminationRequested -ne $true -or $result.guardianExited -ne $true -or
             $result.fixtureTreeExited -ne $true -or $result.jobMembersExited -ne $true -or
             $null -eq $result.jobMembersObserved -or $result.jobMembersObserved -lt 3 -or

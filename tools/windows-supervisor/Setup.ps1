@@ -338,23 +338,25 @@ try {
         foreach ($priorStage in (Get-ChildItem -LiteralPath $install -Directory -Force -Filter '.setup-*')) {
             if ($priorStage.Name -cnotmatch '^\.setup-[0-9a-f]{32}$' -or
                 ($priorStage.Attributes -band [IO.FileAttributes]::ReparsePoint)) { continue }
-            $priorPrivate = [IO.Path]::Combine($priorStage.FullName, 'static-crash', 'private')
-            $priorIntent = Join-Path $priorPrivate 'static-intent.json'
-            if (![IO.File]::Exists($priorIntent)) { continue }
-            Assert-NoReparsePath $priorIntent
-            $reconciled = $false
-            try {
-                $prior = Read-WfpPairedRecord (Join-Path $priorPrivate 'static-recovery-result.json')
-                $reconciled = $prior['state'] -ceq 'STATIC_RECOVERY_VERIFIED' -and
-                    $prior['jobAbsent'] -eq $true -and $prior['filtersRemoved'] -eq $true
-            } catch { }
-            if (!$reconciled) {
+            foreach ($staticCase in @('static-crash', 'static-double')) {
+                $priorPrivate = [IO.Path]::Combine($priorStage.FullName, $staticCase, 'private')
+                $priorIntent = Join-Path $priorPrivate 'static-intent.json'
+                if (![IO.File]::Exists($priorIntent)) { continue }
+                Assert-NoReparsePath $priorIntent
+                $reconciled = $false
                 try {
-                    $prior = Read-WfpPairedRecord (Join-Path $priorPrivate 'result.json')
-                    $reconciled = $prior['jobEmpty'] -eq $true -and $prior['independentRemovalVerified'] -eq $true
+                    $prior = Read-WfpPairedRecord (Join-Path $priorPrivate 'static-recovery-result.json')
+                    $reconciled = $prior['state'] -ceq 'STATIC_RECOVERY_VERIFIED' -and
+                        $prior['jobAbsent'] -eq $true -and $prior['filtersRemoved'] -eq $true
                 } catch { }
+                if (!$reconciled) {
+                    try {
+                        $prior = Read-WfpPairedRecord (Join-Path $priorPrivate 'result.json')
+                        $reconciled = $prior['jobEmpty'] -eq $true -and $prior['independentRemovalVerified'] -eq $true
+                    } catch { }
+                }
+                if (!$reconciled) { throw 'A previous static diagnostic needs scoped recovery before another run.' }
             }
-            if (!$reconciled) { throw 'A previous static diagnostic needs scoped recovery before another run.' }
         }
     }
     if ($arch -notin @('x64', 'arm64')) { throw 'Microsoft MXC requires a supported x64 or ARM64 Windows installation.' }
@@ -424,17 +426,21 @@ try {
     if ($WfpPairedDiagnostic) {
         $setupStage = 'PAIRED_DIAGNOSTIC_BUILD'
         foreach ($directory in @('fixture', 'paired\private', 'paired\workspace', 'crash\private', 'crash\workspace',
-            'static-crash\private', 'static-crash\workspace')) {
+            'static-crash\private', 'static-crash\workspace', 'static-double\private', 'static-double\workspace',
+            'host-net\private', 'host-net\workspace')) {
             Assert-NoReparsePath (Join-Path $stage $directory) -CreateDirectory
         }
         $fixtureSource = Join-Path $PSScriptRoot 'WfpPairedFixture.cs'
+        $hostLoopbackFixtureSource = Join-Path $PSScriptRoot 'WfpHostLoopbackFixture.cs'
         $controllerSource = Join-Path $PSScriptRoot 'WfpPairedSupervisor.cs'
         $staticRecoverySource = Join-Path $PSScriptRoot 'WfpStaticRecovery.cs'
         Assert-NoReparsePath $fixtureSource
+        Assert-NoReparsePath $hostLoopbackFixtureSource
         Assert-NoReparsePath $controllerSource
         Assert-NoReparsePath $staticRecoverySource
         $fixture = Join-Path $stage 'fixture\WfpPairedFixture.exe'
-        $fixtureArgs = $compilerBase + @('/platform:x64', "/out:$fixture") + $frameworkReferences + $fixtureSource
+        $fixtureArgs = $compilerBase + @('/platform:x64', "/out:$fixture") +
+            $frameworkReferences + $fixtureSource + $hostLoopbackFixtureSource
         if ((Invoke-ExactExecutable $csc $fixtureArgs $stage 60) -ne 0) { throw 'Native bind fixture compilation failed.' }
         Assert-NoReparsePath $fixture
         $fixtureHash = Get-Sha256 $fixture
@@ -462,9 +468,12 @@ $diagnosticPins
         $staticReader = Join-Path $PSScriptRoot 'WfpStaticSetup.ps1'
         Assert-NoReparsePath $staticReader
         . $staticReader
+        $hostReader = Join-Path $PSScriptRoot 'WfpHostLoopbackSetup.ps1'
+        Assert-NoReparsePath $hostReader
+        . $hostReader
 
         $setupStage = 'PAIRED_DIAGNOSTIC_EXECUTION'
-        Write-Host '[3/4] Running paired native binds, supervisor loss and static-filter guardian loss.'
+        Write-Host '[3/4] Running paired native binds, crash recovery and bidirectional host loopback checks.'
         $stageCleanupSafe = $false
         $experiment = Invoke-WfpPairedSetup $controller $stage $fixture
         $stageCleanupSafe = $experiment.stageCleanupSafe
@@ -474,6 +483,20 @@ $diagnosticPins
             $staticExperiment = Invoke-WfpStaticSetup $controller $stage $fixture
             $stageCleanupSafe = $staticExperiment.stageCleanupSafe
             $staticResult = $staticExperiment.result
+        }
+        $doubleResult = [ordered]@{ state = 'STATIC_DOUBLE_LOSS_SKIPPED_PRIOR_CLEANUP_UNVERIFIED' }
+        if ($stageCleanupSafe) {
+            $stageCleanupSafe = $false
+            $doubleExperiment = Invoke-WfpStaticSetup $controller $stage $fixture -DoubleLoss
+            $stageCleanupSafe = $doubleExperiment.stageCleanupSafe
+            $doubleResult = $doubleExperiment.result
+        }
+        $hostResult = [ordered]@{ state = 'HOST_LOOPBACK_SKIPPED_PRIOR_CLEANUP_UNVERIFIED' }
+        if ($stageCleanupSafe) {
+            $stageCleanupSafe = $false
+            $hostExperiment = Invoke-WfpHostLoopbackSetup $controller $stage $fixture
+            $stageCleanupSafe = $hostExperiment.stageCleanupSafe
+            $hostResult = $hostExperiment.result
         }
         $payload = [ordered]@{
             schemaVersion = 'clue-mxc-supervisor-diagnostic/1'
@@ -499,17 +522,27 @@ $diagnosticPins
             wfpAttribution = $experiment.attribution
             wfpCrash = $experiment.crash
             wfpStaticGuardianLoss = $staticResult
+            wfpStaticDoubleLoss = $doubleResult
+            wfpHostLoopback = $hostResult
         }
         Write-DiagnosticFile $report $payload
         Write-Host ('[CLU-E paired binds] ' + $experiment.paired.state)
         Write-Host ('[CLU-E WFP attribution] ' + $experiment.attribution.state)
         Write-Host ('[CLU-E abrupt exit] ' + $experiment.crash.state)
         Write-Host ('[CLU-E static guardian loss] ' + $staticResult.state)
+        Write-Host ('[CLU-E static double loss] ' + $doubleResult.state)
+        Write-Host ('[CLU-E host loopback] ' + $hostResult.state)
         if (!$stageCleanupSafe) {
             Write-Host 'The diagnostic stage was retained because cleanup is unverified.'
-            $intentPath = [IO.Path]::Combine($stage, 'static-crash', 'private', 'static-intent.json')
-            if ([IO.File]::Exists($intentPath)) {
-                Write-Host ('Recovery command for elevated Command Prompt after the diagnostic processes have exited: "' + $controller + '" recover-retained')
+            foreach ($case in @(
+                @{ name = 'static-crash'; result = $staticResult; command = 'recover-retained' },
+                @{ name = 'static-double'; result = $doubleResult; command = 'recover-double-retained' }
+            )) {
+                $intentPath = [IO.Path]::Combine($stage, $case.name, 'private', 'static-intent.json')
+                if ([IO.File]::Exists($intentPath) -and !$case.result['recoveryVerified'] -and !$case.result['naturalCleanupVerified']) {
+                    Write-Host ('Recovery command for elevated Command Prompt after the diagnostic processes have exited: "' +
+                        $controller + '" ' + $case.command)
+                }
             }
         }
         Write-Host "[4/4] Diagnostic report: $report"

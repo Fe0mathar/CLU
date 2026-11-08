@@ -23,6 +23,9 @@ internal static class WfpPairedFixture
             if (!String.Equals(Path.GetFileName(workspace), "workspace", StringComparison.OrdinalIgnoreCase) ||
                 !Directory.Exists(workspace)) return 2;
 
+            if (args[0] == "host-net" || args[0] == "host-net-host")
+                return WfpHostLoopbackFixture.Run(args[0], workspace);
+
             if (args[0] == "paired")
             {
                 RunPaired(workspace);

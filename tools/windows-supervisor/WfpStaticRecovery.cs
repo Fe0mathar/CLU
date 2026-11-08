@@ -56,7 +56,7 @@ internal static class WfpStaticRecovery
         }
     }
 
-    internal static int Run(string root, string diagnosticImage, int coordinatorPid)
+    internal static int Run(string root, string diagnosticImage, int coordinatorPid, bool coordinatorMustBeDead = false)
     {
         try
         {
@@ -89,7 +89,7 @@ internal static class WfpStaticRecovery
             else
             {
                 if (intent.coordinator.pid != coordinatorPid ||
-                    !IsOriginalLive(intent.coordinator, diagnosticImage))
+                    IsOriginalLive(intent.coordinator, diagnosticImage) == coordinatorMustBeDead)
                     throw new InvalidDataException("STATIC_COORDINATOR_IDENTITY_INVALID");
             }
 
@@ -110,14 +110,14 @@ internal static class WfpStaticRecovery
             if (!File.Exists(receipt)) WriteNew(receipt, evidence);
             else if (ReadSmall(root, ResultFile, 128) != evidence)
                 throw new InvalidDataException("STATIC_RECOVERY_RECEIPT_CONFLICT");
-            Console.WriteLine("[CLU-E 05P] STATIC_RECOVERY_VERIFIED");
+            Console.WriteLine("[CLU-E 05Q] STATIC_RECOVERY_VERIFIED");
             return 0;
         }
         catch (Exception error)
         {
             string code = Regex.IsMatch(error.Message, @"\ASTATIC_[A-Z0-9_]{1,70}\z")
                 ? error.Message : "STATIC_RECOVERY_REFUSED";
-            Console.Error.WriteLine("[CLU-E 05P] " + code);
+            Console.Error.WriteLine("[CLU-E 05Q] " + code);
             return 125;
         }
     }
