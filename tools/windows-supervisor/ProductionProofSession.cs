@@ -4,6 +4,9 @@ using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.IO.Pipes;
+using System.Net;
+using System.Net.NetworkInformation;
+using System.Net.Sockets;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
@@ -16,6 +19,9 @@ using Microsoft.Win32.SafeHandles;
 internal static class ProductionProofSession
 {
     private const int StartTimeoutMs = 12000;
+    private const int FaultTimeoutMs = 45000;
+    private const string FaultSentinel = "clue-production-fault/1";
+    internal const string FaultRoleFile = "production-fault.txt";
     private static readonly Regex RunPattern = new Regex(@"\A[a-f0-9]{32}\z", RegexOptions.CultureInvariant);
     private static readonly Regex InstallPattern = new Regex(@"\A\.clue-proof-production-[a-f0-9]{32}\z", RegexOptions.CultureInvariant);
     private static readonly Regex HashPattern = new Regex(@"\A[a-f0-9]{64}\z", RegexOptions.CultureInvariant);
@@ -23,6 +29,8 @@ internal static class ProductionProofSession
     internal static string RunId { get; private set; }
     internal static int OperatorPid { get; private set; }
     internal static int WrapperPid { get; private set; }
+    internal static bool FaultMode { get; private set; }
+    internal static bool FaultSupported { get { return MxcPin.ProofProductionAdmission && HashPattern.IsMatch(MxcPin.ProductionFaultProbeSha256); } }
     internal static string InstallRoot { get { return Path.GetDirectoryName(Path.GetDirectoryName(Image())); } }
     internal static string RunRoot { get { return Protocol.CanonicalPath(Path.Combine(InstallRoot, "runs", RunId), true); } }
 
@@ -51,12 +59,34 @@ internal static class ProductionProofSession
         SetRun(run);
         if (OperatorPid == WrapperPid) throw new InvalidDataException("PRODUCTION_PROOF_ROLE_INVALID");
         Protocol.CanonicalPath(RunRoot, true);
+        FaultMode = ReadFaultRole();
     }
 
     internal static string Prepare(Request request)
     {
         string image = Image();
         string gate = request.productionGateDirectory;
+        FaultMode = request.args.Length > 3 && request.args[3] == FaultSentinel;
+        string[] args = FaultMode ? FaultArguments(request, gate) : WorkloadArguments(request, gate);
+        int length = Protocol.Quote(request.command).Length;
+        foreach (string arg in args) length += 1 + Protocol.Quote(arg).Length;
+        if (length >= 32767) throw new InvalidDataException("PRODUCTION_PROOF_COMMAND_LINE_TOO_LONG");
+        using (WfpIntegratedGuardian.OpenPinnedImage(image))
+        using (var self = Process.GetCurrentProcess())
+        {
+            SetRun(Guid.NewGuid().ToString("N"));
+            WrapperPid = self.Id;
+            WfpIntegratedGuardian.RegisterProductionRun(image, self.SessionId, RunId);
+            if (ReadFaultRole() != FaultMode) throw new InvalidDataException("PRODUCTION_PROOF_FAULT_ROLE_UNVERIFIED");
+        }
+        if (!CreateDirectoryW(gate, IntPtr.Zero)) throw new Win32Exception(Marshal.GetLastWin32Error());
+        Protocol.CanonicalPath(gate, true);
+        request.args = args;
+        return gate;
+    }
+
+    private static string[] WorkloadArguments(Request request, string gate)
+    {
         string prelude = ReadPrelude();
         string encodedEnvironment = Convert.ToBase64String(Encoding.UTF8.GetBytes(new JavaScriptSerializer().Serialize(request.env)));
         bool npm = request.productionNpmCli != null;
@@ -103,20 +133,89 @@ runGovernedWfpBindPrelude(process.argv[1]).then(() => {
         args[3] = gate;
         args[4] = encodedEnvironment;
         Array.Copy(request.args, 0, args, 5, request.args.Length);
-        int length = Protocol.Quote(request.command).Length;
-        foreach (string arg in args) length += 1 + Protocol.Quote(arg).Length;
-        if (length >= 32767) throw new InvalidDataException("PRODUCTION_PROOF_COMMAND_LINE_TOO_LONG");
-        using (WfpIntegratedGuardian.OpenPinnedImage(image))
-        using (var self = Process.GetCurrentProcess())
+        return args;
+    }
+
+    private static string[] FaultArguments(Request request, string gate)
+    {
+        var source = request.args;
+        if (!FaultSupported || request.timeoutMs != FaultTimeoutMs || request.productionNpmCli != null ||
+            source.Length != 8 || source[0] != "-e" || source[2] != "--" ||
+            request.writableRoots.Length != 3 ||
+            !Array.Exists(request.readOnlyRoots, root => String.Equals(root, request.cwd, StringComparison.OrdinalIgnoreCase)) ||
+            !String.Equals(request.productionWorkspace, Path.Combine(request.fixtureRoot, "temp"), StringComparison.OrdinalIgnoreCase) ||
+            !ValidFaultPort(source[4]) || !ValidFaultPeer(source[5]) || !ValidFaultPort(source[6]) || !HashPattern.IsMatch(source[7]))
+            throw new InvalidDataException("PRODUCTION_PROOF_FAULT_REQUEST_INVALID");
+
+        string script = source[1];
+        if (script.Length < 1 || script.Length > 16384 ||
+            Array.Exists(script.ToCharArray(), c => (c < 32 || c > 126) && c != '\n' && c != '\r' && c != '\t'))
+            throw new InvalidDataException("PRODUCTION_PROOF_FAULT_SCRIPT_INVALID");
+        using (var sha = SHA256.Create())
         {
-            SetRun(Guid.NewGuid().ToString("N"));
-            WrapperPid = self.Id;
-            WfpIntegratedGuardian.RegisterProductionRun(image, self.SessionId, RunId);
+            string digest = BitConverter.ToString(sha.ComputeHash(Encoding.ASCII.GetBytes(script))).Replace("-", "").ToLowerInvariant();
+            if (digest != MxcPin.ProductionFaultProbeSha256)
+                throw new InvalidDataException("PRODUCTION_PROOF_FAULT_SCRIPT_PIN_INVALID");
         }
-        if (!CreateDirectoryW(gate, IntPtr.Zero)) throw new Win32Exception(Marshal.GetLastWin32Error());
-        Protocol.CanonicalPath(gate, true);
-        request.args = args;
-        return gate;
+        return new[] { "-e", script + "\nPromise.resolve().then(runProductionFaultProbe).catch(() => { process.exitCode = 125; });",
+            "--", gate, source[3], source[4], source[5], source[6], source[7] };
+    }
+
+    private static bool ValidFaultPort(string value)
+    {
+        int port;
+        return Int32.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out port) && port > 0 && port <= 65535 &&
+            value == port.ToString(CultureInfo.InvariantCulture);
+    }
+
+    private static bool ValidFaultPeer(string value)
+    {
+        IPAddress address;
+        if (!IPAddress.TryParse(value, out address) || address.AddressFamily != AddressFamily.InterNetwork || address.ToString() != value)
+            return false;
+        byte[] peer = address.GetAddressBytes();
+        if (peer[0] != 10 && !(peer[0] == 172 && peer[1] >= 16 && peer[1] <= 31) && !(peer[0] == 192 && peer[1] == 168))
+            return false;
+        bool onSwitch = false;
+        foreach (var adapter in NetworkInterface.GetAllNetworkInterfaces())
+        {
+            bool defaultSwitch = adapter.OperationalStatus == OperationalStatus.Up &&
+                adapter.Name == "vEthernet (Default Switch)" &&
+                Regex.IsMatch(adapter.Description, "Hyper-V.*Virtual.*Ethernet", RegexOptions.CultureInvariant);
+            foreach (var unicast in adapter.GetIPProperties().UnicastAddresses)
+            {
+                if (address.Equals(unicast.Address)) return false;
+                if (!defaultSwitch || unicast.Address.AddressFamily != AddressFamily.InterNetwork || unicast.IPv4Mask == null) continue;
+                byte[] local = unicast.Address.GetAddressBytes();
+                byte[] mask = unicast.IPv4Mask.GetAddressBytes();
+                uint hostMask = ~(((uint)mask[0] << 24) | ((uint)mask[1] << 16) | ((uint)mask[2] << 8) | mask[3]);
+                if (hostMask < 3 || hostMask > 65535 || (hostMask & (hostMask + 1)) != 0) continue;
+                bool sameSubnet = true;
+                bool hasHostBits = false;
+                bool hasNetworkBits = false;
+                for (int i = 0; i < peer.Length; i++)
+                {
+                    sameSubnet &= (peer[i] & mask[i]) == (local[i] & mask[i]);
+                    hasHostBits |= (peer[i] & ~mask[i]) != 0;
+                    hasNetworkBits |= ((peer[i] ^ 0xff) & ~mask[i]) != 0;
+                }
+                onSwitch |= sameSubnet && hasHostBits && hasNetworkBits;
+            }
+        }
+        return onSwitch;
+    }
+
+    private static bool ReadFaultRole()
+    {
+        string marker = Path.Combine(RunRoot, FaultRoleFile);
+        if (!File.Exists(marker)) return false;
+        using (var stream = new FileStream(Protocol.CanonicalPath(marker, false), FileMode.Open, FileAccess.Read, FileShare.Read))
+        {
+            if (!FaultSupported || stream.Length != 5 || stream.ReadByte() != 'F' || stream.ReadByte() != 'A' ||
+                stream.ReadByte() != 'U' || stream.ReadByte() != 'L' || stream.ReadByte() != 'T')
+                throw new InvalidDataException("PRODUCTION_PROOF_FAULT_ROLE_UNVERIFIED");
+        }
+        return true;
     }
 
     private static string ReadPrelude()
@@ -214,11 +313,15 @@ internal static partial class WfpIntegratedGuardian
                     using (var bfe = new WfpBfeWatch())
                     {
                         string run = ReadLine(pipe, client, bfe, Stopwatch.StartNew(), 2000);
+                        bool fault = run.StartsWith("FAULT ", StringComparison.Ordinal);
+                        if (fault) run = run.Substring(6);
                         uint pid = GetProcessId(client);
                         if (!ProductionProofSession.ValidRun(run) || pid == 0 || pid > Int32.MaxValue ||
-                            pid == ProductionProofSession.OperatorPid)
+                            pid == ProductionProofSession.OperatorPid || (fault && !ProductionProofSession.FaultSupported))
                             throw new InvalidDataException("PRODUCTION_PROOF_REGISTRATION_INVALID");
                         ProductionProofSession.CreateRunDirectory(run);
+                        if (fault) PublishProductionMarker(Path.Combine(ProductionProofSession.InstallRoot, "runs", run,
+                            ProductionProofSession.FaultRoleFile), "FAULT");
                         var start = new ProcessStartInfo {
                             FileName = image,
                             Arguments = "--production-guardian " + run + " " +
@@ -312,7 +415,8 @@ internal static partial class WfpIntegratedGuardian
                 throw new InvalidDataException("PRODUCTION_PROOF_SESSION_PEER_INVALID");
             using (var peer = OpenBackupPeer((int)pid, image, identity.User, session, true))
             {
-                WriteRegistrationLine(pipe, run, timeout, "PRODUCTION_PROOF_SESSION_REQUEST_TIMEOUT");
+                WriteRegistrationLine(pipe, (ProductionProofSession.FaultMode ? "FAULT " : "") + run, timeout,
+                    "PRODUCTION_PROOF_SESSION_REQUEST_TIMEOUT");
                 var reply = new byte[1];
                 var clock = Stopwatch.StartNew();
                 foreach (char expected in "READY\n")

@@ -34,6 +34,7 @@ internal sealed class WfpIntegratedRun : IDisposable
     private readonly string workspace;
     private readonly string pipeName;
     private readonly ProcessIdentity operatorIdentity;
+    private readonly bool productionFault;
     private readonly Stopwatch stageClock = Stopwatch.StartNew();
     private readonly byte[] responseByte = new byte[1];
 
@@ -55,6 +56,7 @@ internal sealed class WfpIntegratedRun : IDisposable
     internal WfpIntegratedRun(Request request)
     {
         this.request = request;
+        productionFault = request.productionProof && ProductionProofSession.FaultMode;
         workspace = Protocol.CanonicalPath(request.productionProof
             ? request.productionGateDirectory : Path.Combine(request.fixtureRoot, "workspace"), true);
         pipeName = WfpIntegratedGuardian.PipeName();
@@ -109,10 +111,11 @@ internal sealed class WfpIntegratedRun : IDisposable
                     leaseVerified = true;
                     pendingResponse = BeginReadResponse();
                     RequireGuardian();
-                    if (MxcPin.GovernedWfpActiveLoss)
+                    if (MxcPin.GovernedWfpActiveLoss || productionFault)
                     {
                         RequireReleaseAbsent();
                         ConnectBackup();
+                        if (productionFault) productionBackupVerified = true;
                         Release("wfp-active-go.txt");
                         phase = Phase.Active;
                         break;
@@ -140,9 +143,9 @@ internal sealed class WfpIntegratedRun : IDisposable
                 case Phase.Active:
                     RequireGuardian();
                     RequireBackup();
-                    active = ReadBinds("wfp-active-result.txt");
+                    active = ReadBinds("wfp-active-result.txt", productionFault ? 6 : 4);
                     if (active == null) return;
-                    RequireBinds(active, 10013);
+                    RequireActiveSample(active, "active");
                     RequireSameNode(job);
                     RequireReleaseAbsent();
                     WriteLine("FAULT");
@@ -168,9 +171,9 @@ internal sealed class WfpIntegratedRun : IDisposable
                     break;
                 case Phase.ActiveFaultSample:
                     RequireBackup();
-                    fault = ReadBinds("wfp-fault-result.txt");
+                    fault = ReadBinds("wfp-fault-result.txt", productionFault ? 6 : 4);
                     if (fault == null) return;
-                    RequireBinds(fault, 10013);
+                    RequireActiveSample(fault, "fault");
                     RequireSameNode(job);
                     RequireReleaseAbsent();
                     guardianLossDetected = true;
@@ -195,7 +198,7 @@ internal sealed class WfpIntegratedRun : IDisposable
         finished = true;
         try
         {
-            if (MxcPin.GovernedWfpOwnerLoss || MxcPin.GovernedWfpActiveLoss)
+            if (MxcPin.GovernedWfpOwnerLoss || MxcPin.GovernedWfpActiveLoss || productionFault)
             {
                 if (guardianLossDetected && jobEmpty) VerifyOwnerLoss();
             }
@@ -217,7 +220,7 @@ internal sealed class WfpIntegratedRun : IDisposable
         catch (Win32Exception failure) { ReportFailure("Drain", failure); }
         finally
         {
-            if (request.productionProof && !passed)
+            if (request.productionProof && !passed && !ownerLossObserved)
             {
                 ReportProductionDrainFailure(WfpIntegratedGuardian.ProductionPrimaryFailureFile, "PrimaryDrain");
                 ReportProductionDrainFailure(WfpIntegratedGuardian.ProductionBackupFailureFile, "BackupDrain");
@@ -266,7 +269,7 @@ internal sealed class WfpIntegratedRun : IDisposable
         if (!ownerExitVerified)
             throw new InvalidDataException("GOVERNED_WFP_OWNER_LOSS_EXIT_UNVERIFIED");
 
-        string name = MxcPin.GovernedWfpActiveLoss ? "active-backup-cleanup.txt" : "owner-loss-cleanup.txt";
+        string name = MxcPin.GovernedWfpActiveLoss || productionFault ? "active-backup-cleanup.txt" : "owner-loss-cleanup.txt";
         var clock = Stopwatch.StartNew();
         string marker = ReadProtectedMarker(name);
         while (marker == null && clock.ElapsedMilliseconds < OwnerLossCleanupTimeoutMs)
@@ -276,6 +279,14 @@ internal sealed class WfpIntegratedRun : IDisposable
         }
         if (marker == null) throw new TimeoutException("GOVERNED_WFP_OWNER_LOSS_CLEANUP_TIMEOUT");
         if (marker != "REMOVED") throw new InvalidDataException("GOVERNED_WFP_OWNER_LOSS_CLEANUP_INVALID");
+        if (productionFault)
+        {
+            uint backupWait = WaitForSingleObject(backup, PipeTimeoutMs);
+            if (backupWait == WaitFailed) throw LastError();
+            uint backupExit;
+            if (backupWait != WaitObject || !GetExitCodeProcess(backup, out backupExit) || backupExit != 0)
+                throw new InvalidDataException("GOVERNED_WFP_FAULT_BACKUP_EXIT_UNVERIFIED");
+        }
         removalVerified = true;
         if (nodeWait == WaitFailed) throw new Win32Exception(nodeWaitError);
         if (!nodeExited)
@@ -491,13 +502,13 @@ internal sealed class WfpIntegratedRun : IDisposable
         }
     }
 
-    private int[] ReadBinds(string name)
+    private int[] ReadBinds(string name, int laneCount = 4)
     {
         string text = ReadMarker(name);
         if (text == null) return null;
         string[] parts = text.Split((char[])null, StringSplitOptions.RemoveEmptyEntries);
-        if (parts.Length != 4) throw new InvalidDataException("GOVERNED_WFP_BIND_MARKER_INVALID");
-        var values = new int[4];
+        if (parts.Length != laneCount) throw new InvalidDataException("GOVERNED_WFP_BIND_MARKER_INVALID");
+        var values = new int[laneCount];
         for (int i = 0; i < values.Length; i++)
             if (!Int32.TryParse(parts[i], NumberStyles.None, CultureInfo.InvariantCulture, out values[i]))
                 throw new InvalidDataException("GOVERNED_WFP_BIND_MARKER_INVALID");
@@ -508,6 +519,26 @@ internal sealed class WfpIntegratedRun : IDisposable
     {
         foreach (int value in values)
             if (value != expected) throw new InvalidDataException("GOVERNED_WFP_BIND_OUTCOME_MISMATCH");
+    }
+
+    private void RequireActiveSample(int[] values, string sample)
+    {
+        if (!productionFault)
+        {
+            RequireBinds(values, 10013);
+            return;
+        }
+        string ready = Protocol.CanonicalPath(Path.Combine(workspace, "wfp-peer-" + sample + "-ready.txt"), false);
+        using (var input = new FileStream(ready, FileMode.Open, FileAccess.Read, FileShare.Read))
+        {
+            if (input.Length != 2 || input.ReadByte() != 'G' || input.ReadByte() != 'O')
+                throw new InvalidDataException("GOVERNED_WFP_FAULT_PEER_CONTROL_UNVERIFIED");
+        }
+        for (int i = 0; i < 4; i++)
+            if (values[i] != 10013) throw new InvalidDataException("GOVERNED_WFP_BIND_OUTCOME_MISMATCH");
+        for (int i = 4; i < values.Length; i++)
+            if (values[i] != 10013 && values[i] != 10051 && values[i] != 10061)
+                throw new InvalidDataException("GOVERNED_WFP_FAULT_EGRESS_UNVERIFIED");
     }
 
     private void Release(string name)
@@ -521,6 +552,17 @@ internal sealed class WfpIntegratedRun : IDisposable
         string directory = Protocol.CanonicalPath(Path.GetDirectoryName(request.requestPath), true);
         string path = Path.Combine(directory, "wfp-integration-result.json");
         var serializer = new JavaScriptSerializer { MaxJsonLength = 4096 };
+        if (productionFault)
+        {
+            WriteNew(path, serializer.Serialize(new {
+                schemaVersion = "clue-windows-production-fault/1",
+                state = ownerLossObserved ? "PRODUCTION_WFP_ACTIVE_LOSS_OBSERVED" : "PRODUCTION_WFP_ACTIVE_LOSS_UNVERIFIED",
+                identityVerified, leaseVerified, jobEmpty, removalVerified, productionBackupVerified,
+                ownerExitVerified, nodeExited, releaseWithheld, backupSurvived, control, armed, active, fault,
+                proofAuthorization = false,
+            }));
+            return;
+        }
         if (request.productionProof)
         {
             WriteNew(path, serializer.Serialize(new {

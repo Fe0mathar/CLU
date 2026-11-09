@@ -4,7 +4,8 @@ param(
     [Parameter(Mandatory)] [string] $AdmissionReportSha256,
     [Parameter(Mandatory)] [string] $ExpectedSupervisorSha256,
     [int] $ExistingProductionSessionPid = 0,
-    [int] $ExpectedSessionOwnerPid = 0
+    [int] $ExpectedSessionOwnerPid = 0,
+    [string] $QualificationOutput
 )
 
 Set-StrictMode -Version Latest
@@ -145,12 +146,22 @@ try {
 
     $repo = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))
     $programFiles = [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles)
-    $evidence = Join-Path ([IO.Path]::GetDirectoryName($repo)) 'release-evidence'
+    $evidence = if ($QualificationOutput) {
+        [IO.Path]::GetDirectoryName($QualificationOutput)
+    } else { Join-Path ([IO.Path]::GetDirectoryName($repo)) 'release-evidence' }
     $phase = 'QUALIFY_ADMISSION_REPORT_UNVERIFIED'
     Assert-ExactPath $repo $true
     Assert-ExactPath $programFiles $true
     Assert-ExactPath $evidence $true
     Assert-ExternalPath $evidence $repo $programFiles
+    if ($QualificationOutput) {
+        $outputName = [IO.Path]::GetFileName($QualificationOutput)
+        if ($outputName -cnotmatch '\AP2_WINDOWS_SUPERVISOR_QUALIFICATION_[0-9]{8}-[0-9]{6}-[0-9]{3}-[0-9a-f]{32}\.json\z' -or
+            $QualificationOutput -cne (Join-Path $evidence $outputName) -or
+            (Test-Path -LiteralPath $QualificationOutput)) {
+            throw 'QUALIFY_OUTPUT_PATH_UNVERIFIED'
+        }
+    }
     if ($AdmissionReportSha256 -cnotmatch '\A[a-f0-9]{64}\z' -or
         $wrapperSha -cnotmatch '\A[a-f0-9]{64}\z' -or
         $wrapperSha -ceq '505ba70cb3068c211680dc9e2f37380cb9fa46f68c2df00886007bcf6459ccbc') {
@@ -327,7 +338,9 @@ public static class ClueProductionQualificationPipe {
 
     $phase = 'QUALIFY_CANARY_RUN_UNVERIFIED'
     $stamp = [DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss-fff', [Globalization.CultureInfo]::InvariantCulture)
-    $output = Join-Path $evidence "P2_WINDOWS_SUPERVISOR_QUALIFICATION_$stamp-$([Guid]::NewGuid().ToString('N')).json"
+    $output = if ($QualificationOutput) {
+        $QualificationOutput
+    } else { Join-Path $evidence "P2_WINDOWS_SUPERVISOR_QUALIFICATION_$stamp-$([Guid]::NewGuid().ToString('N')).json" }
     $start = [Diagnostics.ProcessStartInfo]::new()
     $start.FileName = $node
     $start.WorkingDirectory = $repo

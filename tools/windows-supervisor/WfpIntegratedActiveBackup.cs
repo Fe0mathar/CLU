@@ -171,7 +171,7 @@ internal static partial class WfpIntegratedGuardian
                     PublishProtectedMarker(image, BackupIdsFile, FormatBackupIds(backupKeys.Ids));
                     PublishProtectedMarker(image, BackupReadyFile, "READY");
 
-                    if (MxcPin.ProofProductionAdmission)
+                    if (MxcPin.ProofProductionAdmission && !ProductionProofSession.FaultMode)
                     {
                         phase = "PRODUCTION_DRAIN";
                         WaitForProductionDrain(image, primary, client, operatorProcess, job, node, bfe);

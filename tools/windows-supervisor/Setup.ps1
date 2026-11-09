@@ -13,12 +13,15 @@ param(
     [switch] $InstalledGovernedWfpOwnerLossDiagnostic,
     [switch] $InstalledGovernedWfpActiveLossDiagnostic,
     [switch] $InstalledProductionProofDiagnostic,
+    [switch] $InstalledProductionNetworkFaultDiagnostic,
     [switch] $WfpEnforcementFaultDiagnostic
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
+
+if ($InstalledProductionNetworkFaultDiagnostic) { $InstalledProductionProofDiagnostic = [switch] $true }
 
 function Get-LocalPath([string] $Path) {
     if ($Path -notmatch '^[A-Za-z]:[\\/](?![\\/])') { throw "Use an absolute local Windows path: $Path" }
@@ -301,7 +304,7 @@ function Close-InstalledGovernedHandles([Collections.Generic.List[IO.FileStream]
 
 function Invoke-InstalledGovernedWfpBuild([string] $Stage, [string] $Node, [string] $NodeSha256,
     [string] $NpmCliSha256, [string] $QualificationTemp, [string] $EngineSha256, [string] $OperatorSid,
-    [int] $OperatorSessionId, [switch] $OwnerLoss, [switch] $ActiveLoss, [switch] $Production) {
+    [int] $OperatorSessionId, [switch] $OwnerLoss, [switch] $ActiveLoss, [switch] $Production, [switch] $NetworkFault) {
     $script:admissionInstallation.buildFailure = 'WFP_BUILD_LAUNCHER_PREFLIGHT'
     $stageName = Split-Path -Leaf $Stage
     if ($stageName -cnotmatch '\A\.setup-([a-f0-9]{32})\z') { throw 'The WFP workload stage identity is invalid.' }
@@ -323,6 +326,7 @@ function Invoke-InstalledGovernedWfpBuild([string] $Stage, [string] $Node, [stri
     if ($OwnerLoss) { $arguments += '-OwnerLoss' }
     if ($ActiveLoss) { $arguments += '-ActiveLoss' }
     if ($Production) { $arguments += '-Production' }
+    if ($NetworkFault) { $arguments += '-NetworkFault' }
     $script:admissionInstallation.buildFailure = 'WFP_BUILD_LAUNCHER_SCRIPT_PIN'
     $builderHandle = [IO.File]::Open($builder, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
     $process = $null
@@ -335,7 +339,7 @@ function Invoke-InstalledGovernedWfpBuild([string] $Stage, [string] $Node, [stri
         $sha = [Security.Cryptography.SHA256]::Create()
         try { $builderDigest = [BitConverter]::ToString($sha.ComputeHash($canonical)).Replace('-', '').ToLowerInvariant() }
         finally { $sha.Dispose() }
-        if ($builderDigest -cne 'c1ec5c9095e7e4be9ebe59938f0b6311d80bd7ee502a110a004d19a27eb1d272') { throw 'The governed WFP builder source pin does not match.' }
+        if ($builderDigest -cne 'ae2d86ac173bf7a2f8f6c343f7745b57d0483570755977a4d4a12b9887e03e03') { throw 'The governed WFP builder source pin does not match.' }
         Write-Host 'Approve the Windows elevation prompt for the protected supervisor build and WFP guardian.'
         $script:admissionInstallation.buildFailure = 'WFP_BUILD_LAUNCHER_START_FAILED'
         try { $process = Start-Process -FilePath $pwsh -ArgumentList $arguments -Verb RunAs -WindowStyle Hidden -PassThru }
@@ -461,6 +465,7 @@ function Write-StagedProofDiagnosticReport([string] $Path, [string] $State, $Exi
     }
     if ($script:InstalledProductionProofDiagnostic) {
         $payload.productionBuildRevision = '06G3'
+        if ($script:InstalledProductionNetworkFaultDiagnostic) { $payload.productionNetworkFaultDiagnostic = $true }
         $payload.runnerSha256 = $script:admissionRunnerHash
         $payload.workloadExitCode = $ExitCode
         $payload.npmCliSha256 = $script:admissionNpmCliHash
@@ -491,6 +496,28 @@ function Write-StagedProofDiagnosticReport([string] $Path, [string] $State, $Exi
     }
     $maximumBytes = if ($script:governedWorkloadDiagnosticSelected) { 131072 } else { 65536 }
     Write-DiagnosticFile $Path $payload $maximumBytes
+}
+
+function Get-NetworkFaultReportBinding([string] $Path) {
+    if (!$Path -or !(Test-Path -LiteralPath $Path -PathType Leaf)) { return $null }
+    try {
+        Assert-NoReparsePath $Path
+        $lock = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+        try {
+            if ($lock.Length -lt 2 -or $lock.Length -gt 65536) { return $null }
+            $binding = [ordered]@{ path = $Path; sha256 = Get-Sha256 $Path }
+            $json = [IO.File]::ReadAllText($Path) | ConvertFrom-Json -AsHashtable -Depth 24
+            if ($json -is [System.Collections.IDictionary]) {
+                foreach ($key in @('state', 'status', 'canaryStatus', 'blocker', 'setupStage')) {
+                    $value = $json[$key]
+                    if ($value -is [string] -and $value -cmatch '\A[A-Z][A-Z0-9_]{1,79}\z') {
+                        $binding[$key] = $value
+                    }
+                }
+            }
+            return $binding
+        } finally { $lock.Dispose() }
+    } catch { return $null }
 }
 
 function Assert-WfpFaultStageAcl([string] $Path, [string] $Dacl) {
@@ -728,6 +755,9 @@ $operatorWorkloadDiagnostic = $ReviewedWorkloadDiagnostic -or $governedWorkloadD
 $stagedProofDiagnostic = $ProofAdmissionDiagnostic -or $operatorWorkloadDiagnostic
 $stagedWfpDiagnostic = $WfpPairedDiagnostic -or $WfpEnforcementFaultDiagnostic
 $setupFailureState = $null
+$networkFaultBundle = $null
+$networkFaultQualification = $null
+$networkFaultPhase = 'ADMISSION'
 try {
     if ($PSVersionTable.PSVersion.Major -lt 7 -or !$IsWindows) { throw 'Run this setup on native Windows with PowerShell 7.' }
     if ($WfpDiagnostic -and $WfpPairedDiagnostic) { throw 'Select one WFP diagnostic mode.' }
@@ -799,6 +829,12 @@ try {
     } elseif ($ProofAdmissionDiagnostic) {
         Join-Path $evidence "CLU-E_WINDOWS_PROOF_ADMISSION_$stamp.json"
     } else { Join-Path $evidence "CLU-E_MXC_SUPERVISOR_DIAGNOSTIC_$stamp.json" }
+    if ($InstalledProductionNetworkFaultDiagnostic) {
+        $bundleNonce = [Guid]::NewGuid().ToString('N')
+        $bundleStamp = [DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss-fff', [Globalization.CultureInfo]::InvariantCulture)
+        $networkFaultBundle = Join-Path $evidence "CLU-E_WINDOWS_PRODUCTION_NETWORK_FAULT_$bundleStamp-$bundleNonce.json"
+        $networkFaultQualification = Join-Path $evidence "P2_WINDOWS_SUPERVISOR_QUALIFICATION_$bundleStamp-$bundleNonce.json"
+    }
     if (!$operatorWorkloadDiagnostic -and !$WfpEnforcementFaultDiagnostic) { Assert-NoReparsePath $install -CreateDirectory }
 
     $arch = [Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()
@@ -879,7 +915,9 @@ try {
         Write-Host '[1/4] Checking the Windows WFP enforcement fault diagnostic prerequisites.'
     }
     if ($stagedProofDiagnostic) {
-        if ($InstalledProductionProofDiagnostic) {
+        if ($InstalledProductionNetworkFaultDiagnostic) {
+            Write-Host '[1/4] Checking prerequisites for the production network fault diagnostic.'
+        } elseif ($InstalledProductionProofDiagnostic) {
             Write-Host '[1/4] Checking prerequisites for the 06G3 production supervisor rebuild.'
         } elseif ($InstalledGovernedWfpActiveLossDiagnostic) {
             Write-Host '[1/4] Checking the governed Windows WFP active-loss diagnostic prerequisites.'
@@ -1024,7 +1062,7 @@ try {
         $setupStage = 'MXC_RELEASE_VERIFICATION'
         $diagnosticSourceRoot = Join-Path $stage 'trusted-source'
         $faultSourceSha256 = [ordered]@{
-            'ProductionProofSession.cs' = 'c5dac20e25bb2bb90583c796328b2aea1164ac38a1017d4eaba66c94562a2a6e'
+            'ProductionProofSession.cs' = 'c577b99a4c54074fbae263af22a892d60b41ef01fdfe2f3e24de99bade21161f'
             'ProductionProofRequest.cs' = '22bc835b89e30d895aaedb4c7ee9d1dfc82264b4b3dc650bc17b7f188e361a99'
             # Pinned canonical UTF-8/LF sources. See the patch manifest for raw payload hashes.
             'NativeJob.cs' = '11db6d635accb80083b198aa2c78a49fb6b3f7952011946e4fda430e95e2618d'
@@ -1037,9 +1075,9 @@ try {
             'WfpEnforcementFaultSetup.ps1' = '620d31ba73e6fbd2c01f930b373ddcec555cc5bb34856e31c6981f923a16df4c'
             'WfpFaultRecovery.cs' = 'f14116dcab8e4888253e314e099c30d7d93ed938a00fc7b6d510dc836b553536'
             'WfpHostLoopbackFixture.cs' = 'bc0e7b99bab9723a2b0de32ec787dac04d5748f11b4cd844ac5e370495e38285'
-            'WfpIntegratedRun.cs' = '27bf7eef220d82251cc8c0fe6736d6cd96f3f570e3704c7efab229f5e4b3236e'
-            'WfpIntegratedGuardian.cs' = '021c1bbeb595c2e7ade8c3aee37b893e16352dd2c8beecbec7720ae752edcd71'
-            'WfpIntegratedActiveBackup.cs' = '3e44c31bce7c92cd092a7ffceabea22e389544befea1cf268429fa7bcc0c6924'
+            'WfpIntegratedRun.cs' = 'c8d22a9d5084314abf1f11c957a9caf25ad29f3adb57c51726f5a45a37c14ca3'
+            'WfpIntegratedGuardian.cs' = 'db0e9dab23cc102d7cac83b373aeba7eb27b46b210d0fec467419bb139930827'
+            'WfpIntegratedActiveBackup.cs' = 'd31950ef7844e8db4db3d7ee37104d4dd5154bcb1389152764af767e2d552b70'
             'WfpLeaseFaultController.cs' = 'd42b820a23fcb38b8e0234e84bcf631c7bed29b71e230057fc358e91b511ba99'
             'WfpLoopbackLease.cs' = '22f6da4c0a380763e00c17892b10452c3746a42c346e63467e997d077e60c9d0'
             'WfpPairedFixture.cs' = '7b0f9ffb806860cdb6a775f4756fe72a21805e79ff6dbc15955c6fea2d081c7d'
@@ -1164,6 +1202,7 @@ internal static class MxcPin {
     internal const string QualificationNodeExe = @"$quotedNode";
     internal const string QualificationNodeSha256 = "";
     internal const bool ProofProductionAdmission = false;
+    internal const string ProductionFaultProbeSha256 = "";
     internal const string ProofAdmissionStage = @"$quotedAdmissionStage";
     internal const string ProofAdmissionScriptSha256 = "$admissionScriptPin";
     internal const bool ProofAdmissionReviewedWorkload = $admissionReviewedPin;
@@ -1187,7 +1226,13 @@ $diagnosticPins
             $admissionWfpPreludeHash = Get-Sha256 $admissionWfpPreludePath
             $stageCleanupSafe = $false
             $admissionInstallation.state = 'BUILD_REQUESTED'
-            $protectedImage = Invoke-InstalledGovernedWfpBuild $stage $node $admissionNodeHash $admissionNpmCliHash $qualificationTemp $mxcHash $admissionOperatorSid $sessionId -OwnerLoss:$InstalledGovernedWfpOwnerLossDiagnostic -ActiveLoss:$InstalledGovernedWfpActiveLossDiagnostic -Production:$InstalledProductionProofDiagnostic
+            $buildModes = @{
+                OwnerLoss = $InstalledGovernedWfpOwnerLossDiagnostic
+                ActiveLoss = $InstalledGovernedWfpActiveLossDiagnostic
+                Production = $InstalledProductionProofDiagnostic
+                NetworkFault = $InstalledProductionNetworkFaultDiagnostic
+            }
+            $protectedImage = Invoke-InstalledGovernedWfpBuild $stage $node $admissionNodeHash $admissionNpmCliHash $qualificationTemp $mxcHash $admissionOperatorSid $sessionId @buildModes
             $admissionInstallation.buildFailure = 'WFP_BUILD_INSTALLED_IMAGE_VERIFICATION'
             $admissionProtectedInstallation = $protectedImage.directory
             $admissionSupervisorHash = $protectedImage.wrapperSha256
@@ -1565,6 +1610,7 @@ $diagnosticPins
         Write-Host "[4/4] Diagnostic report: $report"
         if ($InstalledProductionProofDiagnostic -and $admissionProcessExit -eq 0 -and
             $admissionState -ceq 'PRODUCTION_ADMISSION_OBSERVED' -and $admissionCleanup -ceq 'REMOVED') {
+            $networkFaultPhase = 'QUALIFICATION'
             try {
                 Assert-NoReparsePath $report
                 $reportDigest = Get-Sha256 $report
@@ -1578,11 +1624,60 @@ $diagnosticPins
                     '-ExpectedSupervisorSha256', $admissionSupervisorHash,
                     '-ExistingProductionSessionPid', [string] $protectedImage.guardianPid,
                     '-ExpectedSessionOwnerPid', [string] $PID)
+                if ($InstalledProductionNetworkFaultDiagnostic) {
+                    $qualificationArgs += @('-QualificationOutput', $networkFaultQualification)
+                }
                 Write-Host 'Running native qualification against this rebuilt production supervisor.'
                 $qualificationExitCode = Invoke-ExactExecutable $qualificationShell $qualificationArgs $repo 360
-                exit $qualificationExitCode
             } catch {
                 Write-Host 'CLU-E supervisor qualification stopped: QUALIFY_HANDOFF_FAILED'
+                exit 2
+            }
+            if (!$InstalledProductionNetworkFaultDiagnostic -or $qualificationExitCode -ne 0) { exit $qualificationExitCode }
+
+            $networkFaultPhase = 'HANDOFF'
+            try {
+                $qualified = Get-NetworkFaultReportBinding $networkFaultQualification
+                if ($null -eq $qualified) { throw 'PRODUCTION_NETWORK_FAULT_QUALIFICATION_REPORT_UNVERIFIED' }
+                $peerScript = Join-Path $PSScriptRoot 'RunWindowsSandboxProductionPeerFault.ps1'
+                Assert-NoReparsePath $peerScript
+                $peerArgs = @('-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+                    '-File', $peerScript, '-EvidenceRoot', $evidence, '-BundleOutput', $networkFaultBundle,
+                    '-SupervisorPath', $admissionSupervisor, '-SupervisorSha256', $admissionSupervisorHash,
+                    '-AdmissionReportPath', $report, '-AdmissionReportSha256', $reportDigest,
+                    '-QualificationReportPath', $qualified.path, '-QualificationReportSha256', $qualified.sha256,
+                    '-ProductionRegistrationPid', [string] $protectedImage.guardianPid, '-ExpectedOperatorPid', [string] $PID)
+                Write-Host 'Starting the live Windows Sandbox peer and the fixed native network fault canary.'
+                # The child bounds its own commands and owns exact Sandbox cleanup.
+                $peerExitCode = Invoke-ExactExecutable $qualificationShell $peerArgs $repo
+                Assert-NoReparsePath $networkFaultBundle
+                $bundleItem = Get-Item -LiteralPath $networkFaultBundle -Force
+                if ($bundleItem.PSIsContainer -or $bundleItem.Length -lt 2 -or $bundleItem.Length -gt 262144) {
+                    throw 'PRODUCTION_NETWORK_FAULT_BUNDLE_UNVERIFIED'
+                }
+                $bundle = [IO.File]::ReadAllText($networkFaultBundle) | ConvertFrom-Json -AsHashtable -Depth 24
+                if ($bundle -isnot [System.Collections.IDictionary] -or
+                    $bundle['schemaVersion'] -cne 'clue-windows-production-network-fault/1' -or
+                    $bundle['proofAuthorization'] -isnot [bool] -or $bundle['proofAuthorization'] -or
+                    $bundle['qualificationPromotion'] -isnot [bool] -or $bundle['qualificationPromotion'] -or
+                    $bundle['offHostLan'] -cne 'NOT_TESTED' -or
+                    ($peerExitCode -eq 0) -ne ($bundle['state'] -ceq 'PRODUCTION_NETWORK_FAULT_OBSERVED')) {
+                    throw 'PRODUCTION_NETWORK_FAULT_BUNDLE_UNVERIFIED'
+                }
+                $bundleInputs = $bundle['inputs']
+                if ($bundleInputs -isnot [System.Collections.IDictionary] -or
+                    $bundleInputs['supervisorPath'] -cne $admissionSupervisor -or
+                    $bundleInputs['supervisorSha256'] -cne $admissionSupervisorHash -or
+                    $bundleInputs['admissionPath'] -cne $report -or $bundleInputs['admissionSha256'] -cne $reportDigest -or
+                    $bundleInputs['qualificationPath'] -cne $qualified.path -or
+                    $bundleInputs['qualificationSha256'] -cne $qualified.sha256 -or
+                    $bundleInputs['productionRegistrationPid'] -ne $protectedImage.guardianPid -or
+                    $bundleInputs['expectedOperatorPid'] -ne $PID) {
+                    throw 'PRODUCTION_NETWORK_FAULT_BUNDLE_UNVERIFIED'
+                }
+                exit $peerExitCode
+            } catch {
+                Write-Host 'CLU-E production network fault stopped: PRODUCTION_NETWORK_FAULT_HANDOFF_UNVERIFIED'
                 exit 2
             }
         }
@@ -1904,5 +1999,25 @@ $diagnosticPins
     if ($null -ne $staticDiagnosticLock) {
         if ($staticDiagnosticLockHeld) { $staticDiagnosticLock.ReleaseMutex() }
         $staticDiagnosticLock.Dispose()
+    }
+    if ($null -ne $networkFaultBundle -and !(Test-Path -LiteralPath $networkFaultBundle)) {
+        try {
+            Assert-NoReparsePath (Split-Path -Parent $networkFaultBundle)
+            $admissionBinding = Get-NetworkFaultReportBinding $report
+            $qualificationBinding = Get-NetworkFaultReportBinding $networkFaultQualification
+            Write-DiagnosticFile $networkFaultBundle ([ordered]@{
+                schemaVersion = 'clue-windows-production-network-fault/1'
+                checkedAt = [DateTime]::UtcNow.ToString('o')
+                state = "PRODUCTION_NETWORK_FAULT_$($networkFaultPhase)_UNVERIFIED"
+                proofAuthorization = $false
+                qualificationPromotion = $false
+                peerType = 'SAME_PC_WINDOWS_SANDBOX_VIRTUAL_SWITCH'
+                offHostLan = 'NOT_TESTED'
+                supervisorSha256 = $admissionSupervisorHash
+                admission = $admissionBinding
+                qualification = $qualificationBinding
+            }) 65536
+            Write-Host "Production network fault evidence: $networkFaultBundle"
+        } catch { Write-Host 'The production network fault evidence could not be written.' }
     }
 }

@@ -11,7 +11,8 @@ param(
     [Parameter(Mandatory)] [int] $OperatorPid,
     [switch] $OwnerLoss,
     [switch] $ActiveLoss,
-    [switch] $Production
+    [switch] $Production,
+    [switch] $NetworkFault
 )
 
 Set-StrictMode -Version Latest
@@ -114,6 +115,7 @@ try {
     if (($OwnerLoss -and ($ActiveLoss -or $Production)) -or ($ActiveLoss -and $Production)) {
         throw 'WFP_BUILD_DIAGNOSTIC_MODES_CONFLICT'
     }
+    if ($NetworkFault -and !$Production) { throw 'WFP_BUILD_MODE_INVALID' }
     if (!$IsWindows -or $PSVersionTable.PSVersion.Major -lt 7 -or $OperatorSessionId -le 0 -or $OperatorPid -le 0 -or
         ![Environment]::UserInteractive) { throw 'WFP_BUILD_INTERACTIVE_WINDOWS_REQUIRED' }
     if ($OperatorSid.Length -gt 128 -or $OperatorSid -cnotmatch '\AS-1(?:-[0-9]{1,15}){2,16}\z' -or
@@ -207,7 +209,7 @@ public static class ClueGovernedWfpOperator
         Assert-Image $engine $EngineSha256 134217728 -Microsoft
         $failureExitCode = 45
         $sourcePins = [ordered]@{
-            'ProductionProofSession.cs' = 'c5dac20e25bb2bb90583c796328b2aea1164ac38a1017d4eaba66c94562a2a6e'
+            'ProductionProofSession.cs' = 'c577b99a4c54074fbae263af22a892d60b41ef01fdfe2f3e24de99bade21161f'
             'ProductionProofRequest.cs' = '22bc835b89e30d895aaedb4c7ee9d1dfc82264b4b3dc650bc17b7f188e361a99'
             'Supervisor.cs' = 'ca4c34d71bdd0e5b2fde35224e69cb36ef2531b081bf95806eb07e3c12494447'
             'Protocol.cs' = 'a8d30925039ec3307d5472d4cb3ed881ee028e9b96d8274374fa133b3d496abc'
@@ -217,9 +219,9 @@ public static class ClueGovernedWfpOperator
             'WfpLoopbackLease.cs' = '22f6da4c0a380763e00c17892b10452c3746a42c346e63467e997d077e60c9d0'
             'WfpDropObservation.cs' = 'f9131d325ce6f30d77840d2f786b1ca2898e82338156aa98b7cb3f8c0946510b'
             'WfpBfeWatch.cs' = '6fa8d9c9f7865a35783082f11fb210a64f28705b8f63431c016288a34fc5ab4c'
-            'WfpIntegratedRun.cs' = '27bf7eef220d82251cc8c0fe6736d6cd96f3f570e3704c7efab229f5e4b3236e'
-            'WfpIntegratedGuardian.cs' = '021c1bbeb595c2e7ade8c3aee37b893e16352dd2c8beecbec7720ae752edcd71'
-            'WfpIntegratedActiveBackup.cs' = '3e44c31bce7c92cd092a7ffceabea22e389544befea1cf268429fa7bcc0c6924'
+            'WfpIntegratedRun.cs' = 'c8d22a9d5084314abf1f11c957a9caf25ad29f3adb57c51726f5a45a37c14ca3'
+            'WfpIntegratedGuardian.cs' = 'db0e9dab23cc102d7cac83b373aeba7eb27b46b210d0fec467419bb139930827'
+            'WfpIntegratedActiveBackup.cs' = 'd31950ef7844e8db4db3d7ee37104d4dd5154bcb1389152764af767e2d552b70'
             'GovernedWorkloadBootstrap.cjs' = '1350631e94c3fa7ce45a74ca298d5e8bea6b983fab1c0c465be97b90bf871ae6'
             'GovernedWfpBindPrelude.cjs' = '334ca86fb237c565f38b17a7b84485c5fc1b603d1b16e07a68a3278cf42a37e9'
         }
@@ -231,6 +233,11 @@ public static class ClueGovernedWfpOperator
         }
         $bootstrapHash = Copy-PinnedSource 'GovernedWorkloadBootstrap.cjs' $sourcePins['GovernedWorkloadBootstrap.cjs'] $sourceDir
         $preludeHash = Copy-PinnedSource 'GovernedWfpBindPrelude.cjs' $sourcePins['GovernedWfpBindPrelude.cjs'] $sourceDir
+        $productionFaultProbePin = ''
+        if ($NetworkFault) {
+            $productionFaultProbePin = '01d2e81ed997d10f951816bf448a816fac167e65604175b329a0eb4244f2d6d8'
+            $null = Copy-PinnedSource 'ProductionFaultFixture.cjs' $productionFaultProbePin $sourceDir
+        }
         if ($Production) {
             $runtimePrelude = Join-Path $protectedRoot 'production-bind-prelude.cjs'
             [IO.File]::Copy((Join-Path $PSScriptRoot 'GovernedWfpBindPrelude.cjs'), $runtimePrelude, $false)
@@ -252,6 +259,7 @@ internal static class MxcPin {
     internal const string QualificationNodeExe = @"$Node";
     internal const string QualificationNodeSha256 = "$nodeHashPin";
     internal const bool ProofProductionAdmission = $productionPin;
+    internal const string ProductionFaultProbeSha256 = "$productionFaultProbePin";
     internal const string ProofAdmissionStage = @"$stagePin";
     internal const string ProofAdmissionScriptSha256 = "$scriptPin";
     internal const bool ProofAdmissionReviewedWorkload = false;

@@ -63,6 +63,7 @@ internal static partial class WfpIntegratedGuardian
 
     internal static int Run()
     {
+        bool productionFault = MxcPin.ProofProductionAdmission && ProductionProofSession.FaultMode;
         NamedPipeServerStream pipe = null;
         OwnedHandle operatorProcess = null;
         OwnedHandle client = null;
@@ -166,11 +167,12 @@ internal static partial class WfpIntegratedGuardian
                         checkedOnce = true;
                         continue;
                     }
-                    if (command == "FAULT" && checkedOnce && !MxcPin.ProofProductionAdmission &&
-                        (MxcPin.GovernedWfpOwnerLoss || MxcPin.GovernedWfpActiveLoss))
+                    if (command == "FAULT" && checkedOnce && (productionFault || (!MxcPin.ProofProductionAdmission &&
+                        (MxcPin.GovernedWfpOwnerLoss || MxcPin.GovernedWfpActiveLoss))))
                     {
                         phase = "OWNER_LOSS";
                         VerifyLiveScope(client, sourceJob, node, expectedNode, sid, lease);
+                        if (productionFault && activeBackup == null) throw new InvalidDataException("GUARDIAN_BACKUP_REQUIRED");
                         if (activeBackup != null) VerifyActiveBackup(activeBackup, sid);
                         else
                         {
@@ -182,7 +184,7 @@ internal static partial class WfpIntegratedGuardian
                         if (!TerminateProcess(GetCurrentProcess(), OwnerLossExitCode)) throw LastError();
                         throw new InvalidOperationException("GUARDIAN_SELF_TERMINATION_RETURNED");
                     }
-                    if (command != "DRAIN" || !checkedOnce || MxcPin.GovernedWfpOwnerLoss || MxcPin.GovernedWfpActiveLoss)
+                    if (command != "DRAIN" || !checkedOnce || productionFault || MxcPin.GovernedWfpOwnerLoss || MxcPin.GovernedWfpActiveLoss)
                         throw new InvalidDataException("GUARDIAN_COMMAND_INVALID");
                     phase = "DRAIN";
                     if (MxcPin.ProofProductionAdmission)
