@@ -16,7 +16,7 @@ import {
 } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { externalReportPath, resolveNpmInvocation, writeExternalReport } from './verification-support.mjs';
+import { collectTapFailures, externalReportPath, resolveNpmInvocation, writeExternalReport } from './verification-support.mjs';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const args = new Set(process.argv.slice(2));
@@ -69,8 +69,7 @@ function sha256(bytes) {
 function redact(text) {
   return String(text)
     .replace(/sk-[A-Za-z0-9_-]{8,}/gu, '[REDACTED_OPENAI_KEY]')
-    .replace(/(OPENAI_API_KEY\s*[=:]\s*)[^\s"']+/giu, '$1[REDACTED]')
-    .slice(-12000);
+    .replace(/(OPENAI_API_KEY\s*[=:]\s*)[^\s"']+/giu, '$1[REDACTED]');
 }
 
 function run(label, command, commandArgs, options = {}) {
@@ -84,14 +83,18 @@ function run(label, command, commandArgs, options = {}) {
     ...options,
   });
   const status = result.status ?? (result.error === undefined ? 1 : 127);
+  const stdout = redact(result.stdout ?? '');
+  const stderr = redact(result.stderr ?? '');
+  const failureDetails = status === 0 ? [] : collectTapFailures(stdout, stderr);
   return Object.freeze({
     label,
     command: [command, ...commandArgs].join(' '),
     status,
     pass: status === 0,
     durationMs: Date.now() - started,
-    stdout: redact(result.stdout ?? ''),
-    stderr: redact(result.error?.message ?? result.stderr ?? ''),
+    stdout: stdout.slice(-12000),
+    stderr: (result.error === undefined ? stderr : redact(result.error.message)).slice(-12000),
+    ...(failureDetails.length > 0 ? { failureDetails } : {}),
   });
 }
 
@@ -241,7 +244,10 @@ else {
   process.stdout.write(`Project Profiles acceptance: ${report.status}\n`);
   for (const step of steps) {
     process.stdout.write(`  ${step.pass ? 'PASS' : 'FAIL'}  ${step.label} (${step.durationMs} ms)\n`);
-    if (!step.pass) process.stdout.write(`    ${step.stderr.trim() || step.stdout.trim() || 'No diagnostic output.'}\n`);
+    if (!step.pass) {
+      const diagnostic = step.failureDetails?.join('\n\n') || step.stderr.trim() || step.stdout.trim() || 'No diagnostic output.';
+      process.stdout.write(`    ${diagnostic}\n`);
+    }
   }
   if (portableSkipped.length > 0) process.stdout.write(`  PENDING ${portableSkipped.length} native/Windows tests intentionally skipped in portable mode\n`);
   for (const finding of secretFindings) process.stdout.write(`  FAIL  raw credential-like material in ${finding}\n`);

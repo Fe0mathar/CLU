@@ -1,0 +1,68 @@
+{
+  "patch": "P01A Windows Acceptance",
+  "predecessor": {
+    "sourceCommit": "209878e626577171a4c4e6f48558b54de47896c0",
+    "sourceTree": "c1cc7869d4111409f70730ce0598ce2b956a8617",
+    "file": "CLU-E_Patch_P01_Windows_Preflight.zip",
+    "sha256": "84047eaaf41a74fdc1b66d22b47fd79ac3e40b8ef7c5975917ddc27757b06767"
+  },
+  "files": [
+    {
+      "path": "selftest/dashboard-startup-binding.test.ts",
+      "operation": "replace",
+      "expectedBeforeSha256": "89758085742af012cdc6b62690812bbd8e6decbeda476f03fc91bca2ddee6e39",
+      "afterSha256": "ab75f3398ee9bb6acc41f23ea2f97ae968d1c41f54eaed511a17ac8d09bef49c"
+    },
+    {
+      "path": "selftest/proof.test.ts",
+      "operation": "replace",
+      "expectedBeforeSha256": "098c75f4de0b5ad4f06187c88c38b1a1955f276aa95442bd2cc3eb5447db9ebb",
+      "afterSha256": "4a88810da4c4fe90a4a4403d47d7d0d424edc151be5d48d64a3c4cc635cea1c1"
+    },
+    {
+      "path": "selftest/windows-execution-supervisor.test.ts",
+      "operation": "replace",
+      "expectedBeforeSha256": "f67050b6d208bf479a957c0753c48bd4a35dbd601bf6c3e04b9a0465c7797e2c",
+      "afterSha256": "e48dbac41db177baf3c4c42e64868b7f4fa0f6deacb13a6b7395c1b8f01ba317"
+    },
+    {
+      "path": "selftest/windows-verification-tools.test.ts",
+      "operation": "replace",
+      "expectedBeforeSha256": "25f6cedca9f4445e8b8623c4803c0e808eceecf06052a9ff1e07e559e0541954",
+      "afterSha256": "89f01a10e0de52be01e6da306203fdbd8971b37da0570336d7b7e77b91c48ae6"
+    },
+    {
+      "path": "src/benchmark/restrictedExecution.ts",
+      "operation": "replace",
+      "expectedBeforeSha256": "8224c6b66f158e3cf64670d91311fe38eef85355b4a39e18447bfe4244a5ec2c",
+      "afterSha256": "c4768b917beea3792b4c36790c6ec500539c834faf1f016cf238debbce57f6bc"
+    },
+    {
+      "path": "src/benchmark/windowsExecutionSupervisor.ts",
+      "operation": "replace",
+      "expectedBeforeSha256": "2fa08f48a526ba15cb58ab1c560947c80e1b5aea3f0b470ca59897e0ce6c8b1f",
+      "afterSha256": "3cf034f9266203f54bbf8f22aa0d391d1b3ba2bf34b5df71c023eba9c3e0caed"
+    },
+    {
+      "path": "tools/project-profiles-acceptance.mjs",
+      "operation": "replace",
+      "expectedBeforeSha256": "a8e85ca88ab93ac651591e9e759518295c32153fdef0b8a592aed3854b2d0592",
+      "afterSha256": "3a4b22094a95eef1034fc004e7053e07b52a449ddc1224b469df6e223aedaa94"
+    },
+    {
+      "path": "tools/verification-support.mjs",
+      "operation": "replace",
+      "expectedBeforeSha256": "63dacde0eb0b1838b4e7e0ce242127cb3801b905ecad082b78e2bbe1a19482fa",
+      "afterSha256": "6924c1045c57784a6c9912e8923d0e3ca35e7331c4cdae27dcc01bd791ad5b49"
+    },
+    {
+      "path": "CLU-E-P01A-Windows-Acceptance.md",
+      "operation": "add",
+      "expectedBeforeSha256": null,
+      "afterSha256": "2e2a62c3716c207fd201c0a3919c72e37de2c5e3a90a7310caf7e6cfe9894e9a"
+    }
+  ],
+  "metadataFiles": [
+    "CLU-E-P01A-Manifest.json"
+  ]
+}

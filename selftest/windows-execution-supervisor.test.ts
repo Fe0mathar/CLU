@@ -4,12 +4,21 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
-import { resolveWindowsSupervisor } from '../src/benchmark/windowsExecutionSupervisor.js';
+import { describeWindowsSupervisorRefusal, resolveWindowsSupervisor } from '../src/benchmark/windowsExecutionSupervisor.js';
 import { hashText } from '../src/shared/ids.js';
 
 const pin = (path: string, sha256 = 'a'.repeat(64)): NodeJS.ProcessEnv => ({
   CLU_WINDOWS_SUPERVISOR_PATH: path,
   CLU_WINDOWS_SUPERVISOR_SHA256: sha256,
+});
+
+test('Windows containment refusals retain the bounded native code and omit raw stderr', () => {
+  const message = 'The Windows supervisor refused containment.';
+  const code = 'PRODUCTION_PROOF_SESSION_CONNECT_TIMEOUT';
+  assert.equal(describeWindowsSupervisorRefusal(`private path\r\n[CLU-E production proof] ${code}\r\nother output`),
+    `${message} Native code: ${code}.`);
+  assert.equal(describeWindowsSupervisorRefusal(`[CLU-E production proof] ${code} private path\r\n`), message);
+  assert.equal(describeWindowsSupervisorRefusal(`unrelated output: ${code}\n`), message);
 });
 
 test('Windows supervisor fails closed without an explicit absolute executable and content pin', () => {

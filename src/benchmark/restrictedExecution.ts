@@ -6,7 +6,7 @@ import { performance } from 'node:perf_hooks';
 
 import type { ExecFn } from './benchmarkRunner.js';
 import { linuxContainmentInvocation, runBoundedProcess } from './containedProcess.js';
-import { resolveWindowsSupervisor, type WindowsExecutionSupervisorRequest } from './windowsExecutionSupervisor.js';
+import { describeWindowsSupervisorRefusal, resolveWindowsSupervisor, type WindowsExecutionSupervisorRequest } from './windowsExecutionSupervisor.js';
 import { requireWindowsSupervisorQualification } from './windowsSupervisorQualification.js';
 import { windowsNodeEntryArgs } from './windowsNodeEntry.js';
 import { hashBytes, type Sha256 } from '../shared/ids.js';
@@ -261,7 +261,7 @@ export function createRestrictedExecution(scope: Scope): { exec: ExecFn; dispose
           `captured ${result.stdout.length} stdout / ${result.stderr.length} stderr characters`,
         );
       }
-      if (result.code === 125) throw new Error('The Windows supervisor refused containment.');
+      if (result.code === 125) throw new Error(describeWindowsSupervisorRefusal(result.stderr));
       if (result.timedOut || result.code === 124) throw new Error('The isolated proof command exceeded its deadline.');
       if (result.code < 0) throw new Error('The isolated proof command could not complete within its process and output limits.');
       return result;

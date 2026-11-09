@@ -811,7 +811,7 @@ test('proof arm: the durable chain — refusal by name, snapshot-bound reuse, AC
         contractPath: stickPath,
         environment: { node_version: process.version, platform: process.platform, arch: process.arch },
       });
-      assert.ok(outcome.ok);
+      assert.ok(outcome.ok, outcome.ok ? '' : outcome.reason);
       if (!outcome.ok) return 0;
       const performed = { outcome, contract: registered, subject, log_head_before: null };
       const lockfile = join(root, 'murugan', 'package-lock.json');

@@ -152,7 +152,7 @@ test('Test Chrome keeps its completed pass until the dashboard daemon restarts',
   const pointer = registry.activate(updated.profile.projectId);
   bindSavedDashboardProfile(fixture.root, registry, pointer);
   const runtime = openRuntime({ repoRoot: fixture.root, withLog: false, readOnly: true });
-  t.after(() => runtime.dispose());
+  fixture.deferCleanup(() => runtime.dispose());
   const executionId = `BEXEC-${'1'.repeat(32)}`;
   const report: BrowserScenarioReport = {
     version: 'clue-browser-scenario/1', scenarioId: 'dedicated-webgpu-canary', buildId: 'webgpu-canary-1',
@@ -226,7 +226,7 @@ test('Test Console verifies the running profile and retains its result only for 
   const { fixture, registry, record, pointer } = setup(t);
   bindSavedDashboardProfile(fixture.root, registry, pointer);
   const runtime = openRuntime({ repoRoot: fixture.root, withLog: false, readOnly: true });
-  t.after(() => runtime.dispose());
+  fixture.deferCleanup(() => runtime.dispose());
 
   let runs = 0;
   let begin: () => void = () => {};

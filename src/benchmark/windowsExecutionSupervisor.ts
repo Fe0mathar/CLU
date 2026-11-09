@@ -26,6 +26,13 @@ const MAX_EXECUTABLE_BYTES = 128 * 1024 * 1024;
 const SUPERVISOR_PATH = 'CLU_WINDOWS_SUPERVISOR_PATH';
 const SUPERVISOR_SHA256 = 'CLU_WINDOWS_SUPERVISOR_SHA256';
 
+/** Expose a bounded native refusal code without forwarding supervisor stderr. */
+export function describeWindowsSupervisorRefusal(stderr: string): string {
+  const message = 'The Windows supervisor refused containment.';
+  const code = /^\[CLU-E production proof\] (PRODUCTION_PROOF_[A-Z0-9_]{1,72})\r?$/mu.exec(stderr)?.[1];
+  return code === undefined ? message : `${message} Native code: ${code}.`;
+}
+
 /**
  * Finds a locally installed, content-pinned launcher. The pin is a trust decision by the
  * operator. The Windows supervisor, not this resolver, enforces OS containment.

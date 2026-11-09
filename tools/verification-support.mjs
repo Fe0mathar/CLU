@@ -17,6 +17,46 @@ export function resolveNpmInvocation(args, {
   throw new Error('npm CLI was not found. Install Node.js with npm, then launch this check with npm.cmd run from the CLU-E root.');
 }
 
+/** Capture failed TAP cases from sanitized output before a report takes its log tail. */
+export function collectTapFailures(...outputs) {
+  const maxBlockLength = 2500;
+  const maxDetailsLength = 16000;
+  const shortened = '\n[diagnostic shortened]';
+  const blocks = [];
+  let remaining = maxDetailsLength - 100; // Reserve space for an omitted-case notice.
+  let omitted = 0;
+  for (const output of outputs) {
+    const lines = output.split(/\r?\n/u);
+    for (let index = 0; index < lines.length; index += 1) {
+      const header = lines[index];
+      const match = /^([ \t]*)not ok \d+(?:[ \t]|$)/u.exec(header);
+      if (!match) continue;
+      const first = index;
+      const diagnostic = /^([ \t]+)---[ \t]*$/u.exec(lines[index + 1] ?? '');
+      if (diagnostic?.[1].startsWith(match[1]) && diagnostic[1].length > match[1].length) {
+        const indent = diagnostic[1];
+        index += 1;
+        while (lines[index + 1]?.startsWith(indent)) {
+          index += 1;
+          if (lines[index].slice(indent.length).trimEnd() === '...') break;
+        }
+      }
+      if (/[ \t]#[ \t]*(?:SKIP|TODO)(?:[ \t]|$)/iu.test(header)) continue;
+      if (blocks.length >= 16 || remaining < 256) {
+        omitted += 1;
+        continue;
+      }
+      const limit = Math.min(maxBlockLength, remaining - 2);
+      const block = lines.slice(first, index + 1).join('\n');
+      const bounded = block.length > limit ? `${block.slice(0, limit - shortened.length)}${shortened}` : block;
+      blocks.push(bounded);
+      remaining -= bounded.length + 2;
+    }
+  }
+  if (omitted > 0) blocks.push(`[${omitted} additional TAP failures omitted]`);
+  return blocks;
+}
+
 function isInside(root, path) {
   const delta = relative(toNamespacedPath(root), toNamespacedPath(path));
   return delta === '' || (!isAbsolute(delta) && delta !== '..' && !delta.startsWith(`..${sep}`));

@@ -56,6 +56,32 @@ test('Patch 01: external reports reject project paths and directory aliases', (t
   assert.equal(readFileSync(sealed, 'utf8'), 'keep these bytes');
 });
 
+test('acceptance reports keep bounded TAP failure details even when the output tail misses them', () => {
+  const output = [
+    'TAP version 13',
+    'not ok 1 - first failed case',
+    '  ---',
+    '  error: |- ',
+    '    not ok 99 - diagnostic content',
+    '  ...',
+    'not ok 2 - expected failure # TODO tracked separately',
+    'not ok 3 - failure with large diagnostics',
+    '  ---',
+    `  error: ${'x'.repeat(6000)}`,
+    '  ...',
+    '# late passing test output'.repeat(1000),
+  ].join('\r\n');
+  assert.doesNotMatch(output.slice(-12000), /^not ok /mu);
+  const details = support.collectTapFailures(output, 'a non-TAP error');
+  assert.equal(details.length, 2);
+  assert.match(details[0], /^not ok 1 .*\n  ---\n[^]*diagnostic content\n  \.\.\.$/u);
+  assert.match(details[1], /^not ok 3 .*[^]*\[diagnostic shortened\]$/u);
+  assert.ok(details[1].length <= 2500);
+  assert.deepEqual(support.collectTapFailures('a non-TAP error'), []);
+  const manyFailures = Array.from({ length: 25 }, (_, index) => `not ok ${index + 1} - failed`).join('\n');
+  assert.equal(support.collectTapFailures(manyFailures).at(-1), '[9 additional TAP failures omitted]');
+});
+
 test('Patch 01: migration inventory defaults to stdout and preserves the sealed report', () => {
   const repo = new URL('../../', import.meta.url);
   const sealed = new URL('PROJECT_PROFILES_MIGRATION_REPORT.json', repo);
