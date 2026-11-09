@@ -154,21 +154,28 @@ export function requireWindowsSupervisorQualification(
     if (win32.relative(path, physical) !== '' || prohibitedRoots.some((root) => inside(root, physical))) {
       throw new Error('The receipt path is aliased or inside an execution root.');
     }
-    const before = lstatSync(physical);
-    if (!before.isFile() || before.nlink !== 1 || before.size < 1 || before.size > MAX_RECEIPT_BYTES) {
+    const before = lstatSync(physical, { bigint: true });
+    if (!before.isFile() || before.nlink !== 1n || before.size < 1n || before.size > BigInt(MAX_RECEIPT_BYTES)) {
       throw new Error('The receipt must be one regular unlinked file of at most 1 MiB.');
     }
     const fd = openSync(physical, 'r');
     try {
-      const unchanged = () => {
-        const current = fstatSync(fd);
-        return current.dev === before.dev && current.ino === before.ino && current.nlink === 1 &&
-          current.size === before.size && current.mtimeMs === before.mtimeMs && current.ctimeMs === before.ctimeMs;
-      };
-      if (!unchanged()) throw new Error('The receipt changed before it was opened.');
-      bytes = Buffer.alloc(before.size);
+      const opened = fstatSync(fd, { bigint: true });
+      const sameMetadata = (current: typeof before) => current.isFile() && current.ino === before.ino &&
+        current.nlink === 1n && current.size === before.size && current.mtimeNs === before.mtimeNs &&
+        current.ctimeNs === before.ctimeNs;
+      // Older libuv Windows path stats can leave the volume serial unset.
+      const sameVolume = opened.dev === before.dev || (before.dev === 0n && before.ino !== 0n);
+      if (!sameVolume || !sameMetadata(opened)) throw new Error('The receipt changed before it was opened.');
+      bytes = Buffer.alloc(Number(before.size));
       const count = readSync(fd, bytes);
-      if (count !== bytes.length || !unchanged()) throw new Error('The receipt changed during pin verification.');
+      const finalHandle = fstatSync(fd, { bigint: true });
+      const finalPath = lstatSync(physical, { bigint: true });
+      if (count !== bytes.length || finalHandle.dev !== opened.dev || !sameMetadata(finalHandle) ||
+        finalPath.dev !== before.dev || !sameMetadata(finalPath) ||
+        win32.relative(path, realpathSync.native(path)) !== '') {
+        throw new Error('The receipt changed during pin verification.');
+      }
     } finally {
       closeSync(fd);
     }
