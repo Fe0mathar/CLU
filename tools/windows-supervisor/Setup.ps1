@@ -1298,7 +1298,16 @@ $diagnosticPins
             $admissionLabel = 'CLU-E proof admission'
         }
         Assert-NoReparsePath $admissionRunner
+        if ($InstalledProductionProofDiagnostic) {
+            $admissionInstallationHandles.Add([IO.File]::Open($admissionRunner, [IO.FileMode]::Open,
+                [IO.FileAccess]::Read, [IO.FileShare]::Read))
+        }
         if ($operatorWorkloadDiagnostic) { $admissionRunnerHash = Get-Sha256 $admissionRunner }
+        if ($InstalledProductionProofDiagnostic -and $admissionRunnerHash -cnotin @(
+            'b30b9f63c5c514d1a83d8acb36b521d95a6fe2e2b8888cfdc2924a379e72a24f',
+            '9d684ca8e0db45f5a38e80985e8db37e3c6563036161d30938e78608027234f5')) {
+            throw 'PRODUCTION_ADMISSION_RUNNER_PIN_UNVERIFIED'
+        }
         $admissionOutput = Join-Path $stage 'admission-result.json'
         if ($InstalledProductionProofDiagnostic) {
             Write-Host '[3/4] Exercising repeated proof requests as the standard user through the same protected production image.'
@@ -1351,6 +1360,38 @@ $diagnosticPins
             ($admissionExitCode -eq 0) -ne ($admissionRead['state'] -ceq $admissionSuccess) -or
             ($admissionExitCode -eq 0 -and !$admissionRead['stageCleanupSafe'])) {
             throw 'Staged diagnostic runner report failed contract validation.'
+        }
+        if ($InstalledProductionProofDiagnostic -and $admissionExitCode -eq 1 -and
+            $admissionRead['state'] -ceq 'PRODUCTION_ADMISSION_UNVERIFIED' -and
+            !$admissionRead['stageCleanupSafe'] -and $admissionRead['scratchRetained'] -is [bool] -and
+            $admissionRead['scratchRetained'] -and $admissionRead.Contains('installedImage') -and
+            $null -eq $admissionRead['installedImage'] -and
+            $admissionRead['cases'] -is [System.Collections.IDictionary] -and $admissionRead['cases'].Count -eq 0 -and
+            $admissionRead['refusals'] -is [System.Collections.IDictionary] -and $admissionRead['refusals'].Count -eq 0) {
+            $preflightError = $admissionRead['error']
+            if ($preflightError -isnot [string] -or $preflightError -cnotin @(
+                'PROTECTED_IMAGE_SCOPE_UNVERIFIED', 'PRODUCTION_MODE_UNVERIFIED', 'PATH_UNVERIFIED',
+                'IMAGE_SIZE_UNVERIFIED', 'IMAGE_PIN_UNVERIFIED', 'RECEIPT_SIZE_UNVERIFIED', 'RUN_FAILED',
+                'ENOENT', 'EACCES', 'EPERM', 'EINVAL', 'ENOTDIR', 'ELOOP', 'EBUSY', 'ENAMETOOLONG', 'EMFILE', 'ENFILE', 'EIO')) {
+                $preflightError = 'UNCLASSIFIED_PREFLIGHT_FAILURE'
+            }
+            $admissionResult = [ordered]@{
+                schemaVersion = $admissionSchema
+                state = 'PRODUCTION_ADMISSION_UNVERIFIED'
+                proofAuthorization = $false
+                stageCleanupSafe = $false
+                scratchRetained = $true
+                cases = [ordered]@{}
+                refusals = [ordered]@{}
+                installedImage = $null
+                error = $preflightError
+            }
+            $admissionCleanup = Clear-ProofAdmissionStage $stage $false $admissionCleanupMaximumEntries
+            $admissionCleanupAttempted = $true
+            Write-StagedProofDiagnosticReport $report 'PRODUCTION_ADMISSION_PREFLIGHT_UNVERIFIED' $admissionExitCode
+            Write-Host "Production admission preflight: $preflightError"
+            Write-Host "[4/4] Diagnostic report: $report"
+            exit $admissionExitCode
         }
         if ($InstalledGovernedWorkloadDiagnostic -or $protectedProofDiagnosticSelected) {
             $installedImage = $admissionRead['installedImage']

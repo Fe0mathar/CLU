@@ -125,6 +125,17 @@ function requestEnvironment(home, temp, systemRoot, path) {
   };
 }
 
+function requireProductionReady(ready, wrapperSha256, engineSha256, operatorPid) {
+  const fields = ['schemaVersion', 'productionBuildRevision', 'wrapperSha256', 'engineSha256', 'guardianPid', 'operatorPid'];
+  const validPid = (value) => Number.isInteger(value) && value > 0 && value <= 0x7fffffff;
+  if (ready === null || typeof ready !== 'object' || Array.isArray(ready) ||
+      Object.keys(ready).length !== fields.length || !fields.every((key) => Object.hasOwn(ready, key)) ||
+      ready.schemaVersion !== 'clue-proof-production-installed-image/2' || ready.productionBuildRevision !== '06G3' ||
+      ready.wrapperSha256 !== wrapperSha256 || ready.engineSha256 !== engineSha256 ||
+      !validPid(ready.guardianPid) || !validPid(ready.operatorPid) || ready.operatorPid !== operatorPid ||
+      ready.guardianPid === ready.operatorPid) throw new Error('PRODUCTION_MODE_UNVERIFIED');
+}
+
 function run(stage, supervisor, wrapperSha256, engineSha256, report) {
   const installed = dirname(supervisor);
   const systemRoot = exact(realpathSync.native(process.env.SystemRoot ?? 'C:\\Windows'), true);
@@ -134,8 +145,7 @@ function run(stage, supervisor, wrapperSha256, engineSha256, report) {
     throw new Error('PROTECTED_IMAGE_SCOPE_UNVERIFIED');
   }
   const ready = readSmall(join(runRoot, 'ready.json'));
-  if (ready?.schemaVersion !== 'clue-proof-production-installed-image/1' ||
-      ready.wrapperSha256 !== wrapperSha256 || ready.engineSha256 !== engineSha256) throw new Error('PRODUCTION_MODE_UNVERIFIED');
+  requireProductionReady(ready, wrapperSha256, engineSha256, process.ppid);
   const verify = () => {
     hashImage(supervisor, wrapperSha256);
     hashImage(join(installed, 'wxc-exec.exe'), engineSha256);
