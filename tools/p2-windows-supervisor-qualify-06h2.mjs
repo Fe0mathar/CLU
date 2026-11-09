@@ -233,45 +233,65 @@ function windowsExitEvidence(run) {
 
 function deadlineNativeNotes(run) {
   const wfp = /^\[CLU-E governed WFP\] (NodeStart|Control|Armed|Workload|Drain|OwnerLoss|Active|ActiveFault|ActiveFaultSample) (GOVERNED_WFP_[A-Z0-9_]{1,62}|WIN32_ERROR_[0-9]{1,10}|TIMEOUT|REFUSED)\r?$/gmu;
+  const drain = /^\[CLU-E governed WFP\] (PrimaryDrain|BackupDrain) ([A-Z0-9_]{1,90})\r?$/gmu;
   const production = /^\[CLU-E production proof\] (PRODUCTION_PROOF_[A-Z0-9_]{1,74})\r?$/gmu;
   const terminal = /^\[CLU-E supervisor\] (GOVERNED_WFP_INTEGRATION_INCOMPLETE|WFP_BOOTSTRAP_LIFECYCLE_INCOMPLETE|PRODUCTION_PROOF_[A-Z0-9_]{1,74})\r?$/mu;
+  const drainNotes = [...run.stderr.matchAll(drain)];
   return {
     supervisorDiagnostic: supervisorDiagnostic(run) ?? terminal.exec(run.stderr)?.[1] ?? null,
-    wfp: [...run.stderr.matchAll(wfp)].slice(0, 4).map(([, phase, code]) => ({ phase, code })),
+    wfp: [
+      ...[...run.stderr.matchAll(wfp)].slice(0, 4).map(([, phase, code]) => ({ phase, code })),
+      ...['PrimaryDrain', 'BackupDrain'].flatMap((role) => {
+        const notes = drainNotes.filter(([, phase]) => phase === role);
+        return notes.length === 1 ? [{ phase: role, code: notes[0][2] }] : [];
+      }),
+    ],
     production: [...run.stderr.matchAll(production)].slice(0, 4).map(([, code]) => code),
     exitEvidence: windowsExitEvidence(run),
   };
 }
 
 function deadlineWfpReceipt(staged, privateRoot) {
-  const unverified = { state: 'UNVERIFIED' };
+  const unverified = (reason) => ({ state: 'UNVERIFIED', reason });
   const path = join(staged.dir, 'wfp-integration-result.json');
+  let failure = 'REQUEST_DIRECTORY_UNAVAILABLE';
   try {
     if (dirname(staged.dir) !== privateRoot || !/^request-[A-Za-z0-9]{6}$/u.test(basename(staged.dir)) ||
-        staged.file !== join(staged.dir, 'request.json') || !lstatSync(staged.dir).isDirectory() ||
-        relative(staged.dir, realpathSync.native(staged.dir)) !== '') return unverified;
+        staged.file !== join(staged.dir, 'request.json')) return unverified('REQUEST_SCOPE_INVALID');
+    if (!lstatSync(staged.dir).isDirectory()) return unverified('REQUEST_DIRECTORY_TYPE_INVALID');
+    if (relative(staged.dir, realpathSync.native(staged.dir)) !== '') return unverified('REQUEST_DIRECTORY_ALIAS');
+    failure = 'RECEIPT_METADATA_UNAVAILABLE';
     const before = lstatSync(path, { throwIfNoEntry: false });
     if (!before) return { state: 'ABSENT' };
-    if (!before.isFile() || before.nlink !== 1 || before.size < 1 || before.size > 4096 ||
-        relative(path, realpathSync.native(path)) !== '') return unverified;
+    if (!before.isFile() || before.nlink !== 1 || before.size < 1 || before.size > 4096) {
+      return unverified('RECEIPT_METADATA_INVALID');
+    }
+    if (relative(path, realpathSync.native(path)) !== '') return unverified('RECEIPT_PATH_ALIAS');
     const sameFile = (item) => item.isFile() && item.nlink === 1 && item.dev === before.dev &&
       item.ino === before.ino && item.size === before.size && item.mtimeMs === before.mtimeMs && item.ctimeMs === before.ctimeMs;
+    failure = 'RECEIPT_OPEN_FAILED';
     const fd = openSync(path, 'r');
     const bytes = Buffer.alloc(before.size);
     try {
-      if (!sameFile(fstatSync(fd))) return unverified;
+      failure = 'RECEIPT_HANDLE_METADATA_UNAVAILABLE';
+      if (!sameFile(fstatSync(fd))) return unverified('RECEIPT_HANDLE_IDENTITY_MISMATCH');
+      failure = 'RECEIPT_READ_FAILED';
       let offset = 0;
       while (offset < bytes.length) {
         const count = readSync(fd, bytes, offset, bytes.length - offset, offset);
-        if (count === 0) return unverified;
+        if (count === 0) return unverified('RECEIPT_READ_INCOMPLETE');
         offset += count;
       }
+      failure = 'RECEIPT_RECHECK_UNAVAILABLE';
       if (!sameFile(fstatSync(fd)) || !sameFile(lstatSync(path)) ||
-          relative(path, realpathSync.native(path)) !== '') return unverified;
+          relative(path, realpathSync.native(path)) !== '') return unverified('RECEIPT_CHANGED_DURING_READ');
     } finally { closeSync(fd); }
 
+    failure = 'RECEIPT_UTF8_INVALID';
     const text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
+    failure = 'RECEIPT_JSON_INVALID';
     const receipt = JSON.parse(text);
+    failure = 'RECEIPT_SCHEMA_INVALID';
     const flags = ['identityVerified', 'leaseVerified', 'jobEmpty', 'removalVerified', 'productionBackupVerified'];
     const keys = ['schemaVersion', 'state', ...flags, 'control', 'armed', 'proofAuthorization'];
     const writtenKeys = [...text.matchAll(/"([A-Za-z]+)"\s*:/gu)].map(([, key]) => key);
@@ -281,12 +301,14 @@ function deadlineWfpReceipt(staged, privateRoot) {
         writtenKeys.length !== keys.length || !keys.every((key) => writtenKeys.includes(key) && Object.hasOwn(receipt, key)) ||
         receipt.schemaVersion !== 'clue-windows-production-wfp/1' || receipt.proofAuthorization !== false ||
         !['PRODUCTION_WFP_LIFECYCLE_VERIFIED', 'PRODUCTION_WFP_LIFECYCLE_UNVERIFIED'].includes(receipt.state) ||
-        !flags.every((key) => typeof receipt[key] === 'boolean') || !lanes(receipt.control) || !lanes(receipt.armed)) return unverified;
+        !flags.every((key) => typeof receipt[key] === 'boolean') || !lanes(receipt.control) || !lanes(receipt.armed)) return unverified(failure);
     if (receipt.state === 'PRODUCTION_WFP_LIFECYCLE_VERIFIED' && (!flags.every((key) => receipt[key]) ||
-        !receipt.control?.every((code) => code === 0) || !receipt.armed?.every((code) => code === 10013))) return unverified;
+        !receipt.control?.every((code) => code === 0) || !receipt.armed?.every((code) => code === 10013))) {
+      return unverified('RECEIPT_VERIFIED_EVIDENCE_INCONSISTENT');
+    }
     return { state: 'VALID', receipt };
   } catch {
-    return unverified;
+    return unverified(failure);
   }
 }
 

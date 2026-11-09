@@ -335,7 +335,7 @@ function Invoke-InstalledGovernedWfpBuild([string] $Stage, [string] $Node, [stri
         $sha = [Security.Cryptography.SHA256]::Create()
         try { $builderDigest = [BitConverter]::ToString($sha.ComputeHash($canonical)).Replace('-', '').ToLowerInvariant() }
         finally { $sha.Dispose() }
-        if ($builderDigest -cne 'b13fce23e5b1b4c84785f9c22c0754f994d8331d1e6521c3c57ba9b8897de2c7') { throw 'The governed WFP builder source pin does not match.' }
+        if ($builderDigest -cne 'c1ec5c9095e7e4be9ebe59938f0b6311d80bd7ee502a110a004d19a27eb1d272') { throw 'The governed WFP builder source pin does not match.' }
         Write-Host 'Approve the Windows elevation prompt for the protected supervisor build and WFP guardian.'
         $script:admissionInstallation.buildFailure = 'WFP_BUILD_LAUNCHER_START_FAILED'
         try { $process = Start-Process -FilePath $pwsh -ArgumentList $arguments -Verb RunAs -WindowStyle Hidden -PassThru }
@@ -394,19 +394,25 @@ function Invoke-InstalledGovernedWfpBuild([string] $Stage, [string] $Node, [stri
         }
         $receipt = [IO.File]::ReadAllText($ready) | ConvertFrom-Json -AsHashtable -Depth 4
         $readySchema = if ($Production) {
-            'clue-proof-production-installed-image/1'
+            'clue-proof-production-installed-image/2'
         } elseif ($ActiveLoss) {
             'clue-governed-wfp-active-loss-installed-image/1'
         } elseif ($OwnerLoss) {
             'clue-governed-wfp-owner-loss-installed-image/1'
         } else { 'clue-governed-wfp-installed-image/1' }
-        if ($receipt -isnot [System.Collections.IDictionary] -or $receipt.Count -ne 4 -or
+        $readyFieldCount = if ($Production) { 6 } else { 4 }
+        if ($receipt -isnot [System.Collections.IDictionary] -or $receipt.Count -ne $readyFieldCount -or
             $receipt['schemaVersion'] -cne $readySchema -or
             $receipt['wrapperSha256'] -isnot [string] -or $receipt['wrapperSha256'] -cnotmatch '\A[a-f0-9]{64}\z' -or
             $receipt['engineSha256'] -cne $EngineSha256 -or
             ($receipt['guardianPid'] -isnot [int] -and $receipt['guardianPid'] -isnot [long]) -or
             $receipt['guardianPid'] -le 0 -or $receipt['guardianPid'] -gt [int]::MaxValue) {
             throw 'The protected governed WFP ready receipt failed validation.'
+        }
+        if ($Production -and ($receipt['productionBuildRevision'] -cne '06G3' -or
+            ($receipt['operatorPid'] -isnot [int] -and $receipt['operatorPid'] -isnot [long]) -or
+            $receipt['operatorPid'] -ne $PID)) {
+            throw 'The protected production ready receipt does not match this build and session.'
         }
         $script:admissionInstallation.buildFailure = $null
         return [ordered]@{
@@ -416,6 +422,7 @@ function Invoke-InstalledGovernedWfpBuild([string] $Stage, [string] $Node, [stri
             dacl = $dacl
             wrapperSha256 = $receipt['wrapperSha256']
             guardianPid = $receipt['guardianPid']
+            operatorPid = if ($Production) { $receipt['operatorPid'] } else { $null }
         }
     } finally {
         if ($null -ne $process) { $process.Dispose() }
@@ -453,6 +460,7 @@ function Write-StagedProofDiagnosticReport([string] $Path, [string] $State, $Exi
         supervisorSha256 = $script:admissionSupervisorHash
     }
     if ($script:InstalledProductionProofDiagnostic) {
+        $payload.productionBuildRevision = '06G3'
         $payload.runnerSha256 = $script:admissionRunnerHash
         $payload.workloadExitCode = $ExitCode
         $payload.npmCliSha256 = $script:admissionNpmCliHash
@@ -872,7 +880,7 @@ try {
     }
     if ($stagedProofDiagnostic) {
         if ($InstalledProductionProofDiagnostic) {
-            Write-Host '[1/4] Checking the installed production proof diagnostic prerequisites.'
+            Write-Host '[1/4] Checking prerequisites for the 06G3 production supervisor rebuild.'
         } elseif ($InstalledGovernedWfpActiveLossDiagnostic) {
             Write-Host '[1/4] Checking the governed Windows WFP active-loss diagnostic prerequisites.'
         } elseif ($InstalledGovernedWfpOwnerLossDiagnostic) {
@@ -1029,9 +1037,9 @@ try {
             'WfpEnforcementFaultSetup.ps1' = '620d31ba73e6fbd2c01f930b373ddcec555cc5bb34856e31c6981f923a16df4c'
             'WfpFaultRecovery.cs' = 'f14116dcab8e4888253e314e099c30d7d93ed938a00fc7b6d510dc836b553536'
             'WfpHostLoopbackFixture.cs' = 'bc0e7b99bab9723a2b0de32ec787dac04d5748f11b4cd844ac5e370495e38285'
-            'WfpIntegratedRun.cs' = 'cdb8746b294dbd7e1e290896d6d9fe7915a65eefbce457a73381891f3d38a69f'
-            'WfpIntegratedGuardian.cs' = '52a8e79ca5bfb481299f4e61699f8df40fc4e1083309ba0fe875ca9654b9a833'
-            'WfpIntegratedActiveBackup.cs' = '3d99dadeb1a4950fd94599672062c2ecd74d786d40dcf3e637d6b933b2c9b437'
+            'WfpIntegratedRun.cs' = '27bf7eef220d82251cc8c0fe6736d6cd96f3f570e3704c7efab229f5e4b3236e'
+            'WfpIntegratedGuardian.cs' = '021c1bbeb595c2e7ade8c3aee37b893e16352dd2c8beecbec7720ae752edcd71'
+            'WfpIntegratedActiveBackup.cs' = '3e44c31bce7c92cd092a7ffceabea22e389544befea1cf268429fa7bcc0c6924'
             'WfpLeaseFaultController.cs' = 'd42b820a23fcb38b8e0234e84bcf631c7bed29b71e230057fc358e91b511ba99'
             'WfpLoopbackLease.cs' = '22f6da4c0a380763e00c17892b10452c3746a42c346e63467e997d077e60c9d0'
             'WfpPairedFixture.cs' = '7b0f9ffb806860cdb6a775f4756fe72a21805e79ff6dbc15955c6fea2d081c7d'
@@ -1198,6 +1206,7 @@ $diagnosticPins
             Assert-InstalledGovernedImages $admissionProtectedInstallation $admissionSupervisorHash $mxcHash
             if ($InstalledProductionProofDiagnostic) {
                 $admissionInstallation.wrapperPath = $admissionSupervisor
+                $admissionInstallation.operatorPid = $protectedImage.operatorPid
                 $admissionProductionPreludePath = Join-Path $protectedImage.root 'production-bind-prelude.cjs'
                 Assert-NoReparsePath $admissionProductionPreludePath
                 if ((Get-Sha256 $admissionProductionPreludePath) -cne $admissionWfpPreludeHash) {
@@ -1513,6 +1522,29 @@ $diagnosticPins
         Write-StagedProofDiagnosticReport $report $admissionState $admissionExitCode
         Write-Host "[$admissionLabel] $admissionState"
         Write-Host "[4/4] Diagnostic report: $report"
+        if ($InstalledProductionProofDiagnostic -and $admissionProcessExit -eq 0 -and
+            $admissionState -ceq 'PRODUCTION_ADMISSION_OBSERVED' -and $admissionCleanup -ceq 'REMOVED') {
+            try {
+                Assert-NoReparsePath $report
+                $reportDigest = Get-Sha256 $report
+                Write-Host "Production admission report SHA-256: $reportDigest"
+                $qualificationShell = Join-Path $protectedImage.programFiles 'PowerShell\7\pwsh.exe'
+                $qualificationScript = Join-Path $PSScriptRoot 'QualifyProductionProof.ps1'
+                Assert-NoReparsePath $qualificationShell
+                Assert-NoReparsePath $qualificationScript
+                $qualificationArgs = @('-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+                    '-File', $qualificationScript, '-AdmissionReport', $report, '-AdmissionReportSha256', $reportDigest,
+                    '-ExpectedSupervisorSha256', $admissionSupervisorHash,
+                    '-ExistingProductionSessionPid', [string] $protectedImage.guardianPid,
+                    '-ExpectedSessionOwnerPid', [string] $PID)
+                Write-Host 'Running native qualification against this rebuilt production supervisor.'
+                $qualificationExitCode = Invoke-ExactExecutable $qualificationShell $qualificationArgs $repo 360
+                exit $qualificationExitCode
+            } catch {
+                Write-Host 'CLU-E supervisor qualification stopped: QUALIFY_HANDOFF_FAILED'
+                exit 2
+            }
+        }
         exit $admissionProcessExit
     }
     if ($stagedWfpDiagnostic) {

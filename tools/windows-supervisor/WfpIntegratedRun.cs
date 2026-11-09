@@ -205,6 +205,7 @@ internal sealed class WfpIntegratedRun : IDisposable
                 WriteLine("DRAIN");
                 if (ReadLine(pendingResponse) != "REMOVED")
                     throw new InvalidDataException("GOVERNED_WFP_REMOVAL_UNVERIFIED");
+                if (request.productionProof) AcknowledgeProductionDrain();
                 removalVerified = true;
                 passed = true;
             }
@@ -216,10 +217,41 @@ internal sealed class WfpIntegratedRun : IDisposable
         catch (Win32Exception failure) { ReportFailure("Drain", failure); }
         finally
         {
+            if (request.productionProof && !passed)
+            {
+                ReportProductionDrainFailure(WfpIntegratedGuardian.ProductionPrimaryFailureFile, "PrimaryDrain");
+                ReportProductionDrainFailure(WfpIntegratedGuardian.ProductionBackupFailureFile, "BackupDrain");
+            }
             Dispose();
             WriteResult(jobEmpty);
         }
         return passed;
+    }
+
+    private void AcknowledgeProductionDrain()
+    {
+        if (ReadProtectedMarker(WfpIntegratedGuardian.ProductionRemovalFile) != "REMOVED")
+            throw new InvalidDataException("GOVERNED_WFP_PROTECTED_REMOVAL_UNVERIFIED");
+        WriteLine("ACK");
+        uint wait = WaitForSingleObject(guardian, WfpIntegratedGuardian.ProductionDrainAckTimeoutMs);
+        if (wait == WaitFailed) throw LastError();
+        uint exit;
+        if (wait != WaitObject || !GetExitCodeProcess(guardian, out exit) || exit != 0 ||
+            ReadProtectedMarker(WfpIntegratedGuardian.ProductionDrainAckFile) != "ACK")
+            throw new InvalidDataException("GOVERNED_WFP_DRAIN_ACK_UNVERIFIED");
+    }
+
+    private static void ReportProductionDrainFailure(string name, string role)
+    {
+        try
+        {
+            string value = ReadProtectedMarker(name, 112);
+            if (value == null) return;
+            var match = Regex.Match(value.ToUpperInvariant(), @"\A([A-Z_]{1,24}) ([A-Z0-9_]{1,86})\z");
+            if (match.Success && value.Length <= 90)
+                Console.Error.WriteLine("[CLU-E governed WFP] " + role + " " + match.Groups[1].Value + "_" + match.Groups[2].Value);
+        }
+        catch (Exception) { }
     }
 
     private void VerifyOwnerLoss()
@@ -258,7 +290,7 @@ internal sealed class WfpIntegratedRun : IDisposable
         return GetExitCodeProcess(guardian, out exit) && exit == WfpIntegratedGuardian.OwnerLossExitCode;
     }
 
-    private static string ReadProtectedMarker(string name)
+    private static string ReadProtectedMarker(string name, int maximumBytes = 16)
     {
         string imageDirectory = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
         string root = MxcPin.ProofProductionAdmission ? ProductionProofSession.RunRoot : Path.GetDirectoryName(imageDirectory);
@@ -266,7 +298,7 @@ internal sealed class WfpIntegratedRun : IDisposable
         if (!File.Exists(marker)) return null;
         using (var input = new FileStream(Protocol.CanonicalPath(marker, false), FileMode.Open, FileAccess.Read, FileShare.Read))
         {
-            if (input.Length < 1 || input.Length > 16)
+            if (input.Length < 1 || input.Length > maximumBytes)
                 throw new InvalidDataException("GOVERNED_WFP_PROTECTED_MARKER_INVALID");
             var text = new StringBuilder((int)input.Length);
             for (int i = 0; i < input.Length; i++)

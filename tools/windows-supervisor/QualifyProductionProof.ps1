@@ -1,18 +1,22 @@
 [CmdletBinding()]
-param([string] $AdmissionReport)
+param(
+    [Parameter(Mandatory)] [string] $AdmissionReport,
+    [Parameter(Mandatory)] [string] $AdmissionReportSha256,
+    [Parameter(Mandatory)] [string] $ExpectedSupervisorSha256,
+    [int] $ExistingProductionSessionPid = 0,
+    [int] $ExpectedSessionOwnerPid = 0
+)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$admissionName = 'CLU-E_WINDOWS_PRODUCTION_ADMISSION_20261108-230639-951-0546a7ce.json'
-$admissionSha = '9a21107eb79256a9c029b0b2af563a337ed5717bad6ee1d8f7042841e06ceb12'
-$wrapperSha = '505ba70cb3068c211680dc9e2f37380cb9fa46f68c2df00886007bcf6459ccbc'
+$wrapperSha = $ExpectedSupervisorSha256
 $engineSha = '090f5d1f7bb93104ab08dcd4e8034ef954aeefcdaf6658dde5f7dff4cfc12f3a'
 $nodeSha = 'c5ff4c736112dd483c750fd4149d30c8a116db1a49b8b3ec88be4b65e6c86c19'
 $npmSha = '3ce7cba6f5128dd5f54c98b6a5036b0f850496878cc2e21044b675fe3c594e3e'
 $preludeSha = '334ca86fb237c565f38b17a7b84485c5fc1b603d1b16e07a68a3278cf42a37e9'
-$qualifierSha = '6b2016e57bb972f7a20e2c088acd9d6d8c28366a2556b255003dc52a567913b9'
-$qualifierCrlfSha = '4dae155f83a3cca310b87dc842148ca09750c63ee0b8c15af8f71eb22b608a59'
+$qualifierSha = '8e85e964b0b2cff9d4d93dd067c10c3f0b7210681ae55dc586077515f6419560'
+$qualifierCrlfSha = '664861ec4e38bad24a4d3b4543b5f09286c5993b52f5f11d2b4d3f82a8f41409'
 
 function Assert-ExactPath([string] $Path, [bool] $Directory) {
     if ($Path.Length -gt 1024 -or $Path -cnotmatch '^[A-Za-z]:\\(?!\\)' -or
@@ -147,16 +151,21 @@ try {
     Assert-ExactPath $programFiles $true
     Assert-ExactPath $evidence $true
     Assert-ExternalPath $evidence $repo $programFiles
-    if (!$AdmissionReport) { $AdmissionReport = Join-Path $evidence $admissionName }
+    if ($AdmissionReportSha256 -cnotmatch '\A[a-f0-9]{64}\z' -or
+        $wrapperSha -cnotmatch '\A[a-f0-9]{64}\z' -or
+        $wrapperSha -ceq '505ba70cb3068c211680dc9e2f37380cb9fa46f68c2df00886007bcf6459ccbc') {
+        throw 'QUALIFY_ADMISSION_PINS_INVALID'
+    }
     Assert-ExternalPath $AdmissionReport $repo $programFiles
-    $admissionStream = Open-PinnedFile $AdmissionReport $admissionSha 1MB
+    $admissionStream = Open-PinnedFile $AdmissionReport $AdmissionReportSha256 1MB
     try { $admission = Read-Json $admissionStream }
     finally { $admissionStream.Dispose() }
     $install = $admission['installation']
     $observed = $admission['productionAdmission']
     $pair = $observed['installedImage']
     if ($admission['schemaVersion'] -cne 'clue-windows-production-admission/1' -or
-        $admission['state'] -cne 'PRODUCTION_ADMISSION_OBSERVED' -or $admission['proofAuthorization'] -ne $false -or
+        $admission['state'] -cne 'PRODUCTION_ADMISSION_OBSERVED' -or $admission['productionBuildRevision'] -cne '06G3' -or
+        $admission['proofAuthorization'] -ne $false -or
         $admission['executionEnvironment'] -cne 'WINDOWS_HOST' -or
         $admission['cleanup'] -cne 'REMOVED' -or $admission['diagnosticStageRetained'] -ne $false -or
         $admission['workloadExitCode'] -ne 0 -or $admission['supervisorSha256'] -cne $wrapperSha -or
@@ -186,6 +195,25 @@ try {
     $engine = Join-Path $digestFolder 'wxc-exec.exe'
     $prelude = Join-Path $protectedRoot 'production-bind-prelude.cjs'
     Assert-InstalledPair $protectedRoot $operatorSid $image $engine $prelude
+    $phase = 'QUALIFY_PROTECTED_BUILD_RECEIPT_UNVERIFIED'
+    $readyPath = Join-Path $protectedRoot 'ready.json'
+    Assert-ExactPath $readyPath $false
+    $readyLock = [IO.File]::Open($readyPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+    $locks.Add($readyLock)
+    if ($readyLock.Length -lt 1 -or $readyLock.Length -gt 4096) { throw $phase }
+    $ready = Read-Json $readyLock
+    if ($ready -isnot [System.Collections.IDictionary] -or $ready.Count -ne 6 -or
+        $ready['schemaVersion'] -cne 'clue-proof-production-installed-image/2' -or
+        $ready['productionBuildRevision'] -cne '06G3' -or
+        $ready['wrapperSha256'] -cne $wrapperSha -or $ready['engineSha256'] -cne $engineSha) { throw $phase }
+    foreach ($name in @('guardianPid', 'operatorPid')) {
+        $pidValue = $ready[$name]
+        if (($pidValue -isnot [int] -and $pidValue -isnot [long]) -or $pidValue -lt 1 -or
+            $pidValue -gt [int]::MaxValue -or $pidValue -ne $install[$name]) { throw $phase }
+    }
+    if ($ready['guardianPid'] -eq $ready['operatorPid']) { throw $phase }
+
+    $phase = 'QUALIFY_INSTALLED_IMAGE_UNVERIFIED'
     $imageLock = Open-PinnedFile $image $wrapperSha 16MB
     $locks.Add($imageLock)
     $engineLock = Open-PinnedFile $engine $engineSha 768MB
@@ -221,8 +249,26 @@ try {
 
     $phase = 'QUALIFY_PRODUCTION_SESSION_UNVERIFIED'
     Add-Type -TypeDefinition @'
+using System;
 using System.Runtime.InteropServices;
+using System.Text;
+using Microsoft.Win32.SafeHandles;
 public static class ClueProductionQualificationPipe {
+    [DllImport("kernel32.dll", ExactSpelling = true, SetLastError = true)]
+    private static extern SafeProcessHandle OpenProcess(uint access, bool inherit, int pid);
+    [DllImport("kernel32.dll", EntryPoint = "QueryFullProcessImageNameW", ExactSpelling = true, CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool QueryImage(SafeProcessHandle process, uint flags, StringBuilder name, ref uint length);
+    [DllImport("kernel32.dll", ExactSpelling = true, SetLastError = true)]
+    private static extern uint WaitForSingleObject(SafeProcessHandle process, uint milliseconds);
+    public static bool LiveImage(int pid, string expected) {
+        using (var process = OpenProcess(0x101000, false, pid)) {
+            if (process.IsInvalid || WaitForSingleObject(process, 0) != 258) return false;
+            var image = new StringBuilder(4096);
+            uint length = (uint)image.Capacity;
+            return QueryImage(process, 0, image, ref length) &&
+                String.Equals(image.ToString(), expected, StringComparison.OrdinalIgnoreCase);
+        }
+    }
     [DllImport("kernel32.dll", EntryPoint = "WaitNamedPipeW", ExactSpelling = true, CharSet = CharSet.Unicode, SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool WaitNamedPipe(string name, uint milliseconds);
@@ -232,29 +278,45 @@ public static class ClueProductionQualificationPipe {
 }
 '@
     $pipe = "\\.\pipe\CLU-E-Production-Proof-$leaf-$sessionId"
-    # Error 2 means the exact local pipe does not yet exist.
-    if ([ClueProductionQualificationPipe]::State($pipe, 1) -ne 2) { throw 'QUALIFY_PRODUCTION_SESSION_ALREADY_PRESENT' }
     foreach ($entry in @(Get-ChildItem Env:)) {
         if ($entry.Name -match '^(COR_|CORECLR_|COMPLUS_|DOTNET_|APPDOMAIN_MANAGER_|DEVPATH$|__COMPAT_LAYER$|OPENAI_API_KEY$)') {
             [Environment]::SetEnvironmentVariable($entry.Name, $null, 'Process')
         }
     }
-    Write-Host 'Approve the Windows prompt for the verified CLU-E production supervisor using your current Windows account.'
-    $originalPath = $env:PATH
-    try {
-        $systemDirectory = [Environment]::SystemDirectory
-        $env:PATH = "$systemDirectory;$([IO.Path]::GetDirectoryName($systemDirectory))"
-        $launch = @{
-            FilePath = $image
-            WorkingDirectory = $digestFolder
-            Verb = 'RunAs'
-            PassThru = $true
-            WindowStyle = 'Hidden'
-            ArgumentList = @('--production-session', $PID.ToString([Globalization.CultureInfo]::InvariantCulture))
+    if ($ExistingProductionSessionPid -ne 0 -or $ExpectedSessionOwnerPid -ne 0) {
+        if ($ExistingProductionSessionPid -lt 1 -or $ExpectedSessionOwnerPid -lt 1 -or
+            $ExistingProductionSessionPid -ne $ready['guardianPid'] -or $ExpectedSessionOwnerPid -ne $ready['operatorPid'] -or
+            $ExpectedSessionOwnerPid -eq $PID -or
+            ![ClueProductionQualificationPipe]::LiveImage($ExistingProductionSessionPid, $image)) {
+            throw 'QUALIFY_EXISTING_SESSION_IDENTITY_UNVERIFIED'
         }
-        $guardian = Start-Process @launch
-    } catch { throw 'QUALIFY_PRODUCTION_SESSION_LAUNCH_FAILED' }
-    finally { $env:PATH = $originalPath }
+        $guardian = [Diagnostics.Process]::GetProcessById($ExistingProductionSessionPid)
+        $owner = [Diagnostics.Process]::GetProcessById($ExpectedSessionOwnerPid)
+        try {
+            if ($owner.HasExited -or $owner.SessionId -ne $sessionId -or $guardian.SessionId -ne $sessionId) {
+                throw 'QUALIFY_EXISTING_SESSION_IDENTITY_UNVERIFIED'
+            }
+        } finally { $owner.Dispose() }
+    } else {
+        # Error 2 means the exact local pipe does not yet exist.
+        if ([ClueProductionQualificationPipe]::State($pipe, 1) -ne 2) { throw 'QUALIFY_PRODUCTION_SESSION_ALREADY_PRESENT' }
+        Write-Host 'Approve the Windows prompt for the verified CLU-E production supervisor using your current Windows account.'
+        $originalPath = $env:PATH
+        try {
+            $systemDirectory = [Environment]::SystemDirectory
+            $env:PATH = "$systemDirectory;$([IO.Path]::GetDirectoryName($systemDirectory))"
+            $launch = @{
+                FilePath = $image
+                WorkingDirectory = $digestFolder
+                Verb = 'RunAs'
+                PassThru = $true
+                WindowStyle = 'Hidden'
+                ArgumentList = @('--production-session', $PID.ToString([Globalization.CultureInfo]::InvariantCulture))
+            }
+            $guardian = Start-Process @launch
+        } catch { throw 'QUALIFY_PRODUCTION_SESSION_LAUNCH_FAILED' }
+        finally { $env:PATH = $originalPath }
+    }
     $wait = [Diagnostics.Stopwatch]::StartNew()
     do {
         if ($null -eq $guardian -or $guardian.HasExited) { throw 'QUALIFY_PRODUCTION_SESSION_EXITED' }
@@ -288,7 +350,8 @@ public static class ClueProductionQualificationPipe {
     $phase = 'QUALIFY_INSTALLED_IMAGE_AFTER_RUN_UNVERIFIED'
     Assert-InstalledPair $protectedRoot $operatorSid $image $engine $prelude
     if ((Get-Digest $imageLock) -cne $wrapperSha -or (Get-Digest $engineLock) -cne $engineSha -or
-        (Get-Digest $preludeLock) -cne $preludeSha -or $guardian.HasExited) {
+        (Get-Digest $preludeLock) -cne $preludeSha -or $guardian.HasExited -or
+        ![ClueProductionQualificationPipe]::LiveImage($guardian.Id, $image)) {
         throw 'QUALIFY_INSTALLED_IMAGE_AFTER_RUN_UNVERIFIED'
     }
     $phase = 'QUALIFY_CANARY_REPORT_UNVERIFIED'

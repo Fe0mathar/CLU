@@ -21,6 +21,12 @@ internal static partial class WfpIntegratedGuardian
     private const int WorkloadTimeoutMs = 360000;
     private const int ProductionWorkloadTimeoutMs = 5400000;
     private const int AbortDrainTimeoutMs = 8000;
+    private const int ProductionExactDrainTimeoutMs = 750;
+    internal const int ProductionDrainAckTimeoutMs = 1000;
+    internal const string ProductionRemovalFile = "guardian-removal.txt";
+    internal const string ProductionDrainAckFile = "guardian-drain-acknowledged.txt";
+    internal const string ProductionPrimaryFailureFile = "guardian-failure.txt";
+    internal const string ProductionBackupFailureFile = "active-backup-failure.txt";
     private const int OwnerLossReadbackTimeoutMs = 8000;
     internal const uint OwnerLossExitCode = 0x06E00001;
     private const string OwnerLossKeysFile = "owner-loss-keys.txt";
@@ -66,12 +72,13 @@ internal static partial class WfpIntegratedGuardian
         ActiveBackupScope activeBackup = null;
         WfpBfeWatch bfe = null;
         IntPtr sourceJob = IntPtr.Zero;
+        string image = null;
         bool productionJobVerified = false;
         bool removed = false;
         string phase = "PREFLIGHT";
         try
         {
-            string image = ProtectedImage();
+            image = ProtectedImage();
             using (var imagePin = OpenPinnedImage(image))
             using (var identity = WindowsIdentity.GetCurrent())
             using (var self = Process.GetCurrentProcess())
@@ -178,39 +185,57 @@ internal static partial class WfpIntegratedGuardian
                     if (command != "DRAIN" || !checkedOnce || MxcPin.GovernedWfpOwnerLoss || MxcPin.GovernedWfpActiveLoss)
                         throw new InvalidDataException("GUARDIAN_COMMAND_INVALID");
                     phase = "DRAIN";
-                    using (var query = DuplicateJob(client, sourceJob))
-                    {
-                        if (NativeJob.ReadJobProcessIds(query.DangerousGetHandle()).Length != 0 ||
-                            WaitForSingleObject(node, 0) != WaitObject)
-                            throw new InvalidDataException("GUARDIAN_JOB_NOT_DRAINED");
-                    }
-                    bfe.RequireHealthy();
                     if (MxcPin.ProofProductionAdmission)
                     {
+                        WaitForExactProductionDrain(productionJob, node, client, operatorProcess, bfe);
                         WfpLoopbackLease.VerifyExactDynamicInstalled(sid, lease.SublayerKey, lease.FilterKeys,
                             lease.FilterIds, LeaseSublayerWeight);
                         PublishProtectedMarker(image, ProductionDrainFile, "DRAIN");
+                        phase = "DRAIN_BACKUP";
                         WaitForProductionBackupRemoval(activeBackup, client, operatorProcess, bfe);
+                        phase = "DRAIN_PRIMARY";
                     }
+                    else
+                    {
+                        using (var query = DuplicateJob(client, sourceJob))
+                        {
+                            if (NativeJob.ReadJobProcessIds(query.DangerousGetHandle()).Length != 0 ||
+                                WaitForSingleObject(node, 0) != WaitObject)
+                                throw new InvalidDataException("GUARDIAN_JOB_NOT_DRAINED");
+                        }
+                    }
+                    bfe.RequireHealthy();
                     removed = lease.ReleaseAndVerify();
                     if (!removed) throw new InvalidDataException("GUARDIAN_LEASE_REMOVAL_UNVERIFIED");
+                    if (MxcPin.ProofProductionAdmission) PublishProtectedMarker(image, ProductionRemovalFile, "REMOVED");
                     WriteLine(pipe, "REMOVED", client, bfe);
+                    if (MxcPin.ProofProductionAdmission)
+                    {
+                        phase = "DRAIN_ACK";
+                        if (ReadLine(pipe, client, bfe, Stopwatch.StartNew(), ProductionDrainAckTimeoutMs) != "ACK")
+                            throw new InvalidDataException("GUARDIAN_DRAIN_ACK_INVALID");
+                        PublishProtectedMarker(image, ProductionDrainAckFile, "ACK");
+                    }
                     return 0;
                 }
             }
         }
         catch (Win32Exception error)
         {
-            Console.Error.WriteLine("[CLU-E WFP guardian] " + phase + " WIN32_ERROR_" + error.NativeErrorCode);
+            string code = "WIN32_ERROR_" + error.NativeErrorCode.ToString(CultureInfo.InvariantCulture);
+            TryPublishProductionFailure(image, ProductionPrimaryFailureFile, phase, code);
+            Console.Error.WriteLine("[CLU-E WFP guardian] " + phase + " " + code);
         }
         catch (TimeoutException)
         {
+            TryPublishProductionFailure(image, ProductionPrimaryFailureFile, phase, "TIMEOUT");
             Console.Error.WriteLine("[CLU-E WFP guardian] " + phase + " TIMEOUT");
         }
         catch (Exception error)
         {
             string code = Regex.IsMatch(error.Message, @"\A(?:GUARDIAN|WFP|BFE)_[A-Z][A-Z0-9_]{0,72}(?:_0x[0-9A-F]{8})?\z")
                 ? error.Message : "REFUSED";
+            TryPublishProductionFailure(image, ProductionPrimaryFailureFile, phase, code);
             Console.Error.WriteLine("[CLU-E WFP guardian] " + phase + " " + code);
         }
         finally
@@ -239,6 +264,33 @@ internal static partial class WfpIntegratedGuardian
             if (bfe != null) bfe.Dispose();
         }
         return 125;
+    }
+
+    private static void WaitForExactProductionDrain(OwnedHandle job, WfpContainerIdentity.OwnedHandle node,
+        OwnedHandle client, OwnedHandle operatorProcess, WfpBfeWatch bfe, OwnedHandle primary = null)
+    {
+        var clock = Stopwatch.StartNew();
+        bool nodeExited;
+        do
+        {
+            if (primary != null) RequireLive(primary);
+            RequireLive(client);
+            RequireLive(operatorProcess);
+            bfe.RequireHealthy();
+            uint state = WaitForSingleObject(node, 0);
+            if (state != WaitObject && state != WaitTimeout) throw LastError();
+            nodeExited = state == WaitObject;
+            if (nodeExited && NativeJob.ReadJobProcessIds(job.DangerousGetHandle()).Length == 0) return;
+            Thread.Sleep(20);
+        } while (clock.ElapsedMilliseconds < ProductionExactDrainTimeoutMs);
+        throw new InvalidDataException(nodeExited ? "GUARDIAN_PRODUCTION_JOB_NOT_DRAINED" : "GUARDIAN_PRODUCTION_NODE_NOT_EXITED");
+    }
+
+    private static void TryPublishProductionFailure(string image, string file, string phase, string code)
+    {
+        if (!MxcPin.ProofProductionAdmission || image == null) return;
+        try { PublishProtectedMarker(image, file, phase + " " + code); }
+        catch (Exception) { }
     }
 
     internal static int ReadBackOwnerLoss()

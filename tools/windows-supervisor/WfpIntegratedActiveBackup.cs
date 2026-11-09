@@ -114,12 +114,13 @@ internal static partial class WfpIntegratedGuardian
         OwnedHandle job = null;
         WfpContainerIdentity.OwnedHandle node = null;
         WfpLoopbackLease backup = null;
+        string image = null;
         bool exactJobVerified = false;
         bool backupRemoved = false;
         string phase = "PREFLIGHT";
         try
         {
-            string image = ProtectedImage();
+            image = ProtectedImage();
             using (var imagePin = OpenPinnedImage(image))
             using (var identity = WindowsIdentity.GetCurrent())
             using (var self = Process.GetCurrentProcess())
@@ -174,6 +175,7 @@ internal static partial class WfpIntegratedGuardian
                     {
                         phase = "PRODUCTION_DRAIN";
                         WaitForProductionDrain(image, primary, client, operatorProcess, job, node, bfe);
+                        phase = "PRODUCTION_REMOVE";
                         VerifyBackupKeysInstalled(sid, primaryKeys, LeaseSublayerWeight);
                         VerifyBackupKeysInstalled(sid, backupKeys, BackupSublayerWeight);
                         backupRemoved = backup.ReleaseAndVerify();
@@ -206,12 +208,15 @@ internal static partial class WfpIntegratedGuardian
         }
         catch (Win32Exception error)
         {
-            Console.Error.WriteLine("[CLU-E WFP backup] " + phase + " WIN32_ERROR_" + error.NativeErrorCode);
+            string code = "WIN32_ERROR_" + error.NativeErrorCode.ToString(CultureInfo.InvariantCulture);
+            TryPublishProductionFailure(image, ProductionBackupFailureFile, phase, code);
+            Console.Error.WriteLine("[CLU-E WFP backup] " + phase + " " + code);
         }
         catch (Exception error)
         {
             string code = Regex.IsMatch(error.Message, @"\A(?:GUARDIAN|WFP|BFE)_[A-Z][A-Z0-9_]{0,72}(?:_0x[0-9A-F]{8})?\z")
                 ? error.Message : error is TimeoutException ? "TIMEOUT" : "REFUSED";
+            TryPublishProductionFailure(image, ProductionBackupFailureFile, phase, code);
             Console.Error.WriteLine("[CLU-E WFP backup] " + phase + " " + code);
         }
         finally
@@ -247,8 +252,9 @@ internal static partial class WfpIntegratedGuardian
             string drain = ReadProtectedBackupText(image, ProductionDrainFile, 5, false);
             if (drain != null)
             {
-                if (drain != "DRAIN" || !ExactBackupJobDrained(job, node))
+                if (drain != "DRAIN")
                     throw new InvalidDataException("GUARDIAN_BACKUP_PRODUCTION_DRAIN_INVALID");
+                WaitForExactProductionDrain(job, node, client, operatorProcess, bfe, primary);
                 return;
             }
             Thread.Sleep(SampleIntervalMs);

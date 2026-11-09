@@ -217,9 +217,9 @@ public static class ClueGovernedWfpOperator
             'WfpLoopbackLease.cs' = '22f6da4c0a380763e00c17892b10452c3746a42c346e63467e997d077e60c9d0'
             'WfpDropObservation.cs' = 'f9131d325ce6f30d77840d2f786b1ca2898e82338156aa98b7cb3f8c0946510b'
             'WfpBfeWatch.cs' = '6fa8d9c9f7865a35783082f11fb210a64f28705b8f63431c016288a34fc5ab4c'
-            'WfpIntegratedRun.cs' = 'cdb8746b294dbd7e1e290896d6d9fe7915a65eefbce457a73381891f3d38a69f'
-            'WfpIntegratedGuardian.cs' = '52a8e79ca5bfb481299f4e61699f8df40fc4e1083309ba0fe875ca9654b9a833'
-            'WfpIntegratedActiveBackup.cs' = '3d99dadeb1a4950fd94599672062c2ecd74d786d40dcf3e637d6b933b2c9b437'
+            'WfpIntegratedRun.cs' = '27bf7eef220d82251cc8c0fe6736d6cd96f3f570e3704c7efab229f5e4b3236e'
+            'WfpIntegratedGuardian.cs' = '021c1bbeb595c2e7ade8c3aee37b893e16352dd2c8beecbec7720ae752edcd71'
+            'WfpIntegratedActiveBackup.cs' = '3e44c31bce7c92cd092a7ffceabea22e389544befea1cf268429fa7bcc0c6924'
             'GovernedWorkloadBootstrap.cjs' = '1350631e94c3fa7ce45a74ca298d5e8bea6b983fab1c0c465be97b90bf871ae6'
             'GovernedWfpBindPrelude.cjs' = '334ca86fb237c565f38b17a7b84485c5fc1b603d1b16e07a68a3278cf42a37e9'
         }
@@ -348,7 +348,7 @@ internal static class MxcPin {
             $failureExitCode = 50
             $receipt = [ordered]@{
                 schemaVersion = if ($Production) {
-                    'clue-proof-production-installed-image/1'
+                    'clue-proof-production-installed-image/2'
                 } elseif ($ActiveLoss) {
                     'clue-governed-wfp-active-loss-installed-image/1'
                 } elseif ($OwnerLoss) {
@@ -357,6 +357,10 @@ internal static class MxcPin {
                 wrapperSha256 = $wrapperHash
                 engineSha256 = $EngineSha256
                 guardianPid = $guardian.Id
+            }
+            if ($Production) {
+                $receipt.productionBuildRevision = '06G3'
+                $receipt.operatorPid = $OperatorPid
             }
             $ready = Join-Path $protectedRoot 'ready.json'
             $temporary = Join-Path $protectedRoot ('ready-' + [Guid]::NewGuid().ToString('N') + '.tmp')
