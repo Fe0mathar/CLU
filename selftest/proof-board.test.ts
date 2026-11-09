@@ -167,7 +167,7 @@ test('P2-B6: the registered benchmark identity is parsed and integrity-verified 
     const identity = describeRegisteredBenchmark(fixture.runtime);
     assert.equal(identity.state, 'registered');
     assert.equal(identity.benchmarkId, 'clu-master');
-    assert.equal(identity.benchmarkVersion, '0.1.0');
+    assert.equal(identity.benchmarkVersion, '0.2.0');
     assert.equal(identity.runnerAdapter, 'cli-node');
     assert.equal(identity.harnessId, 'HRN-001');
     assert.equal(identity.integrityVerified, true);

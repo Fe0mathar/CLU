@@ -95,7 +95,7 @@ function contractBody(over: Partial<ProofContract> = {}): ProofContract {
       causal_claim: 'Memoization cuts incremental recognition wall time.',
       target_units: ['x#y'],
     },
-    baseline_state: `snapshot ${SNAP.slice(0, 12)}, clu-master@0.1.0 recorded run`,
+    baseline_state: `snapshot ${SNAP.slice(0, 12)}, clu-master@0.2.0 recorded run`,
     candidate_state: 'same snapshot plus the smallest patch',
     representative_inputs: ['the tree at the locked snapshot'],
     target_measurements: [{ id: 'SIG-006', native_unit: 'ms', direction: 'lower_is_better' }],
@@ -127,6 +127,7 @@ function zeroSpreadStub(): ExecFn {
   return async (argv) => {
     const command = argv.join(' ');
     const ok = (stdout: string) => ({ code: 0, stdout, stderr: '', wallMs: 100, timedOut: false });
+    if (argv.includes('snapshot')) return ok('  OK   snapshot  captured\n');
     if (command.includes('resultHash')) return ok(`${'f'.repeat(64)}\n`);
     if (command.includes('recognize')) {
       return ok(
@@ -134,9 +135,22 @@ function zeroSpreadStub(): ExecFn {
       );
     }
     if (command.includes('metrics')) return ok(`  OK   values stored${' '.repeat(21)}42917\n`);
-    if (command.includes('status diff')) return ok('PARITY-OK\n');
-    if (command.includes('selftest')) return ok('# pass 497\n# fail 0\n# skipped 5\n');
-    return ok('  OK   x  y\n');
+    if (argv.includes('rebuild-projections')) {
+      return ok(JSON.stringify({
+        state: 'PROJECTION_REBUILD_VERIFIED',
+        eventCount: 3,
+        eventHead: 'a'.repeat(64),
+        factsDigest: 'b'.repeat(64),
+        elapsedMs: 40,
+      }));
+    }
+    if (argv.includes('verify-chain')) {
+      return ok(`  OK   event chain  3 committed records verified, head ${'a'.repeat(64)}\n`);
+    }
+    if (argv.includes('dist/selftest/benchmark-offline-suite-v1.js')) {
+      return ok('CLU-E_OFFLINE_SUITE_V1\n# tests 71\n# pass 71\n# fail 0\n# cancelled 0\n# skipped 0\n# todo 0\n');
+    }
+    assert.fail(`Unexpected command from the shipped benchmark: ${command}`);
   };
 }
 
@@ -153,6 +167,7 @@ async function shippedBaseline(): Promise<{
     environment: { ...FINGERPRINT },
   });
   assert.ok(outcome.ok, outcome.ok ? '' : outcome.reason);
+  assert.deepEqual(outcome.result.incomplete, []);
   const baseline = captureBaseline({
     outcome,
     snapshot_id: SNAP,
@@ -255,7 +270,8 @@ test('proof §10: every freeze refusal by name, all at once', () => {
 test('proof §11: a recorded run rebinds as the package; variance carried; digest deterministic', async () => {
   const { baseline } = await shippedBaseline();
   assert.equal(baseline.benchmark.benchmark_id, 'clu-master');
-  assert.ok(baseline.measures.length >= 12);
+  assert.equal(baseline.benchmark.benchmark_version, '0.2.0');
+  assert.equal(baseline.measures.length, 13);
   const sig1 = baseline.measures.find((measure) => measure.id === 'SIG-001');
   assert.ok(sig1 !== undefined && sig1.samples.length === 3 && sig1.spread_pct === 0);
   assert.equal(baselineDigest(baseline), baselineDigest(JSON.parse(JSON.stringify(baseline)) as BaselinePackage));
@@ -335,7 +351,7 @@ test('proof §14: the disposition table, and the literal enforced', async () => 
   assert.equal(accept.improvement, true);
   assert.ok((accept.deltas.find((delta) => delta.measure_id === 'SIG-006')?.delta_pct ?? 0) > 14.9, 'improvement-positive');
 
-  const gateFail = run(candidateFrom(baseline, (values) => values.set('SIG-012', 496)));
+  const gateFail = run(candidateFrom(baseline, (values) => values.set('SIG-012', 70)));
   assert.equal(gateFail.disposition, 'REJECT');
   assert.match(gateFail.reasons[0] ?? '', /must_not_decrease/);
 
