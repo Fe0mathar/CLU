@@ -11,8 +11,8 @@ $engineSha = '090f5d1f7bb93104ab08dcd4e8034ef954aeefcdaf6658dde5f7dff4cfc12f3a'
 $nodeSha = 'c5ff4c736112dd483c750fd4149d30c8a116db1a49b8b3ec88be4b65e6c86c19'
 $npmSha = '3ce7cba6f5128dd5f54c98b6a5036b0f850496878cc2e21044b675fe3c594e3e'
 $preludeSha = '334ca86fb237c565f38b17a7b84485c5fc1b603d1b16e07a68a3278cf42a37e9'
-$qualifierSha = 'e10c2243df0c1d88e66140199efea5915606867e07102629c41086d72b6aadda'
-$qualifierCrlfSha = 'ba61c41dbb35d54cbf838704157abce99be73628fc6081938502a092b32bd070'
+$qualifierSha = '6b2016e57bb972f7a20e2c088acd9d6d8c28366a2556b255003dc52a567913b9'
+$qualifierCrlfSha = '4dae155f83a3cca310b87dc842148ca09750c63ee0b8c15af8f71eb22b608a59'
 
 function Assert-ExactPath([string] $Path, [bool] $Directory) {
     if ($Path.Length -gt 1024 -or $Path -cnotmatch '^[A-Za-z]:\\(?!\\)' -or
@@ -200,7 +200,7 @@ try {
     $locks.Add((Open-PinnedFile $npm $npmSha 1MB))
 
     $phase = 'QUALIFY_CANARY_SOURCE_PATH_INVALID'
-    $script = Join-Path $repo 'tools\p2-windows-supervisor-qualify-06h1.mjs'
+    $script = Join-Path $repo 'tools\p2-windows-supervisor-qualify-06h2.mjs'
     Assert-ExactPath $script $false
     $phase = 'QUALIFY_CANARY_SOURCE_OPEN_FAILED'
     $scriptLock = [IO.File]::Open($script, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
