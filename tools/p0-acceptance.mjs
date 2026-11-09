@@ -1584,7 +1584,14 @@ async function probeItems(pwsh) {
         }),
       );
 
-      check('gateway stays disabled until its governed policy inputs exist', cfg.gateway.enabled === false);
+      if (cfg.gateway.enabled) {
+        const { loadGatewayPolicies, assessGatewayPolicy } = await load('src/ai/gateway/policy.js');
+        const policies = loadGatewayPolicies(REPO, cfg);
+        const assessment = assessGatewayPolicy(cfg, policies, {}, { checkInstallationCredential: false });
+        check('enabled gateway has valid governed policy inputs', assessment.operationallyReady, assessment.problems.join('; '));
+      } else {
+        check('gateway is disabled', true);
+      }
       check(
         'a landing branch prefix is configured',
         typeof cfg.patching.landing_branch_prefix === 'string' &&

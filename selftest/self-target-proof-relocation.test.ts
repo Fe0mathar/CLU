@@ -279,10 +279,11 @@ test('P2-CLOSURE-02: self-target proof uses relocated shadow CLI/config/workspac
       );
     }
 
+    const changedProfile = stringifyYaml({ ...parseYaml(profile), name: 'CLU-E candidate fixture' });
     const authorityPatch = await executeProofPlan({
       frozen,
       baseline,
-      patch: [{ op: 'write', path: 'targets/clu/profile.yaml', content: profile }],
+      patch: [{ op: 'write', path: 'targets/clu/profile.yaml', content: changedProfile }],
       projectRoot: root,
       pinnedInputs,
       shadow: {
@@ -295,8 +296,9 @@ test('P2-CLOSURE-02: self-target proof uses relocated shadow CLI/config/workspac
       benchmarkContractPath: stick,
       repoRoot: root,
     });
-    assert.ok(!authorityPatch.ok && authorityPatch.stage === 'shadow');
-    if (!authorityPatch.ok) assert.match(authorityPatch.reason, /cannot modify relocation authority/);
+    assert.ok(!authorityPatch.ok, 'a change to relocation authority must be refused');
+    assert.equal(authorityPatch.stage, 'shadow', authorityPatch.reason);
+    assert.match(authorityPatch.reason, /cannot modify relocation authority/);
   } finally {
     rmSync(root, { recursive: true, force: true, maxRetries: 3 });
     rmSync(shadowRoot, { recursive: true, force: true, maxRetries: 3 });
