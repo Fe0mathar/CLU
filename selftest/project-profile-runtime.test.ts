@@ -3,7 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, normalize } from 'node:path';
 import { stringify as toYaml } from 'yaml';
 
 import {
@@ -152,18 +152,21 @@ test('one profile record assembles one complete real runtime and read-only succe
   const expected = operationIdentityFromProfileRecord(record);
 
   const runtime = openProfileRuntime(fixture.root, record, 'initialize-new');
-  assert.equal(runtime.profileMode, 'project-profile');
-  assert.equal(runtime.workspaceRoot, record.profile.workspaceRoot);
-  assert.equal(runtime.config.project.id, record.profile.projectId, 'the profile ID differs from the physical directory name');
-  assert.equal(runtime.config.project.root, record.profile.targetRoot);
-  assert.deepEqual(runtime.projectIdentity, expected);
-  assert.equal(runtime.projectProfile?.projectProfileHash, record.projectProfileHash);
-  assert.equal(runtime.projectState?.databasePath, record.profile.state.databasePath);
-  assert.equal(runtime.projectState?.greatBookScope, record.profile.projectId);
-  assert.equal(runtime.projections.workspaceIdentity()?.projectId, record.profile.projectId);
-  runtime.artifacts.assertProjectIdentity(expected);
-  runtime.log?.assertProjectIdentity(expected);
-  runtime.dispose();
+  try {
+    assert.equal(runtime.profileMode, 'project-profile');
+    assert.equal(runtime.workspaceRoot, normalize(record.profile.workspaceRoot));
+    assert.equal(runtime.config.project.id, record.profile.projectId, 'the profile ID differs from the physical directory name');
+    assert.equal(runtime.config.project.root, normalize(record.profile.targetRoot));
+    assert.deepEqual(runtime.projectIdentity, expected);
+    assert.equal(runtime.projectProfile?.projectProfileHash, record.projectProfileHash);
+    assert.equal(runtime.projectState?.databasePath, normalize(record.profile.state.databasePath));
+    assert.equal(runtime.projectState?.greatBookScope, record.profile.projectId);
+    assert.equal(runtime.projections.workspaceIdentity()?.projectId, record.profile.projectId);
+    runtime.artifacts.assertProjectIdentity(expected);
+    runtime.log?.assertProjectIdentity(expected);
+  } finally {
+    runtime.dispose();
+  }
 
   const observer = openRuntime({
     repoRoot: fixture.root,
@@ -172,11 +175,11 @@ test('one profile record assembles one complete real runtime and read-only succe
     projectProfile: record,
     workspaceIdentityOnMissing: 'reject',
   });
+  fixture.deferCleanup(() => observer.dispose());
   assert.equal(observer.readOnly, true);
   assert.equal(observer.config.project.id, record.profile.projectId);
   assert.equal(observer.projectIdentity?.projectProfileHash, record.projectProfileHash);
   assert.equal(observer.projections.workspaceIdentity()?.initialProfileHash, record.projectProfileHash);
-  observer.dispose();
 });
 
 test('legacy v2 startup stays unchanged and profile target identity is re-verified before state opens', (t) => {

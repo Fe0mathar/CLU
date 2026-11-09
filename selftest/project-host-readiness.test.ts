@@ -3,7 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
-import { writeFileSync } from 'node:fs';
+import { realpathSync, writeFileSync } from 'node:fs';
 
 import {
   resolveProjectHostLaunchBinding,
@@ -40,7 +40,7 @@ test('matching executable, roots, handshake and project identity produce READY',
   assert.equal(result.code, 'HOST_READY');
   assert.ok(result.binding !== null);
   assert.deepEqual(result.banner?.projectIdentity, result.binding.projectIdentity);
-  assert.equal(result.binding.roots.canonical, record.profile.targetRoot);
+  assert.equal(result.binding.roots.canonical, realpathSync.native(fixture.target));
 });
 
 

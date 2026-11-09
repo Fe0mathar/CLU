@@ -9,7 +9,7 @@ import {
   readFileSync,
   writeFileSync,
 } from 'node:fs';
-import { join } from 'node:path';
+import { join, normalize } from 'node:path';
 
 import { loadConfig, loadLegacyConfig } from '../src/control/runtime.js';
 import {
@@ -104,12 +104,12 @@ test('Batch 6: startup remains legacy-v2 until an explicit state-bound cutover',
 
     const effective = loadConfig(fixture.root);
     assert.equal(effective.project.id, record.profile.projectId);
-    assert.equal(effective.project.root, record.profile.targetRoot);
-    assert.equal(effective.workspace.root, record.profile.workspaceRoot);
-    assert.equal(effective.shadow.root, record.profile.shadowRoot);
+    assert.equal(effective.project.root, normalize(record.profile.targetRoot));
+    assert.equal(effective.workspace.root, normalize(record.profile.workspaceRoot));
+    assert.equal(effective.shadow.root, normalize(record.profile.shadowRoot));
     const resolved = loadConfig(fixture.root, { resolvePaths: true });
     assert.equal(resolved.project.id, record.profile.projectId);
-    assert.equal(resolved.project.root, record.profile.targetRoot);
+    assert.equal(resolved.project.root, normalize(record.profile.targetRoot));
 
     assert.equal(disableProjectProfileStartup(fixture.root), true);
     assert.equal(disableProjectProfileStartup(fixture.root), false, 'rollback is idempotent');

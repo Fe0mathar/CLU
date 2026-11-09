@@ -47,6 +47,7 @@ export interface ProjectProfileFixture {
   readonly descriptionPath: string;
   readonly benchmarkPath: string;
   readonly draft: ProjectProfile;
+  deferCleanup(cleanup: () => void): void;
   dispose(): void;
 }
 
@@ -254,6 +255,7 @@ export function makeProjectProfileFixture(
   mkdirSync(root, { recursive: true });
   const created = createProfileAt(root, options);
   const profiles = join(root, 'profiles-control-plane');
+  const cleanups: (() => void)[] = [];
   return {
     root,
     ownsRoot,
@@ -266,7 +268,20 @@ export function makeProjectProfileFixture(
     descriptionPath: created.targetDescription,
     benchmarkPath: created.masterBenchmark,
     draft: created.profile,
+    deferCleanup(cleanup): void {
+      cleanups.push(cleanup);
+    },
     dispose(): void {
+      // Windows keeps open SQLite files locked. Release resources before removing the fixture.
+      const failures: unknown[] = [];
+      for (const cleanup of cleanups.splice(0).reverse()) {
+        try {
+          cleanup();
+        } catch (error) {
+          failures.push(error);
+        }
+      }
+      if (failures.length > 0) throw new AggregateError(failures, 'Project Profile fixture cleanup failed.');
       if (ownsRoot) rmSync(root, { recursive: true, force: true });
     },
   };

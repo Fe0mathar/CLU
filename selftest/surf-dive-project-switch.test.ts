@@ -62,7 +62,7 @@ test('A → B publishes only B; stale A pointer is ignored; reopening A restores
   betaRuntime.dispose();
 
   const alphaAgain = openRecognitionProfileRuntime(fixture.root, alpha, 'reject');
-  t.after(() => alphaAgain.dispose());
+  fixture.deferCleanup(() => alphaAgain.dispose());
   const alphaSource = new RuntimeRegistrySource(alphaAgain, {
     navigatorPath: alphaNavigator,
     readiness: READINESS,

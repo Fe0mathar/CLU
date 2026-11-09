@@ -44,9 +44,9 @@ test('Project A graph, inventory pointer and Navigator stream refuse Project B i
   const beta = registry.create(betaProfile, { actor: 'creator' });
 
   const alphaRuntime = openRecognitionProfileRuntime(fixture.root, alpha, 'initialize-new');
+  fixture.deferCleanup(() => alphaRuntime.dispose());
   const betaRuntime = openRecognitionProfileRuntime(fixture.root, beta, 'initialize-new');
-  t.after(() => alphaRuntime.dispose());
-  t.after(() => betaRuntime.dispose());
+  fixture.deferCleanup(() => betaRuntime.dispose());
 
   const alphaNavigator = join(alpha.profile.workspaceRoot, 'graph', 'system-navigator.ndjson');
   const betaNavigator = join(beta.profile.workspaceRoot, 'graph', 'system-navigator.ndjson');
@@ -117,7 +117,7 @@ test('project-relative nested exclusions are honored by snapshot and semantic re
   });
   const record = registry.create(profile, { actor: 'creator' });
   const runtime = openRecognitionProfileRuntime(fixture.root, record, 'initialize-new');
-  t.after(() => runtime.dispose());
+  fixture.deferCleanup(() => runtime.dispose());
   const navigator = join(record.profile.workspaceRoot, 'graph', 'system-navigator.ndjson');
   const result = runRecognition(runtime, { force: true, navigatorPath: navigator });
 

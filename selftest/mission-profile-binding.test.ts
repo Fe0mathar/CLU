@@ -16,6 +16,7 @@ import { ProjectAuthorityError } from '../src/control/projectProfiles/projectAut
 import { clueConfigSchema, type ClueConfig } from '../src/shared/schemas.js';
 import type { TaskRecord } from '../src/control/tasks.js';
 import type { Sha256 } from '../src/shared/ids.js';
+import { normalisePathForStorage } from '../src/shared/pathIdentity.js';
 import { makeProjectProfileFixture } from './project-profile-fixture.js';
 import { proofReadyProfile, recordForProfile } from './project-governance-fixture.js';
 
@@ -102,12 +103,10 @@ test('PP-15: mission stores exact authority bytes and ContextBuilder exposes the
   const binding = resolveProjectRuntimeBinding(base, record);
 
   const projections = new ProjectionStore(join(fixture.workspace, 'db', 'mission-profile.db'));
+  fixture.deferCleanup(() => projections.close());
   const artifacts = new ArtifactStore(join(fixture.workspace, 'blobs'));
   const { log } = EventLog.open(join(fixture.workspace, 'events'));
-  t.after(() => {
-    log.close();
-    projections.close();
-  });
+  fixture.deferCleanup(() => log.close());
   const mission = new MissionRegistry({
     repoRoot: fixture.root,
     config: binding.config,
@@ -119,8 +118,10 @@ test('PP-15: mission stores exact authority bytes and ContextBuilder exposes the
   const registered = mission.bootstrap().mission;
   const basis = mission.basis();
   assert.match(basis.projectGovernanceBasisHash ?? '', /^[0-9a-f]{64}$/);
-  assert.ok(registered.documents.some((document) => document.path === fixture.targetDescription));
-  assert.ok(registered.documents.some((document) => document.path === fixture.masterBenchmark));
+  const targetDescription = normalisePathForStorage(fixture.targetDescription);
+  const masterBenchmark = normalisePathForStorage(fixture.masterBenchmark);
+  assert.ok(registered.documents.some((document) => document.path === targetDescription));
+  assert.ok(registered.documents.some((document) => document.path === masterBenchmark));
   assert.ok(registered.documents.some((document) => document.path === 'clue-basis://project-governance'));
 
   const authority = mission.projectAuthorityContext(registered.id);
@@ -151,8 +152,8 @@ test('PP-15: mission stores exact authority bytes and ContextBuilder exposes the
     projectBinding: binding,
   });
   assert.equal(lock.project_basis?.operationIdentity.projectId, 'alpha');
-  assert.equal(lock.target_description?.path, fixture.targetDescription);
-  assert.equal(lock.master_benchmark?.path, fixture.masterBenchmark);
+  assert.equal(lock.target_description?.path, targetDescription);
+  assert.equal(lock.master_benchmark?.path, masterBenchmark);
   assert.equal(lock.absent.some((value) => value.startsWith('project_authority')), false);
   assert.equal(lock.absent.some((value) => value.startsWith('benchmark_runtime')), false);
 });
@@ -165,12 +166,10 @@ test('PP-15: authority drift makes the current mission unusable rather than sile
   const base = installationConfig(fixture.root, fixture.target, fixture.workspace, fixture.shadow);
   const binding = resolveProjectRuntimeBinding(base, record);
   const projections = new ProjectionStore(join(fixture.workspace, 'db', 'mission-drift.db'));
+  fixture.deferCleanup(() => projections.close());
   const artifacts = new ArtifactStore(join(fixture.workspace, 'blobs'));
   const { log } = EventLog.open(join(fixture.workspace, 'events'));
-  t.after(() => {
-    log.close();
-    projections.close();
-  });
+  fixture.deferCleanup(() => log.close());
   const mission = new MissionRegistry({ repoRoot: fixture.root, config: binding.config, log, projections, artifacts, projectBinding: binding });
   mission.bootstrap();
 

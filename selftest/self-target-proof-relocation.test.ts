@@ -195,7 +195,7 @@ test('P2-CLOSURE-02: self-target proof uses relocated shadow CLI/config/workspac
       benchmarkContractPath: stick,
       repoRoot: root,
     });
-    assert.ok(result.ok, result.ok ? '' : `${result.stage}: ${result.reason}`);
+    assert.ok(result.ok, result.ok ? '' : [`${result.stage}: ${result.reason}`, ...result.evidence ?? []].join('\n'));
     if (!result.ok) return;
     assert.equal(result.instrumentation.length, 2);
     assert.equal(result.candidate_snapshot_id, result.candidate_inputs.id);
@@ -266,7 +266,7 @@ test('P2-CLOSURE-02: self-target proof uses relocated shadow CLI/config/workspac
       benchmarkContractPath: stick,
       repoRoot: root,
     });
-    assert.ok(rerun.ok, rerun.ok ? '' : `${rerun.stage}: ${rerun.reason}`);
+    assert.ok(rerun.ok, rerun.ok ? '' : [`${rerun.stage}: ${rerun.reason}`, ...rerun.evidence ?? []].join('\n'));
     if (rerun.ok) {
       assert.equal(rerun.shadow_dir, result.shadow_dir);
       assert.equal(

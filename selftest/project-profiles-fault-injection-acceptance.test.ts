@@ -98,6 +98,7 @@ function setup(t: TestContext, faultPoint?: ProjectRuntimeSwitchFaultPoint) {
   registry.activate(alpha.profile.projectId, { actor: 'creator', reason: 'FAULT_MATRIX_START' });
 
   const browser = new ProjectBrowserSessionCoordinator();
+  fixture.deferCleanup(() => browser.dispose());
   browser.register(alpha, { session: browserSession(alpha, 'a') });
   browser.register(beta, { session: browserSession(beta, 'b') });
   let injected = false;
@@ -116,9 +117,8 @@ function setup(t: TestContext, faultPoint?: ProjectRuntimeSwitchFaultPoint) {
           },
         }),
   });
-  t.after(() => {
+  fixture.deferCleanup(() => {
     if (manager.state !== 'DISPOSED' && manager.activeLeaseCount === 0) manager.dispose();
-    browser.dispose();
   });
   return { registry, alpha, beta, browser, manager };
 }
@@ -187,6 +187,7 @@ test('PP-36 fault matrix: browser rollback failure blocks the manager instead of
   registry.activate('alpha', { actor: 'creator' });
 
   const browser = new ProjectBrowserSessionCoordinator();
+  fixture.deferCleanup(() => browser.dispose());
   let alphaActivations = 0;
   browser.register(alpha, {
     session: browserSession(alpha, 'a'),
@@ -206,9 +207,8 @@ test('PP-36 fault matrix: browser rollback failure blocks the manager instead of
       }
     },
   });
-  t.after(() => {
+  fixture.deferCleanup(() => {
     if (manager.state !== 'DISPOSED' && manager.activeLeaseCount === 0) manager.dispose();
-    browser.dispose();
   });
 
   manager.start();

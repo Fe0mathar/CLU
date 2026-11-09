@@ -519,7 +519,7 @@ test('proof §12–§13: the coordinator collects on a real tree and never decid
     });
 
     const run = await executeProofPlan(deps([{ op: 'write', path: 'src/cost.txt', content: '80' }]));
-    assert.ok(run.ok, run.ok ? '' : `${run.stage}: ${run.reason}`);
+    assert.ok(run.ok, run.ok ? '' : [`${run.stage}: ${run.reason}`, ...run.evidence ?? []].join('\n'));
     if (!run.ok) return;
     assert.equal(run.installed, true);
     assert.deepEqual(run.static_preparation.map((entry) => entry.script), ['typecheck', 'build']);
@@ -827,7 +827,7 @@ test('proof arm: the durable chain — refusal by name, snapshot-bound reuse, AC
       if (!stale.ok) assert.match(stale.reasons[0] ?? '', /Screened project inputs changed/);
       writeFileSync(lockfile, '{"l":1}');
       const result = await orchestrator.candidate(input);
-      assert.ok(result.ok, result.ok ? '' : `${result.stage}: ${result.reasons.join('; ')}`);
+      assert.ok(result.ok, result.ok ? '' : [result.stage, ...result.reasons, ...result.evidence ?? []].join('\n'));
       if (!result.ok) return 0;
       assert.equal(result.verdict.disposition, 'ACCEPT');
       assert.equal(result.verdict.improvement, true);

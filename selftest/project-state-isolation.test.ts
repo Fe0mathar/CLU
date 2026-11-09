@@ -35,6 +35,7 @@ test('Project A events, artifacts and projection state never appear in Project B
       onMissing: 'initialize-new',
     },
   });
+  fixture.deferCleanup(() => aStore.close());
   const bStore = new ProjectionStore(b.profile.state.databasePath, {
     workspaceIdentity: {
       expected: {
@@ -46,16 +47,13 @@ test('Project A events, artifacts and projection state never appear in Project B
       onMissing: 'initialize-new',
     },
   });
+  fixture.deferCleanup(() => bStore.close());
   const aArtifacts = new ArtifactStore(a.profile.state.artifactStoreRoot, { projectIdentity: aId });
   const bArtifacts = new ArtifactStore(b.profile.state.artifactStoreRoot, { projectIdentity: bId });
   const { log: aLog } = EventLog.open(a.profile.state.eventLogRoot, { projectIdentity: aId });
+  fixture.deferCleanup(() => aLog.close());
   const { log: bLog } = EventLog.open(b.profile.state.eventLogRoot, { projectIdentity: bId });
-  t.after(() => {
-    aLog.close();
-    bLog.close();
-    aStore.close();
-    bStore.close();
-  });
+  fixture.deferCleanup(() => bLog.close());
 
   const artifact = aArtifacts.putText('alpha-only', { operationIdentity: aId });
   aLog.append({

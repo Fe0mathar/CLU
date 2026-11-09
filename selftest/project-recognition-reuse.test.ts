@@ -50,7 +50,7 @@ test('unchanged Project A reactivation exposes A durable graph/inventory without
 
   // Opening A again is the activation step. No recognizer is called here.
   const alphaAgainRuntime = openRecognitionProfileRuntime(fixture.root, alpha, 'reject');
-  t.after(() => alphaAgainRuntime.dispose());
+  fixture.deferCleanup(() => alphaAgainRuntime.dispose());
   const alphaAgainEvents = Number(
     (alphaAgainRuntime.projections.db.prepare('SELECT COUNT(*) AS count FROM events_index').get() as { count: number }).count,
   );
@@ -94,7 +94,7 @@ test('fullScanOnActivation is applied only when the caller marks an activation r
   const record = registry.create(initialProfile, { actor: 'creator' });
   const navigator = join(record.profile.workspaceRoot, 'graph', 'system-navigator.ndjson');
   const runtime = openRecognitionProfileRuntime(fixture.root, record, 'initialize-new');
-  t.after(() => runtime.dispose());
+  fixture.deferCleanup(() => runtime.dispose());
 
   runRecognition(runtime, { force: true, navigatorPath: navigator });
   appendFileSync(join(fixture.target, 'src', 'value.ts'), '\nexport const ordinaryDelta = 1;\n');

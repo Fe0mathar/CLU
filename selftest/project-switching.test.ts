@@ -42,7 +42,7 @@ function setup(t: TestContext, faultPoint?: ProjectRuntimeSwitchFaultPoint) {
           },
         }),
   });
-  t.after(() => {
+  fixture.deferCleanup(() => {
     if (manager.state !== 'DISPOSED' && manager.activeLeaseCount === 0) manager.dispose();
   });
   return { fixture, registry, alpha, beta, manager };

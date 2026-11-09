@@ -430,7 +430,12 @@ test('DEV-P2-11 CLI: real command records ACCEPT, derives capabilities, and neve
       root,
       root,
     );
-    assert.equal(result, 0);
+    const refusal = result === 0 ? '' : withRuntime({ withLog: true, repoRoot: root }, (runtime) => {
+      const recorded = runtime.log === null ? undefined : [...runtime.log.replay()]
+        .findLast((event) => event.type === PROOF_EVENT_TYPES.executionRefused);
+      return recorded === undefined ? '' : JSON.stringify(recorded.payload);
+    });
+    assert.equal(result, 0, refusal);
     assert.equal(readFileSync(join(root, 'target', 'src', 'cost.txt'), 'utf8'), '100');
 
     withRuntime({ withLog: true, repoRoot: root }, (runtime) => {

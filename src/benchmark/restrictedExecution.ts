@@ -8,6 +8,7 @@ import type { ExecFn } from './benchmarkRunner.js';
 import { linuxContainmentInvocation, runBoundedProcess } from './containedProcess.js';
 import { resolveWindowsSupervisor, type WindowsExecutionSupervisorRequest } from './windowsExecutionSupervisor.js';
 import { requireWindowsSupervisorQualification } from './windowsSupervisorQualification.js';
+import { windowsNodeEntryArgs } from './windowsNodeEntry.js';
 import { hashBytes, type Sha256 } from '../shared/ids.js';
 
 export type ExecutionBoundary =
@@ -231,7 +232,9 @@ export function createRestrictedExecution(scope: Scope): { exec: ExecFn; dispose
     }
     const request: WindowsExecutionSupervisorRequest = {
       schemaVersion: 'clue-proof-exec/1',
-      command: node, args, cwd, readOnlyRoots: [...readOnly], writableRoots: writable,
+      command: node,
+      args: operation === 'Node workload' ? windowsNodeEntryArgs(args, cwd, [cwd, repoRoot, workspaceRoot]) : args,
+      cwd, readOnlyRoots: [...readOnly], writableRoots: writable,
       env, timeoutMs, denyNetwork: true,
     };
     const requestDir = mkdtempSync(join(requestRoot, 'request-'));
