@@ -7,6 +7,7 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  rmSync,
   writeFileSync,
 } from 'node:fs';
 import { join, normalize } from 'node:path';
@@ -19,6 +20,7 @@ import {
   loadProjectProfileStartup,
   projectProfileCutoverConfirmation,
   projectProfileStartupPath,
+  readActiveProjectProfileForBenchmark,
   ProjectProfileRegistry,
   ProjectProfileStartupError,
 } from '../src/control/projectProfiles/index.js';
@@ -101,6 +103,16 @@ test('Batch 6: startup remains legacy-v2 until an explicit state-bound cutover',
     assert.equal(active.pointer.profileGeneration, record.generation);
     assert.equal(active.pointer.projectProfileHash, record.projectProfileHash);
     assert.equal(active.record.projectProfileHash, record.projectProfileHash);
+    assert.deepEqual(readActiveProjectProfileForBenchmark(fixture.root), record);
+
+    const pending = join(fixture.profilesRoot, '.transactions', 'benchmark-pending.json');
+    writeFileSync(pending, 'test transaction marker', 'utf8');
+    try {
+      assert.throws(() => readActiveProjectProfileForBenchmark(fixture.root), { code: 'STARTUP_POINTER_STALE' });
+      assert.equal(readFileSync(pending, 'utf8'), 'test transaction marker');
+    } finally {
+      rmSync(pending);
+    }
 
     const effective = loadConfig(fixture.root);
     assert.equal(effective.project.id, record.profile.projectId);

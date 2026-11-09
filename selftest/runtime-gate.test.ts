@@ -11,7 +11,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { stringify as toYaml } from 'yaml';
@@ -20,7 +20,8 @@ import { ProjectionStore } from '../src/memory/db.js';
 import { ArtifactStore } from '../src/memory/artifactStore.js';
 import { EventLog } from '../src/memory/eventLog.js';
 import { MissionRegistry } from '../src/control/mission.js';
-import { withRuntime, loadConfig, resolveConfigPaths, type Runtime } from '../src/control/runtime.js';
+import { withRuntime, loadConfig, rehearseProjectionRebuild, resolveConfigPaths, type Runtime } from '../src/control/runtime.js';
+import { hashBytes } from '../src/shared/ids.js';
 
 function makeRepo(): string {
   const root = mkdtempSync(join(tmpdir(), 'clue-runtime-gate-'));
@@ -69,6 +70,56 @@ function bootstrap(root: string): void {
   log.close();
   projections.close();
 }
+
+test('a benchmark rebuild replays a fresh scratch database without changing live database or WAL bytes', () => {
+  const root = makeRepo();
+  try {
+    bootstrap(root);
+    withRuntime({ withLog: true, repoRoot: root }, (runtime) => {
+      const db = join(runtime.workspaceRoot, 'db', 'clue.db');
+      const events = join(runtime.workspaceRoot, 'events', 'events.ndjson');
+      runtime.audit.record({
+        actor: 'daemon', command: 'test.scratch-rebuild', capability: 'fs.read.workspace',
+        decision: 'allowed', missionVersion: runtime.currentMissionId(),
+      });
+      assert.ok(existsSync(db + '-wal'), 'exercise a real live WAL copy');
+      const paths = [db, db + '-wal', db + '-shm', events, events + '.lock', join(runtime.workspaceRoot, 'logs', 'audit.ndjson')];
+      const captureHashes = () => paths.map((path) => existsSync(path) ? hashBytes(readFileSync(path)) : null);
+      const projection = runtime.projections.status();
+      const original = captureHashes();
+      const result = rehearseProjectionRebuild({ repoRoot: root });
+      assert.ok(Number.isFinite(result.elapsedMs) && result.elapsedMs >= 0);
+      assert.equal(result.eventHead, projection.headHash);
+      assert.equal(result.eventCount, projection.indexedEvents);
+      assert.match(result.factsDigest, /^[a-f0-9]{64}$/u);
+      assert.deepEqual(captureHashes(), original);
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a benchmark rebuild refuses stale live projections without changing their bytes', () => {
+  const root = makeRepo();
+  try {
+    bootstrap(root);
+    withRuntime({ withLog: true, repoRoot: root }, () => undefined);
+    const { log } = EventLog.open(join(root, 'workspace', 'events'));
+    try {
+      log.append({ type: 'test.unprojected', actor: 'daemon', missionVersion: 'MISSION-000001', payload: {} });
+    } finally {
+      log.close();
+    }
+    const path = join(root, 'workspace', 'db', 'clue.db');
+    const original = readFileSync(path);
+    assert.throws(() => rehearseProjectionRebuild({ repoRoot: root }), /do not match the pinned event head/u);
+    assert.deepEqual(readFileSync(path), original);
+    assert.equal(existsSync(path + '-wal'), false);
+    assert.equal(existsSync(path + '-shm'), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test('a gated command passes under a matching mission and is refused once a governed document drifts', () => {
   const root = makeRepo();

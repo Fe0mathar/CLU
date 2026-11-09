@@ -146,6 +146,19 @@ test('P2-CLOSURE-03: completed engineering without governance/evidence is ready 
   );
 });
 
+test('P2 closure accepts an explicitly current successor epoch for its exact mission', () => {
+  const epochName = 'P2-authoritative-MISSION-000100';
+  assert.ok(!decideP2Closure(safeDisabledPolicy, withFacts({ epochName }))
+    .blockers.some(({ id }) => id === 'P2-EPOCH'));
+  for (const facts of [
+    withFacts({ epochName, epochCurrent: false }),
+    withFacts({ epochName: 'P2-authoritative-MISSION-000099' }),
+    withFacts({ epochName, currentMissionVersionId: null }),
+  ]) {
+    assert.ok(decideP2Closure(safeDisabledPolicy, facts).blockers.some(({ id }) => id === 'P2-EPOCH'));
+  }
+});
+
 test('P2-CLOSURE-03: one engineering contradiction dominates later ceremony blockers', () => {
   const result = decideP2Closure(
     safeDisabledPolicy,

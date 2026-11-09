@@ -439,6 +439,20 @@ export const COMMAND_AUTHORITIES: readonly CommandAuthority[] = [
       'same seam (src/control/benchmarkRun.ts) so the cycle cannot fork the proven path',
   },
   {
+    command: 'benchmark rebuild-projections',
+    capability: 'fs.read.workspace',
+    mutates: false,
+    requiresMission: true,
+    rationale: 'compares current status facts with a full event replay into a disposable projection database',
+  },
+  {
+    command: 'benchmark verify-chain',
+    capability: 'fs.read.workspace',
+    mutates: false,
+    requiresMission: false,
+    rationale: 'verifies every committed workspace event without opening a writer or reading gateway credentials',
+  },
+  {
     command: 'proof',
     capability: 'fs.write.workspace',
     mutates: true,

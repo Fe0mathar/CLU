@@ -51,7 +51,7 @@
  *
  * ## Gate evaluation
  *
- * `evaluateGates` renders §7 of `clu-master` 0.1.x executable: two invalidate-run gates,
+ * `evaluateGates` renders §7 of `clu-master` 0.1.x and 0.2.0 executable: two invalidate-run gates,
  * two block-equilibrium gates, one advisory. The contract states the rules as reviewed
  * prose rather than machine blocks, so the executable rendering lives here **and refuses
  * any other contract identity** — a different benchmark or a different major must bring its
@@ -241,6 +241,14 @@ export const benchmarkResultSchema = z
 
 export type BenchmarkMeasure = z.infer<typeof benchmarkMeasureSchema>;
 export type BenchmarkResult = z.infer<typeof benchmarkResultSchema>;
+
+/** clu-master 0.2.0 declares all thirteen signals required for proof. */
+export function isCompleteCluBenchmarkV020(result: BenchmarkResult): boolean {
+  const ids = new Set(result.measures.map((measure) => measure.id));
+  return result.incomplete.length === 0 && result.measures.length === 13 &&
+    Array.from({ length: 13 }, (_, index) => `SIG-${String(index + 1).padStart(3, '0')}`)
+      .every((id) => ids.has(id));
+}
 
 /* ------------------------------------------------------------------------- */
 /* Running                                                                    */
@@ -476,7 +484,7 @@ export async function runMasterBenchmark(options: RunOptions): Promise<RunOutcom
 }
 
 /* ------------------------------------------------------------------------- */
-/* §7 gates — the executable rendering for clu-master 0.1.x                   */
+/* §7 gates — the executable rendering for clu-master 0.1.x and 0.2.0         */
 /* ------------------------------------------------------------------------- */
 
 export interface GateEvaluation {
@@ -503,7 +511,7 @@ function valueOf(measures: readonly BenchmarkMeasure[], id: string): number | un
 /**
  * Evaluates §7's five gates between an opening and a closing run.
  *
- * Refuses any contract identity other than `clu-master` 0.1.x — see the header for why
+ * Refuses any contract identity other than `clu-master` 0.1.x or 0.2.0 — see the header for why
  * the rendering is identity-bound. `declared_removal` is GATE-002's escape hatch as
  * written in the contract ("without a declared removal"); the caller asserts it, this
  * function records it, and the gate then passes with the deltas named rather than hidden.
@@ -515,11 +523,12 @@ export function evaluateGates(input: {
   readonly declared_removal?: boolean;
 }): GateReport | { readonly error: string } {
   const { identity, opening, closing } = input;
-  if (identity.benchmark_id !== 'clu-master' || !identity.benchmark_version.startsWith('0.1.')) {
+  if (identity.benchmark_id !== 'clu-master' ||
+      (!identity.benchmark_version.startsWith('0.1.') && identity.benchmark_version !== '0.2.0')) {
     return {
       error:
         `no executable gate rendering for ${identity.benchmark_id}@${identity.benchmark_version} — ` +
-        '§7 of clu-master 0.1.x is the only contract this evaluator renders; a new version brings its own',
+        'this evaluator renders §7 of clu-master 0.1.x and 0.2.0',
     };
   }
 

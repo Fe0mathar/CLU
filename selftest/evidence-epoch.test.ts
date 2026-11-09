@@ -308,6 +308,69 @@ test('ADR-0006: refusals — missionless, unratified, moved-on pack, empty name/
   }
 });
 
+test('a benchmark successor needs its own ratification and a distinct evidence epoch', () => {
+  const fixture = makeFixture();
+  const benchmark = 'master-benchmark.md';
+  const benchmarkPath = join(fixture.config.project.root, benchmark);
+  writeFileSync(benchmarkPath, 'initial benchmark\n');
+  const kernel = openKernel({
+    ...fixture,
+    config: {
+      ...fixture.config,
+      project: {
+        ...fixture.config.project,
+        inputs: { ...fixture.config.project.inputs, benchmark },
+      },
+    },
+  });
+  try {
+    const initial = kernel.mission.bootstrap().mission;
+    const packSha = writePack(fixture.root);
+    const originalRatification = kernel.mission.ratifyInstalledAuthority({ statement: 'RATIFY initial pack' });
+    const originalEpoch = kernel.mission.sealEpoch({ epochName: 'P2-authoritative', statement: 'SEAL original epoch' });
+
+    writeFileSync(benchmarkPath, 'successor benchmark\n');
+    const successor = kernel.mission.bootstrap().mission;
+    assert.equal(successor.version, initial.version + 1);
+    const successorEpochName = `P2-authoritative-${successor.id}`;
+    assert.throws(
+      () => kernel.mission.sealEpoch({ epochName: successorEpochName, statement: 'SEAL before ratification' }),
+      /does not cover current mission/,
+    );
+    assert.equal(kernel.mission.latestEpoch()?.event_id, originalEpoch.event_id);
+
+    const successorRatification = kernel.mission.ratifyInstalledAuthority({ statement: 'RATIFY successor pack' });
+    assert.equal(successorRatification.seal_sha256, packSha);
+    assert.notEqual(successorRatification.event_id, originalRatification.event_id);
+    assert.equal(kernel.mission.ratification()?.event_id, successorRatification.event_id);
+    assert.throws(
+      () => kernel.mission.ratifyInstalledAuthority({ statement: 'RATIFY duplicate successor pack' }),
+      /already ratified/,
+    );
+    assert.throws(
+      () => kernel.mission.sealEpoch({ epochName: originalEpoch.epoch_name, statement: 'SEAL duplicate name' }),
+      /already sealed/,
+    );
+
+    const successorEpoch = kernel.mission.sealEpoch({ epochName: successorEpochName, statement: 'SEAL successor epoch' });
+    assert.equal(successorEpoch.ratification_event_id, successorRatification.event_id);
+    assert.equal(kernel.mission.latestEpoch()?.event_id, successorEpoch.event_id);
+    assert.equal(kernel.mission.epoch(originalEpoch.epoch_name)?.event_id, originalEpoch.event_id);
+    assert.throws(
+      () => kernel.mission.sealEpoch({ epochName: successorEpochName, statement: 'SEAL duplicate successor epoch' }),
+      /already sealed/,
+    );
+    const evidence = [...kernel.log.replay()];
+    assert.equal(evidence.find((event) => event.id === originalRatification.event_id)?.mission_version, initial.id);
+    assert.equal(evidence.find((event) => event.id === successorRatification.event_id)?.mission_version, successor.id);
+    assert.equal(evidence.find((event) => event.id === originalEpoch.event_id)?.mission_version, initial.id);
+    assert.equal(evidence.find((event) => event.id === successorEpoch.event_id)?.mission_version, successor.id);
+  } finally {
+    kernel.dispose();
+    removeFixture(fixture.root);
+  }
+});
+
 /* ========================================================================= */
 /* Corruption is loud — the record, and the store                             */
 /* ========================================================================= */

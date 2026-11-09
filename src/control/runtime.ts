@@ -79,8 +79,13 @@
  * another, which produces empty tables rather than an error.
  */
 
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync } from 'node:fs';
-import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import {
+  constants, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync,
+  readFileSync, readdirSync, realpathSync, rmSync, statSync, type BigIntStats,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { performance } from 'node:perf_hooks';
 import { fileURLToPath } from 'node:url';
 
 import { parse as parseYaml } from 'yaml';
@@ -106,6 +111,7 @@ import {
   targetProfileSchema,
 } from '../shared/schemas.js';
 import { activeCommandMissionRequirement } from '../shared/commandContext.js';
+import { canonicalJson, hashText, type Sha256 } from '../shared/ids.js';
 import type { ProjectOperationIdentity } from '../shared/projectOperationIdentity.js';
 import {
   resolveProjectRuntimeBinding,
@@ -125,7 +131,8 @@ import {
   type IntentionalDeclaration,
 } from '../experiment/console/consoleLedger.js';
 import { createAttributor, makeUnitLocator, type SourceMapProvider } from '../experiment/console/attribution.js';
-import { loadActiveProjectProfileForStartup } from './projectProfiles/projectProfileStartup.js';
+import { loadActiveProjectProfileForStartup, readActiveProjectProfileForBenchmark } from './projectProfiles/projectProfileStartup.js';
+import { projectStatusFromRuntime } from '../status/statusFromRuntime.js';
 
 /* ------------------------------------------------------------------------- */
 /* Workspace layout                                                           */
@@ -178,6 +185,7 @@ export type RuntimeErrorCode =
   | 'PROTECTED_POLICY_MALFORMED'
   | 'MISSION_REQUIRED'
   | 'PROJECTIONS_STALE'
+  | 'PROJECTION_REBUILD_REFUSED'
   /** DEV-P1-35: a configured root is absolute under another platform's rules, not this one's. */
   | 'CONFIG_PATH_FOREIGN'
   /** D1 (2026-08-11): the configuration and a target profile disagree about the target. */
@@ -873,14 +881,12 @@ function globToRegExp(glob: string): RegExp {
  * exactly the moment recovery is most needed. And the event log is opened last, so a
  * lock held by another writer leaves a usable read-only runtime rather than an exception.
  */
-export function openRuntime(options: RuntimeOptions): Runtime {
+function resolveRuntimeConfig(options: RuntimeOptions, observeProfile = false) {
   const repoRoot = options.repoRoot ?? findRepoRoot();
   const installationConfig = loadLegacyConfig(repoRoot);
-  const startup =
-    options.projectProfile === undefined
-      ? loadActiveProjectProfileForStartup(repoRoot)
-      : null;
-  const selectedProfile = options.projectProfile ?? startup?.record ?? null;
+  const selectedProfile = options.projectProfile ?? (observeProfile
+    ? readActiveProjectProfileForBenchmark(repoRoot)
+    : loadActiveProjectProfileForStartup(repoRoot)?.record ?? null);
   const projectBinding =
     selectedProfile === null
       ? null
@@ -888,6 +894,25 @@ export function openRuntime(options: RuntimeOptions): Runtime {
   const config = resolveConfigPaths(projectBinding?.config ?? installationConfig, repoRoot, {
     projectProfileBound: projectBinding !== null,
   });
+  return { repoRoot, config, projectBinding };
+}
+
+export function openRuntime(options: RuntimeOptions): Runtime {
+  return assembleRuntime(options, resolveRuntimeConfig(options));
+}
+
+interface ScratchProjectionDatabase {
+  readonly path: string;
+  readonly writable: boolean;
+  /** Closed by the scratch owner even if later service assembly fails. */
+  store?: ProjectionStore;
+}
+
+function assembleRuntime(
+  options: RuntimeOptions,
+  { repoRoot, config, projectBinding }: ReturnType<typeof resolveRuntimeConfig>,
+  scratch?: ScratchProjectionDatabase,
+): Runtime {
   const workspaceRoot = config.workspace.root;
   const projectIdentity = projectBinding?.identity ?? null;
   const projectState = projectBinding?.state ?? null;
@@ -900,6 +925,9 @@ export function openRuntime(options: RuntimeOptions): Runtime {
   // The registries below still receive a stand-in log that throws on any write; this closes the second
   // half of the same hole, the store itself.
   const holdsWriter = options.withLog && !readOnly;
+  if (scratch !== undefined && holdsWriter) {
+    throw new RuntimeError('PROJECTION_REBUILD_REFUSED', 'A scratch rebuild cannot open the live event writer.');
+  }
   const storeReadOnly = !holdsWriter;
 
   const secrets = new SecretRegistry();
@@ -937,7 +965,7 @@ export function openRuntime(options: RuntimeOptions): Runtime {
   // The kernel task and packet projectors ride as bare projectors: their schemas belong to their own
   // services (TaskQueue / SessionPacketService), which install them when constructed.
   const rehydrators: ProjectionRehydrators = {};
-  const databasePath = projectState?.databasePath ?? join(workspaceRoot, 'db', 'clue.db');
+  const databasePath = scratch?.path ?? projectState?.databasePath ?? join(workspaceRoot, 'db', 'clue.db');
   const eventLogRoot = projectState?.eventLogRoot ?? join(workspaceRoot, 'events');
   const artifactStoreRoot = projectState?.artifactStoreRoot ?? join(workspaceRoot, 'blobs');
 
@@ -947,16 +975,17 @@ export function openRuntime(options: RuntimeOptions): Runtime {
     rehydrateKernel: () => {
       rehydrators.audit?.();
     },
-    readOnly: storeReadOnly,
+    readOnly: storeReadOnly && scratch?.writable !== true,
     ...(projectBinding === null
       ? {}
       : {
           workspaceIdentity: {
             expected: projectBinding.workspaceIdentity,
-            onMissing: options.workspaceIdentityOnMissing ?? 'reject',
+            onMissing: scratch?.writable === true ? 'initialize-new' : options.workspaceIdentityOnMissing ?? 'reject',
           },
         }),
   });
+  if (scratch !== undefined) scratch.store = projections;
 
   const artifacts = new ArtifactStore(artifactStoreRoot, {
     readOnly: storeReadOnly,
@@ -1127,8 +1156,8 @@ export function openRuntime(options: RuntimeOptions): Runtime {
   // Now that the registries exist, point the projection modules' rehydrate hooks at them. On a
   // rebuild, `ProjectionStore.rebuild()` replays events (restoring the summary receipts) and then
   // calls these, which rehydrate the artifact-backed bulk tables from the stored recognition and
-  // metric artifacts. A read-only attach leaves `metrics` null and never rebuilds, so its unset hook
-  // is inert.
+  // metric artifacts. An ordinary read-only attach cannot rebuild. A rehearsal reuses the same
+  // hooks against its private writable projection database.
   rehydrators.graph = () => {
     graph?.rehydrateAll();
   };
@@ -1163,6 +1192,8 @@ export function openRuntime(options: RuntimeOptions): Runtime {
   // This is evaluated on demand, not cached: a runtime that stays open must notice the log advancing
   // beneath it, so `requireFreshProjections` re-checks every time rather than trusting a startup value.
   const computeStaleness = (): boolean | null => {
+    // The rehearsal compares its private stores against one verified head outside assembly.
+    if (scratch !== undefined) return null;
     if (readOnly) {
       try {
         return projections.isStaleAgainst(EventLog.readHead(eventLogRoot));
@@ -1302,6 +1333,133 @@ export function withRuntime<T>(options: RuntimeOptions, work: (runtime: Runtime)
     return work(runtime);
   } finally {
     runtime.dispose();
+  }
+}
+
+const VOLATILE_STATUS_FIELDS = new Set([
+  'freshness', 'observedAt', 'ageMs', 'capturedAt', 'checkedAt', 'generatedAt',
+  'seal', 'sources', 'capability',
+]);
+
+function statusFacts(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(statusFacts);
+  if (value === null || typeof value !== 'object') return value;
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([key]) => !VOLATILE_STATUS_FIELDS.has(key))
+      .map(([key, child]) => [key, statusFacts(child)]),
+  );
+}
+
+function databaseFile(path: string): BigIntStats | undefined {
+  const stat = lstatSync(path, { bigint: true, throwIfNoEntry: false });
+  if (stat !== undefined && !stat.isFile()) {
+    throw new RuntimeError('PROJECTION_REBUILD_REFUSED', 'The live projection database and WAL must be regular files.');
+  }
+  return stat;
+}
+
+function sameDatabaseFile(before: BigIntStats | undefined, after: BigIntStats | undefined): boolean {
+  if (before === undefined || after === undefined) return before === after;
+  return before.dev === after.dev && before.ino === after.ino && before.size === after.size &&
+    before.mtimeNs === after.mtimeNs && before.ctimeNs === after.ctimeNs;
+}
+
+/** Copy a quiescent DB and committed WAL bytes. SQLite sidecars are opened only in scratch. */
+function copyProjectionDatabase(source: string, destination: string): void {
+  const sourceWal = source + '-wal';
+  const before = databaseFile(source);
+  const beforeWal = databaseFile(sourceWal);
+  if (before === undefined) {
+    throw new RuntimeError('PROJECTION_REBUILD_REFUSED', 'The live projection database is missing.');
+  }
+  copyFileSync(source, destination, constants.COPYFILE_EXCL);
+  if (beforeWal !== undefined) copyFileSync(sourceWal, destination + '-wal', constants.COPYFILE_EXCL);
+  if (!sameDatabaseFile(before, databaseFile(source)) || !sameDatabaseFile(beforeWal, databaseFile(sourceWal))) {
+    throw new RuntimeError('PROJECTION_REBUILD_REFUSED', 'The projection database changed while being copied.');
+  }
+}
+
+function configuredEventLogRoot(resolved: ReturnType<typeof resolveRuntimeConfig>): string {
+  return resolved.projectBinding?.state.eventLogRoot ?? join(resolved.config.workspace.root, 'events');
+}
+
+/** Verify the configured legacy or Project Profile event chain without opening a database. */
+export function verifyBenchmarkEventChain(overrides: Pick<RuntimeOptions, 'repoRoot'> = {}) {
+  const resolved = resolveRuntimeConfig({ ...overrides, withLog: false }, true);
+  return EventLog.verifyReadOnly(configuredEventLogRoot(resolved));
+}
+
+/**
+ * Rebuilds an empty scratch database from the verified committed event chain and artifact store.
+ * The original database is used as the Status fact oracle without opening it in SQLite.
+ */
+export function rehearseProjectionRebuild(
+  overrides: Pick<RuntimeOptions, 'repoRoot'> = {},
+): { readonly elapsedMs: number; readonly eventCount: number; readonly eventHead: Sha256; readonly factsDigest: Sha256 } {
+  const options: RuntimeOptions = { ...overrides, withLog: false, readOnly: true };
+  const resolved = resolveRuntimeConfig(options, true);
+  const { repoRoot, config, projectBinding } = resolved;
+  const workspace = config.workspace.root;
+  const projectState = projectBinding?.state;
+  const events = configuredEventLogRoot(resolved);
+  const liveDatabase = projectState?.databasePath ?? join(workspace, 'db', 'clue.db');
+  const temporaryRoot = realpathSync.native(tmpdir());
+  const reservedRoots = [
+    ...[repoRoot, config.project.root, workspace].map((root) => realpathSync.native(root)),
+    config.shadow.root, config.browser.profile_dir,
+  ];
+  for (const root of reservedRoots) {
+    const inside = relative(root, temporaryRoot);
+    if (!isAbsolute(inside) && inside !== '..' && !inside.startsWith('..' + sep)) {
+      throw new RuntimeError('PROJECTION_REBUILD_REFUSED', 'The temporary directory must be outside CLU-E operating roots.');
+    }
+  }
+
+  const pinnedHead = EventLog.verifyReadOnly(events);
+  if (pinnedHead === null) {
+    throw new RuntimeError('PROJECTION_REBUILD_REFUSED', 'There are no committed events to rebuild.');
+  }
+
+  const directory = mkdtempSync(join(temporaryRoot, 'clue-projection-rebuild-'));
+  const baseline: ScratchProjectionDatabase = { path: join(directory, 'observed.db'), writable: false };
+  const rebuilt: ScratchProjectionDatabase = { path: join(directory, 'rebuilt.db'), writable: true };
+  const capturedAt = new Date().toISOString();
+  try {
+    copyProjectionDatabase(liveDatabase, baseline.path);
+    const before = assembleRuntime(options, resolved, baseline);
+    if (before.projections.isStaleAgainst(pinnedHead)) {
+      throw new RuntimeError('PROJECTION_REBUILD_REFUSED', 'The copied projections do not match the pinned event head.');
+    }
+    const beforeReport = projectStatusFromRuntime(before, { capturedAt });
+
+    const started = performance.now();
+    const after = assembleRuntime(options, resolved, rebuilt);
+    const result = after.projections.rebuild({ replay: () => EventLog.replayReadOnly(events) });
+    const elapsedMs = performance.now() - started;
+
+    const afterReport = projectStatusFromRuntime(after, { capturedAt });
+    const currentHead = EventLog.verifyReadOnly(events);
+    if (currentHead?.hash !== pinnedHead.hash || currentHead.sequence !== pinnedHead.sequence ||
+        after.projections.isStaleAgainst(pinnedHead)) {
+      throw new RuntimeError('PROJECTION_REBUILD_REFUSED', 'The committed event head changed during projection rebuild.');
+    }
+    const facts = canonicalJson(statusFacts(beforeReport.snapshot));
+    if (facts !== canonicalJson(statusFacts(afterReport.snapshot)) ||
+        canonicalJson(beforeReport.faults) !== canonicalJson(afterReport.faults)) {
+      throw new RuntimeError('PROJECTION_REBUILD_REFUSED', 'The rebuilt projection did not reproduce the original Status facts.');
+    }
+    return { elapsedMs, eventCount: result.applied, eventHead: pinnedHead.hash, factsDigest: hashText(facts) };
+  } finally {
+    try {
+      rebuilt.store?.close();
+    } finally {
+      try {
+        baseline.store?.close();
+      } finally {
+        rmSync(directory, { recursive: true, force: true, maxRetries: 3 });
+      }
+    }
   }
 }
 

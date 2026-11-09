@@ -98,6 +98,8 @@ test('DEV-P1-07: read-only and mission are the defaults, and the exceptions are 
   assert.deepEqual(withoutMission.sort(), [
     'audit denials',
     'audit tail',
+    // A corrupt or unbootstrapped log must remain inspectable before a mission can open.
+    'benchmark verify-chain',
     // DEV-P2-08 S5 (2026-08-10, plan D4 accepted): `cycle status` is a pure read that emits
     // nothing, exempt like status/doctor so a drifted basis can still be inspected — and this
     // ledger refused it until the exemption was recorded here, which is the ledger working.
@@ -155,7 +157,7 @@ test('DEV-P1-07: read-only and mission are the defaults, and the exceptions are 
   }
 
   // The read-only serving commands must never be marked mutating: they must not take the lock.
-  for (const command of ['console dashboard', 'console serve', 'console ui']) {
+  for (const command of ['benchmark verify-chain', 'console dashboard', 'console serve', 'console ui']) {
     assert.equal(commandMutates(command), false, `${command} must stay read-only`);
   }
 });

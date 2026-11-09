@@ -52,6 +52,7 @@ import { captureSnapshot } from '../analysis/source/snapshot.js';
 import { requireProofExecutionBoundary } from '../benchmark/restrictedExecution.js';
 import { assertExactRunInputs, captureExactRunInputs, type ExactRunInputs } from './exactRunInputs.js';
 import {
+  isCompleteCluBenchmarkV020,
   runMasterBenchmark,
   type BenchmarkMeasure,
   type RunOutcome,
@@ -399,7 +400,9 @@ export function recordBenchmarkRun(runtime: Runtime, performed: PerformedRun): B
   const subject = assertBenchmarkRunSubject(runtime, performed);
   const boundary = performed.outcome.execution_boundary;
   const proofEligible = performed.contract.registered && boundary !== undefined && !budget.exhausted &&
-    result.measures.some((measure) => measure.warmup_samples !== undefined);
+    result.measures.some((measure) => measure.warmup_samples !== undefined) &&
+    (contract.benchmark_id !== 'clu-master' || contract.benchmark_version !== '0.2.0' ||
+      isCompleteCluBenchmarkV020(result));
 
   const artifact = runtime.artifacts.putJson(
     {

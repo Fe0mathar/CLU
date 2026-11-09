@@ -11,6 +11,7 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
   rmSync,
 } from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
@@ -36,9 +37,11 @@ import {
 } from './profileFileSystem.js';
 import { assertProjectProfileHash } from './profileHash.js';
 import {
+  projectProfileRegistrySchema,
   ProjectProfileRegistry,
   type ActiveProjectPointer,
 } from './profileRegistry.js';
+import { ProjectProfileStore } from './profileStore.js';
 
 export const PROJECT_PROFILE_STARTUP_VERSION = 3 as const;
 export const PROJECT_PROFILE_STARTUP_RELATIVE_PATH = join('config', 'project-profiles.yaml');
@@ -207,6 +210,37 @@ export function loadActiveProjectProfileForStartup(repoRoot: string): ActiveStar
     );
   }
   return Object.freeze({ selector, selectorPath, registry, pointer, record });
+}
+
+/** Observe the active profile without creating registry directories or recovering a transaction. */
+export function readActiveProjectProfileForBenchmark(repoRoot: string): ProjectProfileRecord | null {
+  const selector = loadProjectProfileStartup(repoRoot);
+  if (selector === null) return null;
+  const root = resolveProjectProfilesRoot(repoRoot, selector.profiles.registry_root);
+  const registryPath = join(root, 'registry.json');
+  const transactions = join(root, '.transactions');
+  const hasPendingTransaction = (): boolean =>
+    existsSync(transactions) && readdirSync(transactions).some((name) => name.endsWith('.json'));
+  const unstable = () => new ProjectProfileStartupError(
+    'STARTUP_POINTER_STALE',
+    'The active Project Profile is changing. Finish or recover its transaction before benchmarking.',
+  );
+  if (hasPendingTransaction()) throw unstable();
+  const bytes = readFileSync(registryPath);
+  const registry = projectProfileRegistrySchema.parse(JSON.parse(bytes.toString('utf8')) as unknown);
+  if (registry.activeProjectId === null) {
+    throw new ProjectProfileStartupError(
+      'STARTUP_ACTIVE_PROFILE_MISSING',
+      'Configuration-v3 is enabled, but the Project Profile registry has no active project.',
+    );
+  }
+  const record = new ProjectProfileStore(root, { readOnly: true }).require(registry.activeProjectId);
+  const entry = registry.projects.find(({ projectId }) => projectId === record.profile.projectId);
+  if (entry?.targetRootIdentity !== record.profile.targetRootIdentity ||
+      !bytes.equals(readFileSync(registryPath)) || hasPendingTransaction()) {
+    throw unstable();
+  }
+  return record;
 }
 
 function pointerMatchesRecord(pointer: ActiveProjectPointer, record: ProjectProfileRecord): boolean {

@@ -57,6 +57,7 @@ import {
   DEFAULT_EXECUTION_POLICY,
   benchmarkResultSchema,
   evaluateGates,
+  isCompleteCluBenchmarkV020,
   makeExec,
   platformArgv,
   runMasterBenchmark,
@@ -102,18 +103,27 @@ function stubExec(): ExecFn {
   return async (argv) => {
     const cmd = argv.join(' ');
     t += 7;
-    const ok = (stdout: string) => ({ code: 0, stdout, stderr: '', wallMs: t, timedOut: false });
+    const ok = (stdout: string, wallMs = t) => ({ code: 0, stdout, stderr: '', wallMs, timedOut: false });
     if (cmd.includes('resultHash')) return ok(`${'f'.repeat(64)}\n`);
     if (cmd.includes('recognize')) {
       return ok(
         line('units', '6294') +
           line('edges', '30687') +
           '  WARN  unresolved                         473 reference(s) the graph could not follow\n',
+        argv.includes('--full') ? t : 180,
       );
     }
     if (cmd.includes('metrics')) return ok(line('values stored', '42917'));
-    if (cmd.includes('status diff')) return ok(line('branches', 'identical'));
-    if (cmd.includes('selftest')) return ok('# tests 502\n# pass 497\n# fail 0\n# skipped 5\n');
+    if (argv.includes('rebuild-projections')) return ok(JSON.stringify({
+      state: 'PROJECTION_REBUILD_VERIFIED', eventCount: 3, eventHead: 'a'.repeat(64),
+      factsDigest: 'b'.repeat(64), elapsedMs: 40,
+    }));
+    if (argv.includes('verify-chain')) {
+      return ok(line('event chain', `3 committed records verified, head ${'a'.repeat(64)}`));
+    }
+    if (argv.includes('dist/selftest/benchmark-offline-suite-v1.js')) {
+      return ok('CLU-E_OFFLINE_SUITE_V1\n# tests 502\n# pass 497\n# fail 0\n# cancelled 0\n# skipped 5\n# todo 0\n');
+    }
     return ok(line('x', 'y'));
   };
 }
@@ -164,7 +174,7 @@ test('the shipped contract parses: identity, one cli-node block, six scenarios',
   assert.ok(!('error' in read), 'error' in read ? read.error : '');
   if ('error' in read) return;
   assert.equal(read.identity.benchmark_id, 'clu-master');
-  assert.equal(read.identity.benchmark_version, '0.1.0');
+  assert.equal(read.identity.benchmark_version, '0.2.0');
   assert.equal(read.identity.runner_adapter, 'cli-node');
   const block = selectHarnessBlock(read, 'cli-node');
   assert.ok(!('error' in block));
@@ -490,11 +500,12 @@ test('a run against the shipped contract returns the full result shape, bound to
   if (!outcome.ok) return;
 
   assert.ok(benchmarkResultSchema.safeParse(outcome.result).success);
-  assert.equal(outcome.result.benchmarkVersion, '0.1.0');
+  assert.equal(outcome.result.benchmarkVersion, '0.2.0');
+  assert.ok(isCompleteCluBenchmarkV020(outcome.result), JSON.stringify(outcome.result.incomplete));
   assert.equal(outcome.result.unifiedScore, null, 'no baseline: the absence is stated, not a fabricated 1.0');
 
   const ids = outcome.result.measures.map((entry) => entry.id).sort();
-  for (const id of ['SIG-001', 'SIG-003', 'SIG-004', 'SIG-005', 'SIG-007', 'SIG-008', 'SIG-011', 'SIG-012', 'SIG-013']) {
+  for (const id of ['SIG-001', 'SIG-003', 'SIG-004', 'SIG-005', 'SIG-007', 'SIG-008', 'SIG-009', 'SIG-010', 'SIG-011', 'SIG-012', 'SIG-013']) {
     assert.ok(ids.includes(id), `expected ${id} in measures`);
   }
   assert.deepEqual(
@@ -512,6 +523,7 @@ test('a run against the shipped contract returns the full result shape, bound to
   assert.equal(byId.get('SIG-001')?.value, 128);
   assert.deepEqual(byId.get('SIG-003')?.warmup_samples, [6294]);
   assert.deepEqual(byId.get('SIG-003')?.samples, [6294, 6294, 6294]);
+  assert.deepEqual(byId.get('SIG-009')?.samples, [40, 40, 40]);
   assert.deepEqual(byId.get('SIG-012')?.samples, [497, 497, 497]);
   assert.equal(byId.get('SIG-002')?.samples.length, 3);
 });
@@ -525,16 +537,39 @@ test('the stock benchmark leaves unstable exact counts and red suite evidence in
       if (argv.includes('metrics') && ++metrics === 4) {
         return { ...result, stdout: result.stdout.replace('42917', '42918') };
       }
-      if (argv.includes('selftest')) {
+      if (argv.includes('dist/selftest/benchmark-offline-suite-v1.js')) {
         return { ...result, code: 1, stdout: result.stdout.replace('# fail 0', '# fail 1') };
       }
       return result;
     },
   }));
   assert.ok(outcome.ok, outcome.ok ? '' : outcome.reason);
+  assert.equal(isCompleteCluBenchmarkV020(outcome.result), false);
   for (const id of ['SIG-008', 'SIG-011', 'SIG-012', 'SIG-013']) {
     assert.ok(outcome.result.incomplete.some((measure) => measure.id === id), id);
     assert.ok(!outcome.result.measures.some((measure) => measure.id === id), id);
+  }
+});
+
+test('missing scenario receipts or incomplete TAP cannot supply required signals', async () => {
+  const exec = stubExec();
+  const outcome = await runMasterBenchmark(runOptions({
+    policy: { repetitions: 1, warmupRuns: 0 },
+    execImpl: async (argv, options) => {
+      const result = await exec(argv, options);
+      if (argv.includes('rebuild-projections') || argv.includes('verify-chain')) {
+        return { ...result, stdout: 'unverified' };
+      }
+      if (argv.includes('dist/selftest/benchmark-offline-suite-v1.js')) {
+        return { ...result, stdout: result.stdout.replace('# cancelled 0', '# cancelled 1') };
+      }
+      return result;
+    },
+  }));
+  assert.ok(outcome.ok);
+  assert.equal(isCompleteCluBenchmarkV020(outcome.result), false);
+  for (const id of ['SIG-009', 'SIG-010', 'SIG-011', 'SIG-012', 'SIG-013']) {
+    assert.ok(outcome.result.incomplete.some((entry) => entry.id === id), id);
   }
 });
 
@@ -665,9 +700,16 @@ test('the gate rendering refuses any contract identity it does not cover', () =>
   });
   assert.ok('error' in foreign);
   const major = evaluateGates({
-    identity: { ...GATE_IDENTITY, benchmark_version: '0.2.0' },
+    identity: { ...GATE_IDENTITY, benchmark_version: '0.3.0' },
     opening: OPENING,
     closing: OPENING,
   });
   assert.ok('error' in major);
+  const repaired = evaluateGates({
+    identity: { ...GATE_IDENTITY, benchmark_version: '0.2.0' },
+    opening: OPENING,
+    closing: OPENING,
+  });
+  assert.ok(!('error' in repaired));
+  assert.equal(repaired.run_verdict, 'valid');
 });

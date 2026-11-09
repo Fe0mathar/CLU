@@ -427,7 +427,14 @@ export class MissionRegistry {
    * malformed act stand as authority.
    */
   public ratification(): RatificationRecord | null {
-    let latest: RatificationRecord | null = null;
+    return this.readLatestRatification()?.record ?? null;
+  }
+
+  private readLatestRatification(): {
+    readonly record: RatificationRecord;
+    readonly missionVersion: string | null;
+  } | null {
+    let latest: { readonly record: RatificationRecord; readonly missionVersion: string | null } | null = null;
     for (const record of this.log.replay()) {
       if (record.type !== AUTHORITY_EVENT_TYPES.packRatified) continue;
       const parsed = packRatificationSchema.safeParse(record.payload);
@@ -437,7 +444,10 @@ export class MissionRegistry {
             `that does not satisfy packRatificationSchema — a governance record is corrupt`,
         );
       }
-      latest = { ...parsed.data, event_id: record.id, sequence: record.sequence };
+      latest = {
+        record: { ...parsed.data, event_id: record.id, sequence: record.sequence },
+        missionVersion: record.mission_version,
+      };
     }
     return latest;
   }
@@ -448,8 +458,9 @@ export class MissionRegistry {
    * The act binds the pack state at this exact moment, so the whole pack must verify first:
    * every file the seal declares must exist and hash to its declared value. Ratifying a
    * drifted pack is refused — the Creator would be signing a statement the disk contradicts.
-   * The same seal state cannot be ratified twice; a *new* seal state (a governed amendment
-   * has moved the pack on) ratifies as a new event, and `ratification()` returns the latest.
+   * The same seal state cannot be ratified twice in the current mission. A successor mission
+   * needs its own Creator act even when only an external governed input changed and the
+   * installed documentation pack kept the same seal.
    *
    * The caller supplies only the confirmation statement; everything bound is read from disk
    * and from the configuration. The CLI owns making the act deliberate (interactive
@@ -480,15 +491,16 @@ export class MissionRegistry {
       );
     }
 
-    const existing = this.ratification();
+    const existing = this.readLatestRatification();
     if (
       existing !== null &&
-      existing.seal_sha256 === sealSha &&
-      existing.seal_path === pack.sealFile &&
-      existing.manifest_path === pack.manifestFile
+      existing.missionVersion === mission.id &&
+      existing.record.seal_sha256 === sealSha &&
+      existing.record.seal_path === pack.sealFile &&
+      existing.record.manifest_path === pack.manifestFile
     ) {
       throw new Error(
-        `This pack state is already ratified (event ${existing.event_id}, ${existing.ratified_at}).`,
+        `This pack state is already ratified (event ${existing.record.event_id}, ${existing.record.ratified_at}).`,
       );
     }
 
@@ -620,13 +632,20 @@ export class MissionRegistry {
       throw new Error('Sealing requires the confirmation statement that was typed.');
     }
 
-    const ratified = this.ratification();
-    if (ratified === null) {
+    const ratification = this.readLatestRatification();
+    if (ratification === null) {
       throw new Error(
         'No ratification is in force — the Creator ratifies with `clue docs ratify` before an ' +
           'epoch can be sealed.',
       );
     }
+    if (ratification.missionVersion !== mission.id) {
+      throw new Error(
+        `Ratification ${ratification.record.event_id} does not cover current mission ${mission.id}. ` +
+          'Run `clue docs ratify` before sealing its epoch.',
+      );
+    }
+    const ratified = ratification.record;
     const { pack, sealSha } = this.verifyPackAgainstSeal('seal the epoch');
     if (
       ratified.seal_sha256 !== sealSha ||

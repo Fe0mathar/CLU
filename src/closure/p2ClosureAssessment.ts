@@ -220,12 +220,19 @@ export function decideP2Closure(
       'Run `clue docs ratify` and type the state-bound phrase.',
     ));
   }
-  if (facts.epochName !== 'P2-authoritative' || !facts.epochCurrent) {
+  const successorEpoch = facts.currentMissionVersionId === null
+    ? null
+    : `P2-authoritative-${facts.currentMissionVersionId}`;
+  const p2EpochName = facts.epochName === 'P2-authoritative' ||
+    (successorEpoch !== null && facts.epochName === successorEpoch);
+  if (!p2EpochName || !facts.epochCurrent) {
     blockers.push(blocker(
       'P2-EPOCH',
       'governance',
       `Latest evidence epoch is ${facts.epochName ?? 'absent'} and current=${String(facts.epochCurrent)}; expected the current P2-authoritative boundary.`,
-      'After ratification, run `clue epoch seal P2-authoritative` and type the state-bound phrase.',
+      'After ratification, seal P2-authoritative if unused. For a successor, seal ' +
+        `${successorEpoch ?? 'P2-authoritative-<current-mission-id>'}` +
+        ' and type the state-bound phrase.',
     ));
   }
 

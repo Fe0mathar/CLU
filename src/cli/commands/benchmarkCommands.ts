@@ -22,7 +22,9 @@
 
 import type { Command } from 'commander';
 
-import { findRepoRoot, loadConfig, withRuntime } from '../../control/runtime.js';
+import {
+  findRepoRoot, loadConfig, rehearseProjectionRebuild, verifyBenchmarkEventChain, withRuntime,
+} from '../../control/runtime.js';
 import {
   performBenchmarkRun,
   recordBenchmarkRun,
@@ -32,6 +34,26 @@ import { printChecks, short, write } from '../output/formatter.js';
 import { guarded as guardedWith } from './shared.js';
 
 const runGuarded = (work: () => number): number => guardedWith(work, write);
+
+function commandVerifyChain(): number {
+  const head = verifyBenchmarkEventChain();
+  if (head === null) {
+    printChecks([{ level: 'fail', label: 'event chain', detail: 'No committed events to verify.' }]);
+    return 1;
+  }
+  printChecks([{
+    level: 'ok',
+    label: 'event chain',
+    detail: `${head.sequence + 1} committed records verified, head ${head.hash}`,
+  }]);
+  return 0;
+}
+
+function commandRebuildProjections(): number {
+  const result = rehearseProjectionRebuild();
+  write(JSON.stringify({ state: 'PROJECTION_REBUILD_VERIFIED', ...result }));
+  return 0;
+}
 
 async function commandBenchmarkRun(options: { contract?: string }): Promise<number> {
   let repoRoot: string;
@@ -127,6 +149,18 @@ async function commandBenchmarkRun(options: { contract?: string }): Promise<numb
 /** Registers the `benchmark` commands. */
 export function registerBenchmarkCommands(program: Command): void {
   const benchmark = program.command('benchmark').description('the Master Benchmark (Execution Model §17–§18)');
+  benchmark
+    .command('verify-chain')
+    .description('verify the workspace event chain without opening a writer')
+    .action(() => {
+      process.exitCode = runGuarded(commandVerifyChain);
+    });
+  benchmark
+    .command('rebuild-projections')
+    .description('verify a disposable projection rebuild against the current workspace')
+    .action(() => {
+      process.exitCode = runGuarded(commandRebuildProjections);
+    });
   benchmark
     .command('run')
     .description('execute the registered Master Benchmark and record the run (ADR-0010)')

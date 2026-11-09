@@ -34,18 +34,18 @@ function writeFile(path: string, content: string): void {
   writeFileSync(path, content, 'utf8');
 }
 
-function writeSelfTargetStick(root: string): string {
+function writeSelfTargetStick(root: string, version = '0.1.0'): string {
   const body = [
     "const candidate = String(context.repoRoot).replace(/\\\\/g,'/').includes('/proof-');",
     'const cost = candidate ? 80 : 100;',
-    "return { benchmarkVersion:'0.1.0', unifiedScore:null,",
+    `return { benchmarkVersion:'${version}', unifiedScore:null,`,
     " measures:[{id:'SIG-COST',name:'cost',scenario:'S1',native_unit:'ms',aggregation:'median',value:cost,samples:[cost],warmup_samples:[]},",
     "           {id:'SIG-GUARD',name:'guard',scenario:'S1',native_unit:'count',aggregation:'exact',value:1,samples:[1],warmup_samples:[]}],",
     " protective:[], environment:context.environment, incomplete:[] };",
   ].join('\n');
   const text = [
     'benchmark_id = clu-master',
-    'benchmark_version = 0.1.0',
+    `benchmark_version = ${version}`,
     'runner_adapter = cli-node',
     'default_warmup_runs = 0',
     'default_repetitions = 1',
@@ -64,6 +64,41 @@ function writeSelfTargetStick(root: string): string {
   writeFile(path, text);
   return path;
 }
+
+test('a candidate cannot replace an offline suite test in the version 0.2.0 benchmark', async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'clue-proof-offline-suite-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const stick = writeSelfTargetStick(root, '0.2.0');
+  const exec = async (): Promise<never> => assert.fail('the refusal must happen before any candidate workload');
+  const opening = await runMasterBenchmark({
+    repoRoot: root, projectRoot: root, workspaceRoot: root, contractPath: stick, execImpl: exec,
+  });
+  assert.ok(opening.ok, opening.ok ? '' : opening.reason);
+  const baseline = captureBaseline({
+    outcome: opening,
+    snapshot_id: SNAPSHOT,
+    mission_version: 'MISSION-SELF-000001',
+    run_artifact: {
+      hash: '8'.repeat(64), bytes: 1, media_type: 'application/json; charset=utf-8',
+      label: 'opening.json', created_at: opening.timing.finished_at,
+    },
+  });
+  const frozen = freezeProofContract({
+    contract: contract(), policy: POLICY, capabilities: ['benchmark:clu-master'],
+  });
+  assert.ok(!('refusals' in frozen));
+  const testPath = 'selftest/recognizer-identity.test.ts';
+  const result = await executeProofPlan({
+    frozen, baseline, patch: [{ op: 'delete', path: testPath }],
+    projectRoot: root, pinnedInputs: captureExactRunInputs(root),
+    shadow: { root: join(root, 'shadow'), persistent: true, install_command: 'npm ci', install_on_lockfile_change: true },
+    scripts: { typecheck: 'npm run typecheck', build: 'npm run build' },
+    benchmarkContractPath: stick, repoRoot: root, execImpl: exec,
+  });
+  assert.deepEqual(result, {
+    ok: false, stage: 'patch', reason: `a proof candidate cannot modify the benchmark instrument: ${testPath}`,
+  });
+});
 
 function contract(): ProofContract {
   return {

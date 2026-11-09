@@ -60,10 +60,13 @@ import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 
 import { canonicalJson, hashBytes, hashText, normalisePath, requireSha256, type Sha256 } from '../../shared/ids.js';
 import {
+  isCompleteCluBenchmarkV020,
   runMasterBenchmark,
   type ExecFn,
   type RunOutcome,
 } from '../../benchmark/benchmarkRunner.js';
+import { readBenchmarkContract } from '../../benchmark/harnessBlock.js';
+import { OFFLINE_SUITE_V1_TESTS } from '../../benchmark/offlineSuiteV1.js';
 import { parseScriptCommand } from '../../analysis/scenarios/scenarioRunner.js';
 import { captureBenchmarkExecutableInputs } from '../../control/benchmarkRun.js';
 import { createRestrictedExecution, requireProofExecutionBoundary } from '../../benchmark/restrictedExecution.js';
@@ -158,6 +161,20 @@ export type ProofExecution =
 
 const LOCKFILE_MARKER = '.clue-shadow-lockfile-sha';
 const LEASE_IDENTITY_MARKER = '.clue-proof-lease.json';
+
+const CLU_V020_INSTRUMENT_PATHS = new Set([
+  'selftest/benchmark-offline-suite-v1.ts',
+  'selftest/project-profile-fixture.ts',
+  ...OFFLINE_SUITE_V1_TESTS.map((name) => `selftest/${name}.ts`),
+  'src/benchmark/offlineSuiteV1.ts',
+  'src/cli/commandAuthority.ts',
+  'src/cli/commands/benchmarkCommands.ts',
+  'src/cli/index.ts',
+  'src/control/projectProfiles/projectProfileStartup.ts',
+  'src/control/runtime.ts',
+  'src/memory/db.ts',
+  'src/memory/eventLog.ts',
+].map(pathKey));
 
 interface PreparedPatch {
   readonly operations: readonly {
@@ -514,6 +531,7 @@ export async function executeProofPlan(deps: ProofExecutionDeps): Promise<ProofE
   const patchDigest = prepared.patch_digest;
   const changeSet = prepared.change_set;
   let benchmarkBytes: Buffer;
+  let requiresCompleteCluBenchmark = false;
   try {
     benchmarkBytes = readFileSync(deps.benchmarkContractPath);
     if (hashBytes(benchmarkBytes) !== deps.baseline.benchmark.contract_sha256) {
@@ -525,6 +543,16 @@ export async function executeProofPlan(deps: ProofExecutionDeps): Promise<ProofE
     if (inside(source, benchmark) &&
         changeSet.some((change) => pathKey(change.path) === benchmarkRelative)) {
       return { ok: false, stage: 'patch', reason: 'a proof candidate cannot modify its benchmark authority' };
+    }
+    const benchmarkContract = readBenchmarkContract(benchmarkBytes.toString('utf8'));
+    requiresCompleteCluBenchmark = !('error' in benchmarkContract) &&
+      benchmarkContract.identity.benchmark_id === 'clu-master' &&
+      benchmarkContract.identity.benchmark_version === '0.2.0';
+    if (requiresCompleteCluBenchmark) {
+      const instrumentChange = changeSet.find((change) => CLU_V020_INSTRUMENT_PATHS.has(pathKey(change.path)));
+      if (instrumentChange !== undefined) {
+        return { ok: false, stage: 'patch', reason: `a proof candidate cannot modify the benchmark instrument: ${instrumentChange.path}` };
+      }
     }
   } catch (error) {
     return { ok: false, stage: 'instrument', reason: (error as Error).message };
@@ -800,6 +828,15 @@ export async function executeProofPlan(deps: ProofExecutionDeps): Promise<ProofE
       }
     } catch (error) {
       return { ok: false, stage: 'instrument', reason: (error as Error).message };
+    }
+
+    if (requiresCompleteCluBenchmark && !isCompleteCluBenchmarkV020(outcome.result)) {
+      return {
+        ok: false,
+        stage: 'instrument',
+        reason: 'the candidate benchmark did not produce all 13 required signals',
+        evidence: outcome.result.incomplete.map(({ id, reason }) => `${id}: ${reason}`),
+      };
     }
 
     const anomalies: string[] = [];

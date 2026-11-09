@@ -95,6 +95,7 @@ import {
 import { randomBytes } from 'node:crypto';
 import { hostname } from 'node:os';
 import { basename, dirname, join } from 'node:path';
+import { StringDecoder } from 'node:string_decoder';
 
 import {
   DurableFsError,
@@ -468,6 +469,16 @@ export class EventLog {
     for (const record of EventLog.readAndVerify(filePath)) {
       head = { sequence: record.sequence, hash: requireSha256(record.hash, 'event hash') };
     }
+    return head;
+  }
+
+  /** Verifies committed records and checks the same durable anchor as a writer open. */
+  public static verifyReadOnly(eventsDir: string): LogHead | null {
+    // Take the checkpoint before reading the chain so an advancing writer cannot
+    // make a newer checkpoint appear to contradict a successfully read prefix.
+    const checkpoint = readCheckpoint(join(eventsDir, 'checkpoint.json'));
+    const head = EventLog.readHead(eventsDir);
+    assertCheckpointConsistent(head, checkpoint);
     return head;
   }
 
@@ -916,6 +927,7 @@ function* readLines(filePath: string): Generator<string> {
   const fd = openSync(filePath, 'r');
   try {
     const buffer = Buffer.alloc(CHUNK_BYTES);
+    const decoder = new StringDecoder('utf8');
     let carry = '';
     let position = 0;
 
@@ -924,7 +936,7 @@ function* readLines(filePath: string): Generator<string> {
       if (read === 0) break;
       position += read;
 
-      const text = carry + buffer.subarray(0, read).toString('utf8');
+      const text = carry + decoder.write(buffer.subarray(0, read));
       const parts = text.split('\n');
       carry = parts.pop() ?? '';
 

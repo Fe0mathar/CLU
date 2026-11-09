@@ -624,7 +624,7 @@ export class ProjectionStore {
    * added by any subsystem is included automatically; the post-clear guard turns any
    * table the clear could not reach into a loud failure rather than silent stale state.
    */
-  public rebuild(log: EventLog): SyncResult {
+  public rebuild(log: Pick<EventLog, 'replay'>): SyncResult {
     return this.inTransaction(() => {
       this.clearAllProjections();
 

@@ -1,13 +1,13 @@
 # Master Benchmark — target `clu`
 
-**Status:** CREATOR-APPROVED — approved 2026-08-13; the §7 gates are accepted without amendment.
+**Status:** DRAFT FOR CREATOR REVIEW — benchmark repair awaiting native validation and ratification.
 **Benchmark id:** `clu-master`
-**Benchmark version:** 0.1.0
-**Parent version:** none — this is the first.
+**Benchmark version:** 0.2.0
+**Parent version:** 0.1.0
 **Runner adapter:** `cli-node` (see §0; the browser-injection adapter is a sibling, not a
 replacement).
 
-> **Read §0 first.** This approved contract follows the field structure of the sealed template
+> **Read §0 first.** This contract follows the field structure of the sealed template
 > `templates/benchmark.template_v9.txt`, which turned out to specify the Master Benchmark
 > far more completely than the session's design record assumed. Nothing here invents a new
 > contract format; it fills in the governed one for a target CLU-E can actually measure
@@ -96,15 +96,22 @@ differ, which would make the timing meaningless.
 **`SCN-003` — screening.** `clue metrics` over the recognized graph.
 *Completion:* the metric record and ranking are stored.
 
-**`SCN-004` — projection rebuild.** A full rebuild from the event log into an empty database.
-*Completion:* every projection table is repopulated and parity holds against the pre-rebuild
-rows. *Invalid when:* parity fails — that is a correctness fault, not a measurement.
+**`SCN-004` — projection rebuild.** `clue benchmark rebuild-projections` replays the verified
+committed event chain into an empty scratch database. It checks normalized Status facts against
+the current projections at the same event head. The timed interval is the scratch replay and
+projection rebuild. The live database, sidecars, log and artifacts are inputs only.
+*Invalid when:* replay, event head or Status fact parity cannot be confirmed.
 
-**`SCN-005` — full-chain log verification.** `clue doctor --deep`.
-*Completion:* the chain verifies to the head.
+**`SCN-005` — full-chain log verification.** `clue benchmark verify-chain` reads and verifies
+every committed event and checks the existing rollback checkpoint. It reports the count and
+head without opening a writer or using provider credentials. The regular `clue doctor --deep` readiness checks remain part of host operations.
 
-**`SCN-006` — the suite.** `npm run selftest`. *Completion:* zero failures.
-*Invalid when:* any test fails — a red suite has no runtime worth comparing.
+**`SCN-006` — offline benchmark suite v1.** The versioned Node entry
+`dist/selftest/benchmark-offline-suite-v1.js` imports an explicit list of offline tests in one
+process. It exercises functional regressions with network access denied. The complete selftest
+suite, including real dashboard HTTP and host integration, remains a separate release gate.
+*Invalid when:* the marker or totals are missing, zero tests pass, or any test fails, is
+cancelled, or is marked todo. Skips are counted and protected by GATE-001.
 
 ## 6. Telemetry — native units, preserved
 
@@ -118,14 +125,14 @@ rows. *Invalid when:* parity fails — that is a correctness fault, not a measur
 | `SIG-006` | incremental recognition wall time | SCN-002 | ms | median of 3 | yes | spread ≤ 15% |
 | `SIG-007` | screening wall time | SCN-003 | ms | median of 3 | yes | spread ≤ 15% |
 | `SIG-008` | metric values stored | SCN-003 | count | exact | yes | **protective** — a drop means coverage was lost |
-| `SIG-009` | projection rebuild wall time | SCN-004 | ms | median of 3 | yes | — |
-| `SIG-010` | full-chain verify wall time | SCN-005 | ms | median of 3 | yes | — |
-| `SIG-011` | suite wall time | SCN-006 | ms | median of 3 | yes | spread ≤ 20% (I/O-bound) |
-| `SIG-012` | tests passing | SCN-006 | count | exact | yes | **protective** |
-| `SIG-013` | tests skipped | SCN-006 | count | exact | yes | **protective** — skips must not grow silently |
+| `SIG-009` | scratch projection rebuild time | SCN-004 | ms | median of 3 | yes | spread ≤ 15% |
+| `SIG-010` | full-chain verify wall time | SCN-005 | ms | median of 3 | yes | spread ≤ 15% |
+| `SIG-011` | offline suite wall time | SCN-006 | ms | median of 3 | yes | spread ≤ 20% (I/O-bound) |
+| `SIG-012` | offline tests passing | SCN-006 | count | exact | yes | **protective** |
+| `SIG-013` | offline tests skipped | SCN-006 | count | exact | yes | **protective** — skips must not grow silently |
 
-*Observed at drafting, for orientation only — not thresholds:* SIG-003 ≈ 6294, SIG-004 ≈
-30687, SIG-005 ≈ 473, SIG-008 ≈ 42917, SIG-011 ≈ 75–125 s, SIG-012 = 497, SIG-013 = 5.
+Record a fresh opening baseline under this version. The earlier suite timing and counts do not
+describe the fixed offline suite.
 
 ## 7. Gates — deterministic, never inferred
 
@@ -163,10 +170,10 @@ is a legitimate and common honest outcome.
 
 ## 9. Comparability
 
-`compatibility_class` **fully-comparable** within version 0.1.x. Stable ids: all `SCN-*` and
-`SIG-*` above. Any change to a scenario's action or a signal's aggregation is a **minor**
-version bump and marks the affected ids `partially-comparable` with a note; renaming or
-retiring an id is a **major** bump. Trends may never cross a major boundary silently.
+`compatibility_class` **partially-comparable** with 0.1.0. SCN-001 through SCN-003 and SIG-001
+through SIG-008 retain their definitions. SCN-004 through SCN-006 and SIG-009 through SIG-013
+change execution or scope and require a new baseline. Stable ids are retained. Compare proof
+runs only when the full contract identity, input basis and environment match.
 
 ## 10. Coverage and blind spots
 
@@ -183,10 +190,12 @@ because omitting uncertainty is the one thing this system may not do:
 
 ## 11. Governance
 
-`change_rationale` — first version; it exists so a cycle can close against something.
+`change_rationale` — preserve the live projection database during measurement and make
+chain verification and the regression suite executable inside the qualified offline boundary.
 `critic_review_required` **true** for any version that changes a gate.
-`information_gain_validation` — a new version must show that it either measures something no
-prior version measured, or measures the same thing with less variance.
+`information_gain_validation` — the Windows rehearsal of 0.1.0 collected 9 of 13 signals.
+Validate that this revision can collect all 13 in a disposable Windows workspace, then run
+the full registered measurement policy on a fresh governed opening baseline.
 `execution_cost_budget` — 90 minutes wall time; a run exceeding it is `incomplete`, not slow.
 
 ## 11a. Harness
@@ -195,7 +204,8 @@ ADR-0010 (accepted 2026-08-11): the harness lives here, in this document, so tha
 how something is measured cannot slip past the version that governs comparability. The block
 below follows the template's `[section.<id>]` convention; the runner extracts the fenced body,
 checks its `integrity` hash, syntax-checks it, and refuses rather than scoring on a body that
-does not parse.
+does not parse. The body hash identifies the exact draft for rehearsal. Creator approval
+and mission registration are separate from the integrity check.
 
 **Execution contract.** The body is executed as an async JavaScript function of one argument,
 `context`, supplied by `src/benchmark/benchmarkRunner.ts`. Everything the harness touches
@@ -217,30 +227,24 @@ whose scenario went invalid lands there rather than depressing the score. `unifi
 `null` when no `baseline` was supplied: a run with no opening to compare against states the
 absence rather than fabricating the 1.0 that "indistinguishable" would claim.
 
-**Two operational bindings, stated.** SCN-001/002's "recorded result hash" is the graph
-pointer's `resultHash` (`<workspace>/graph/current.json`, the durable result identity of
-Navigator §14.5), which is why both scenarios run with `--navigator` — the stream is a
-declared artifact of SCN-001 in any case. SCN-004's rebuild is `clue init` — doctor's own
-named resynchronise path — after the database is moved aside; parity is judged over pre/post
-status exports with the observation stamps (`freshness`,
-`capturedAt`, `checkedAt`) and header volatiles normalized out,
-because every branch timestamps its observation and `status diff` therefore compares moments,
-not facts (measured 2026-08-11).
+**Operational bindings.** SCN-001 and SCN-002 compare the durable graph pointer's
+`resultHash` (`<workspace>/graph/current.json`). Both generate the Navigator stream.
+SCN-004 accepts the verified scratch rebuild receipt and uses the internal elapsed time.
+SCN-005 accepts a successful committed-chain count and head. SCN-006 accepts the offline
+suite v1 marker and complete TAP totals.
 
 The `integrity` value below is the sha256 of the fenced body in canonical form (CR-stripped
 lines, LF-joined, no trailing newline — `canonicalHarnessBody()` in `harnessBlock.ts` is the
-executable definition). It was computed at drafting over exactly this body; approval of this
-version blesses it as recorded, and any amendment to the body re-records it as part of the
-same edit.
+executable definition). It identifies the exact body under review.
 
 ```
 [harness.HRN-001]
 runner_adapter  = cli-node
 scenario_ids    = SCN-001,SCN-002,SCN-003,SCN-004,SCN-005,SCN-006
 language        = javascript
-integrity       = dca5e050c3b7facee8297e3318902ef6f6adb16f9cef58b7f2e9ae1bb22fee93
+integrity       = 14eb2aa15973cec47a2bc31b6ebe06ec0f091f08b8b59f8a8203d4afc47795a7
 --- begin harness ---
-// Master Benchmark harness — target `clu`, adapter `cli-node`, benchmark_version 0.1.0.
+// Master Benchmark harness — target `clu`, adapter `cli-node`, benchmark_version 0.2.0.
 // Executed by benchmarkRunner.ts as an async function body: (context) => result.
 // Everything the body touches arrives through `context`; it opens no file and spawns no
 // process except through context.exec, so the runner owns timeouts, cwd, and the clock.
@@ -249,7 +253,6 @@ integrity       = dca5e050c3b7facee8297e3318902ef6f6adb16f9cef58b7f2e9ae1bb22fee
 //   repoRoot        absolute path of the target repository (cwd of every exec)
 //   workspaceRoot   absolute path of the CLU-E workspace for this target
 //   cliArgv         argv prefix invoking the clue CLI          e.g. ['node','<dist>/cli/index.js']
-//   npmArgv         argv prefix invoking npm, platform-resolved e.g. ['npm'] / ['npm.cmd']
 //   nodeArgv        argv prefix invoking node                   e.g. ['node']
 //   exec(argv,opts) -> Promise<{code,stdout,stderr,wallMs,timedOut}>; opts:{timeoutSeconds?}
 //   baseline        opening run's measures[] (same shape as returned), or null
@@ -261,7 +264,7 @@ integrity       = dca5e050c3b7facee8297e3318902ef6f6adb16f9cef58b7f2e9ae1bb22fee
 // Result shape (the contract's, §11a prose defines the fields):
 //   { benchmarkVersion, unifiedScore, measures[], protective[], environment, incomplete[] }
 
-const BENCHMARK_VERSION = '0.1.0';
+const BENCHMARK_VERSION = '0.2.0';
 const PROTECTIVE_IDS = ['SIG-005', 'SIG-008', 'SIG-012', 'SIG-013'];
 const SCORE_IDS = ['SIG-001', 'SIG-006', 'SIG-007', 'SIG-009', 'SIG-010', 'SIG-011'];
 
@@ -445,75 +448,52 @@ log('SCN-003 screening');
   }
 }
 
-/* SCN-004 — projection rebuild from the event log into an empty database. The database is
- * moved aside (an empty database is exactly what an absent file opens as), `clue init` is
- * the rebuild — doctor's own advice for stale projections — and parity against the
- * pre-rebuild rows is judged by `clue status diff`, the purpose-built comparator that
- * ignores header timestamps and seals. */
+/* SCN-004 — replay into a disposable database and verify Status facts. */
 log('SCN-004 projection rebuild');
 {
-  const tmp = context.workspaceRoot + '/benchmark-tmp';
-  const db = context.workspaceRoot + '/db/clue.db';
-  const shelve =
-    'const fs=require("fs");' +
-    'fs.renameSync(' + JSON.stringify(db) + ',' + JSON.stringify(tmp) + '+"/clue.db.pre-rebuild");' +
-    'for(const s of ["-wal","-shm"]){try{fs.unlinkSync(' + JSON.stringify(db) + '+s)}catch{}}';
-  const cleanup =
-    'const fs=require("fs");fs.rmSync(' + JSON.stringify(tmp) + ',{recursive:true,force:true});';
   const out = await timed(
     async () => {
-      // status export refuses a missing parent directory (measured on 2026-08-11), so the
-      // tmp dir exists before the first export rather than being an accident of shelving.
-      const prep = await context.exec([...context.nodeArgv, '-e',
-        'require("fs").mkdirSync(' + JSON.stringify(tmp) + ',{recursive:true})']);
-      if (prep.code !== 0) return { ...prep, phase: 'prepare' };
-      const pre = await clue(['status', 'export', tmp + '/status-pre.json'], 600);
-      if (pre.code !== 0) return { ...pre, phase: 'status-pre' };
-      const shelved = await context.exec([...context.nodeArgv, '-e', shelve]);
-      if (shelved.code !== 0) return { ...shelved, phase: 'shelve' };
-      const rebuild = await clue(['init'], 1800);
-      if (rebuild.code !== 0) return { ...rebuild, phase: 'rebuild' };
-      const post = await clue(['status', 'export', tmp + '/status-post.json'], 600);
-      if (post.code !== 0) return { ...post, phase: 'status-post' };
-      // Parity oracle (measured 2026-08-11): every status branch carries a freshness stamp,
-      // so  can never report identical across two exports. Fact parity strips
-      // the volatile fields and compares what the projections actually assert.
-      const compare = 'const fs=require("fs");' +
-        'const strip=(v)=>{if(Array.isArray(v))return v.map(strip);' +
-        'if(v&&typeof v==="object"){const o={};for(const k of Object.keys(v)){' +
-        'if(k==="freshness"||k==="observedAt"||k==="ageMs"||k==="capturedAt"||k==="checkedAt"||k==="generatedAt"||k==="seal"||k==="sources"||k==="capability")continue;' +
-        'o[k]=strip(v[k]);}return o;}return v;};' +
-        'const a=strip(JSON.parse(fs.readFileSync(process.argv[1],"utf8")));' +
-        'const b=strip(JSON.parse(fs.readFileSync(process.argv[2],"utf8")));' +
-        'const ka=JSON.stringify(a),kb=JSON.stringify(b);' +
-        'if(ka===kb){console.log("PARITY-OK");process.exit(0);}' +
-        'for(const k of Object.keys(a)){if(JSON.stringify(a[k])!==JSON.stringify(b[k])){console.log("DIFFERS:"+k);process.exit(1);}}' +
-        'console.log("DIFFERS:key-set");process.exit(1);';
-      const diff = await context.exec([...context.nodeArgv, '-e', compare,
-        tmp + '/status-pre.json', tmp + '/status-post.json']);
-      return { ...rebuild, phase: 'done', diffStdout: diff.stdout, diffCode: diff.code };
+      const run = await clue(['benchmark', 'rebuild-projections'], 1800);
+      let receipt;
+      try { receipt = JSON.parse(run.stdout); } catch { /* Report invalid output below. */ }
+      return { ...run, receipt };
     },
     async (run) => {
-      if (run.phase !== 'done') return 'SCN-004 ' + run.phase + ': exited ' + run.code + ' — ' + (run.stderr || '').trim().slice(0, 200);
-      if (run.diffCode !== 0 || !/PARITY-OK/.test(run.diffStdout)) {
-        return 'SCN-004: fact parity failed (' + (run.diffStdout || '').trim().slice(0, 60) + ') — a correctness fault, not a measurement';
+      if (run.timedOut) return 'SCN-004: projection rebuild timed out';
+      if (run.code !== 0) return 'SCN-004: rebuild exited ' + run.code + ' — ' +
+        (run.stdout.trim() || run.stderr.trim()).slice(0, 200);
+      const receipt = run.receipt;
+      if (receipt?.state !== 'PROJECTION_REBUILD_VERIFIED' ||
+          !Number.isSafeInteger(receipt.eventCount) || receipt.eventCount <= 0 ||
+          !/^[a-f0-9]{64}$/.test(receipt.eventHead) || !/^[a-f0-9]{64}$/.test(receipt.factsDigest) ||
+          !Number.isFinite(receipt.elapsedMs) || receipt.elapsedMs <= 0 || receipt.elapsedMs > run.wallMs) {
+        return 'SCN-004: scratch rebuild receipt or Status fact parity was unverified';
       }
       return null;
     },
   );
-  await context.exec([...context.nodeArgv, '-e', cleanup]);
   if ('invalid' in out) miss('SIG-009', out.invalid);
-  else timing('SIG-009', 'projection rebuild wall time', 'SCN-004', out, 0.15);
+  else {
+    const rebuildTime = (run) => ({ ...run, wallMs: run.receipt.elapsedMs });
+    timing('SIG-009', 'scratch projection rebuild time', 'SCN-004', {
+      runs: out.runs.map(rebuildTime), warmups: out.warmups.map(rebuildTime),
+    }, 0.15);
+  }
 }
 
-/* SCN-005 — full-chain log verification. */
+/* SCN-005 — measure full committed-chain verification without a provider or writer. */
 log('SCN-005 full-chain verification');
 {
   const out = await timed(
-    () => clue(['doctor', '--deep'], 1800),
+    () => clue(['benchmark', 'verify-chain'], 1800),
     async (run) => {
-      if (run.timedOut) return 'SCN-005: doctor --deep timed out';
-      if (run.code !== 0) return 'SCN-005: `clue doctor --deep` exited ' + run.code + ' — the chain did not verify';
+      if (run.timedOut) return 'SCN-005: full-chain verification timed out';
+      if (run.code !== 0) return 'SCN-005: verify-chain exited ' + run.code + ' — ' +
+        (run.stdout.trim() || run.stderr.trim()).slice(0, 200);
+      const receipt = checkDetail(run.stdout, 'event chain');
+      if (!/^[1-9]\d* committed records verified, head [a-f0-9]{64}$/.test(receipt ?? '')) {
+        return 'SCN-005: committed-chain verification receipt was unverified';
+      }
       return null;
     },
   );
@@ -521,28 +501,40 @@ log('SCN-005 full-chain verification');
   else timing('SIG-010', 'full-chain verify wall time', 'SCN-005', out, 0.15);
 }
 
-/* SCN-006 — the suite. A red or incomplete suite cannot supply proof measurements. */
-log('SCN-006 the suite');
+/* SCN-006 — fixed offline suite with a version marker and complete TAP totals. */
+log('SCN-006 offline benchmark suite');
 {
-  const summary = (run, label) => leadingInt(new RegExp('^# ' + label + ' (\\d+)', 'm').exec(run.stdout)?.[1] ?? null);
+  const summary = (run, label) => {
+    const matches = [...run.stdout.matchAll(new RegExp('^# ' + label + ' (\\d+)[ \\t]*\\r?$', 'gm'))];
+    if (matches.length !== 1) return null;
+    const value = Number(matches[0][1]);
+    return Number.isSafeInteger(value) ? value : null;
+  };
   const passCount = (run) => summary(run, 'pass');
   const skipCount = (run) => summary(run, 'skipped');
   const out = await timed(
-    () => context.exec([...context.npmArgv, 'run', 'selftest'], { timeoutSeconds: 1800 }),
+    () => context.exec([...context.nodeArgv, 'dist/selftest/benchmark-offline-suite-v1.js'], { timeoutSeconds: 1800 }),
     async (run) => {
-      if (run.timedOut) return 'SCN-006: the suite timed out';
-      const fail = summary(run, 'fail');
-      if (passCount(run) === null || skipCount(run) === null || fail === null) return 'SCN-006: the suite summary was unreadable';
-      if (fail > 0 || run.code !== 0) return 'SCN-006: ' + fail + ' test(s) failed — a red suite has no runtime worth comparing';
+      if (run.timedOut) return 'SCN-006: the offline suite timed out';
+      if (run.code !== 0) return 'SCN-006: the offline suite exited ' + run.code + ' — ' +
+        (run.stderr.trim() || 'failed tests: ' + String(summary(run, 'fail'))).slice(0, 200);
+      if (!/^CLU-E_OFFLINE_SUITE_V1\r?$/m.test(run.stdout)) return 'SCN-006: offline suite version was unverified';
+      const pass = passCount(run);
+      const skip = skipCount(run);
+      const tests = summary(run, 'tests');
+      if (pass === null || pass === 0 || skip === null || tests !== pass + skip ||
+          summary(run, 'fail') !== 0 || summary(run, 'cancelled') !== 0 || summary(run, 'todo') !== 0) {
+        return 'SCN-006: offline suite summary was incomplete, unreadable or red';
+      }
       return null;
     },
   );
   if ('invalid' in out) {
     for (const id of ['SIG-011', 'SIG-012', 'SIG-013']) miss(id, out.invalid);
   } else {
-    timing('SIG-011', 'suite wall time', 'SCN-006', out, 0.2);
-    exactCount('SIG-012', 'tests passing', 'SCN-006', out, passCount);
-    exactCount('SIG-013', 'tests skipped', 'SCN-006', out, skipCount);
+    timing('SIG-011', 'offline suite wall time', 'SCN-006', out, 0.2);
+    exactCount('SIG-012', 'offline tests passing', 'SCN-006', out, passCount);
+    exactCount('SIG-013', 'offline tests skipped', 'SCN-006', out, skipCount);
   }
 }
 
@@ -584,14 +576,10 @@ return {
 --- end harness ---
 ```
 
-## 12. Creator approval record
+## 12. Creator review and registration
 
-1. **Governance:** Creator-approved on 2026-08-13. The five §7 gates and their thresholds are
-   accepted as written. No scenario, signal, gate, execution policy, or harness body was
-   amended during approval.
-2. **Adapter split:** confirmed — `cli-node` governs `clu`; `browser-injection` belongs to
-   Murugan when that target is registered.
-3. **Registration:** the active profile registers this contract as
-   `inputs.benchmark: targets/clu/benchmark/master-benchmark.md` — one path, one hash, one
-   identity (ADR-0010). The harness is §11a of this file, not a second artifact. A governed
-   installation must register a successor mission after applying this approval revision.
+Version 0.1.0 was Creator-approved on 2026-08-13. Its evidence remains bound to that
+version. Version 0.2.0 preserves the five gate rules and changes the three scenarios
+identified in §9. This draft needs Windows validation, Creator approval and a successor
+mission before it can govern proof. The registered path remains
+`targets/clu/benchmark/master-benchmark.md`.
