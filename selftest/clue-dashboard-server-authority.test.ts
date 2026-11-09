@@ -15,6 +15,7 @@ import {
   mkdirSync,
   mkdtempSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import {
@@ -342,6 +343,10 @@ test('DEV-P1-15: non-loopback exposure is refused before listen unless a real to
     }),
     /Refusing to bind.*non-loopback.*authentication/i,
   );
+  await assert.rejects(
+    startClueDashboard({} as Runtime, { operator: 'selftest', host: '127.attacker.example', port }),
+    /Refusing to bind.*non-loopback.*authentication/i,
+  );
 });
 
 test('DEV-P2-04: /api/config exposes the explicit local-only publication decision without a secret value', async () => {
@@ -572,6 +577,7 @@ test('DEV-P1-15: a timed-out pipeline records one phase receipt and can be start
 
         const duplicate = await request(port, '/api/control/start', { method: 'POST' });
         assert.equal(duplicate.status, 409);
+        assert.equal((JSON.parse(duplicate.body) as { code: string }).code, 'RUN_IN_PROGRESS');
 
         const timedOut = await waitForRunState(port, 'timeout');
         assert.equal(timedOut['phase'], null);
@@ -580,14 +586,110 @@ test('DEV-P1-15: a timed-out pipeline records one phase receipt and can be start
         assert.ok(Array.isArray(receipts));
         assert.equal(receipts.length, 1);
         const first = receipts[0] as Record<string, unknown>;
-        assert.equal(first['phase'], 'snapshot');
+        assert.equal(first['phase'], 'cycle');
         assert.equal(first['timedOut'], true);
 
         const restarted = await request(port, '/api/control/start', { method: 'POST' });
         assert.equal(restarted.status, 202, restarted.body);
-        await waitForRunState(port, 'timeout');
+        const secondTimeout = await waitForRunState(port, 'timeout');
+        assert.ok(Array.isArray(secondTimeout['receipts']));
+        assert.equal(secondTimeout['receipts'].length, 1, 'receipts are scoped to this start');
       },
     );
+  } finally {
+    rmSync(root, { recursive: true, force: true, maxRetries: 3 });
+  }
+});
+
+test('dashboard START dispatches the governed cycle with Navigator and no inherited OpenAI key', async () => {
+  const root = makeRepo(`
+console.log(JSON.stringify({ args: process.argv.slice(2), credential: !!process.env.OPENAI_API_KEY }));
+`);
+  const previousKey = process.env['OPENAI_API_KEY'];
+  process.env['OPENAI_API_KEY'] = 'test-credential-sentinel';
+  try {
+    await withServer(root, {}, async ({ port }) => {
+      const started = await request(port, '/api/control/start', { method: 'POST' });
+      assert.equal(started.status, 202, started.body);
+      const completed = await waitForRunState(port, 'completed');
+      const detail = JSON.parse(String(completed['lastLine'])) as { args: string[]; credential: boolean };
+      assert.deepEqual(detail.args.slice(0, 4), ['cycle', 'drive', '--navigator', '--expect-runtime']);
+      assert.match(detail.args[4] ?? '', /^[a-f0-9]{64}$/u);
+      assert.equal(detail.credential, false);
+    });
+  } finally {
+    if (previousKey === undefined) delete process.env['OPENAI_API_KEY'];
+    else process.env['OPENAI_API_KEY'] = previousKey;
+    rmSync(root, { recursive: true, force: true, maxRetries: 3 });
+  }
+});
+
+test('dashboard ephemeral port serves sealed gateway and cycle facts from the Status contract', async () => {
+  const root = makeRepo();
+  try {
+    await withRuntimeAsync({ withLog: false, readOnly: true, repoRoot: root }, async (runtime) => {
+      const handle = await startClueDashboard(runtime, { operator: 'selftest', port: 0 });
+      try {
+        const port = Number(new URL(handle.url).port);
+        assert.ok(port > 0);
+        const [frameResponse, statusResponse] = await Promise.all([
+          request(port, '/api/frame'),
+          request(port, '/api/status/current'),
+        ]);
+        assert.equal(frameResponse.status, 200, frameResponse.body);
+        assert.equal(statusResponse.status, 200, statusResponse.body);
+        const { snapshot: { dashboard } } = JSON.parse(frameResponse.body) as {
+          snapshot: { dashboard: Record<string, unknown> };
+        };
+        const status = JSON.parse(statusResponse.body) as Record<string, Record<string, unknown>>;
+        for (const branch of ['aiOrchestration', 'cycle']) {
+          assert.ok(status[branch]);
+          const { freshness: _freshness, ...facts } = status[branch];
+          assert.deepEqual(dashboard[branch], facts);
+        }
+      } finally {
+        await handle.stop();
+      }
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true, maxRetries: 3 });
+  }
+});
+
+test('dashboard assets reject encoded traversal and links outside the static root', async () => {
+  const root = makeRepo();
+  try {
+    const staticRoot = join(root, 'ui', 'clue-dashboard');
+    const outside = join(root, 'private');
+    mkdirSync(staticRoot, { recursive: true });
+    mkdirSync(outside);
+    writeFileSync(join(staticRoot, 'index.html'), '<h1>Dashboard</h1>', 'utf8');
+    writeFileSync(join(outside, 'private.txt'), 'unpublished host state', 'utf8');
+    symlinkSync(outside, join(staticRoot, 'external'), 'junction');
+
+    await withServer(root, {}, async ({ port }) => {
+      assert.equal((await request(port, '/')).status, 200);
+      const head = await request(port, '/', { method: 'HEAD' });
+      assert.equal(head.status, 200);
+      assert.equal(head.body, '');
+      assert.equal((await request(port, '/ui/..%2f..%2fprivate%2fprivate.txt')).status, 403);
+      assert.equal((await request(port, '/ui/external/private.txt')).status, 403);
+      assert.equal((await request(port, '/ui/%zz')).status, 400);
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true, maxRetries: 3 });
+  }
+});
+
+test('dashboard reports an occupied port while the existing listener stays usable', async () => {
+  const root = makeRepo();
+  try {
+    await withServer(root, {}, async ({ runtime, port }) => {
+      await assert.rejects(startClueDashboard(runtime, { operator: 'selftest', port }), {
+        code: 'EADDRINUSE',
+      });
+      assert.equal((await request(port, '/api/frame')).status, 200);
+    });
   } finally {
     rmSync(root, { recursive: true, force: true, maxRetries: 3 });
   }
@@ -671,6 +773,50 @@ test('ADR-0017: dashboard Git sync is a manual fail-closed action under NO_REMOT
   }
 });
 
+test('dashboard readiness requires an explicit same-origin bounded JSON canary', async () => {
+  const root = makeRepo();
+  try {
+    await withServer(root, {}, async ({ port }) => {
+      const path = '/api/control/readiness';
+      const headers = { 'Content-Type': 'application/json', Origin: `http://127.0.0.1:${String(port)}` };
+      const allowed = await request(port, path, { method: 'POST', headers, body: '{"capability":"git"}' });
+      assert.equal(allowed.status, 200, allowed.body);
+      assert.equal(allowed.headers['cache-control'], 'no-store');
+      const result = JSON.parse(allowed.body) as Record<string, unknown>;
+      assert.equal(result['state'], 'pending', 'local-only configuration never proves remote Git auth');
+      const ai = await request(port, path, { method: 'POST', headers, body: '{"capability":"ai"}' });
+      assert.equal(ai.status, 200, ai.body);
+      assert.equal(JSON.parse(ai.body)['state'], 'pending', 'disabled AI is pending without contacting a provider');
+      const foreign = await request(port, path, { method: 'POST', headers: { ...headers, Origin: 'https://evil.invalid' }, body: '{"capability":"git"}' });
+      assert.equal(foreign.status, 403);
+      const invalid = await request(port, path, { method: 'POST', headers, body: '{"capability":"console","command":"whoami"}' });
+      assert.equal(invalid.status, 400);
+      const oversized = await request(port, path, { method: 'POST', headers, body: ' '.repeat(513) });
+      assert.equal(oversized.status, 413);
+      const wrongMedia = await request(port, path, { method: 'POST', body: '{"capability":"git"}' });
+      assert.equal(wrongMedia.status, 415);
+    });
+    await withServer(root, {}, async ({ port }) => {
+      const remembered = await request(port, '/api/control/readiness');
+      assert.equal(remembered.status, 200);
+      const { receipts } = JSON.parse(remembered.body);
+      for (const capability of ['ai', 'git']) {
+        assert.equal(receipts[capability]?.state, 'pending');
+        assert.deepEqual(Object.keys(receipts[capability]), ['state', 'checkedAt']);
+      }
+      const key = await request(port, '/api/control/legacy-openai-key');
+      assert.equal(key.status, 200);
+      assert.deepEqual(Object.keys(JSON.parse(key.body)), ['state', 'detail']);
+      const attemptedSecret = await request(port, '/api/control/legacy-openai-key', {
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'Content-Length': '2' }, body: '{}',
+      });
+      assert.equal(attemptedSecret.status, 400);
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true, maxRetries: 3 });
+  }
+});
+
 test('Q1 SURF/DIVE: Navigator tail detects truncate-and-regrow even when the replacement exceeds the old offset', async () => {
   const root = makeRepo();
   try {
@@ -738,6 +884,39 @@ test('Q1 SURF/DIVE: Navigator tail detects truncate-and-regrow even when the rep
       assert.equal(delivered[0]?.type, 'navigator.reset');
       assert.deepEqual(delivered.slice(0, 6).map((event) => event.type), newTypes.slice(0, 6));
       assert.deepEqual(delivered.map((event) => event.sequence), newRecords.map((_, index) => index));
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true, maxRetries: 3 });
+  }
+});
+
+test('Q4 Master Agent requires same-origin bounded JSON and refuses malformed input', async () => {
+  const root = makeRepo();
+  try {
+    await withServer(root, {}, async ({ port }) => {
+      const headers = { 'content-type': 'application/json' };
+      const body = JSON.stringify({ message: 'Start CLU-E.' });
+      const crossOrigin = await request(port, '/api/control/agent', {
+        method: 'POST', headers: { ...headers, Origin: 'https://attacker.invalid' }, body,
+      });
+      assert.equal(crossOrigin.status, 403);
+      const wrongType = await request(port, '/api/control/agent', { method: 'POST', body });
+      assert.equal(wrongType.status, 415);
+      const malformed = await request(port, '/api/control/agent', {
+        method: 'POST', headers, body: '{',
+      });
+      assert.equal(malformed.status, 400);
+      assert.equal(malformed.headers['cache-control'], 'no-store');
+      const invalid = await request(port, '/api/control/agent', {
+        method: 'POST', headers, body: JSON.stringify({ message: 'Start CLU-E.', action: 'start' }),
+      });
+      assert.equal(invalid.status, 400);
+      const tooBig = await request(port, '/api/control/agent', {
+        method: 'POST', headers, body: JSON.stringify({ message: 'x'.repeat(33 * 1024) }),
+      });
+      assert.equal(tooBig.status, 413);
+      const run = await request(port, '/api/run');
+      assert.equal((JSON.parse(run.body) as { state: string }).state, 'idle');
     });
   } finally {
     rmSync(root, { recursive: true, force: true, maxRetries: 3 });

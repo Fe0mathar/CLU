@@ -28,6 +28,7 @@ import type { RecognitionResult } from '../src/analysis/source/recognizer.js';
 
 interface Stack {
   readonly root: string;
+  readonly projections: ProjectionStore;
   readonly snapshots: SnapshotRegistry;
   readonly graph: GraphRegistry;
   readonly cache: ScanCache;
@@ -46,6 +47,7 @@ function openStack(): Stack {
   const missionVersion = (): string => 'MISSION-000001';
   return {
     root,
+    projections,
     snapshots: new SnapshotRegistry({ log, projections, artifacts, missionVersion }),
     graph: new GraphRegistry({ log, projections, artifacts, missionVersion }),
     cache: new ScanCache({ log, projections, artifacts, missionVersion }),
@@ -176,6 +178,30 @@ test('the incremental run records durable merge provenance', () => {
   }
 });
 
+test('cache reuse requires a readable prior artifact and the same toolchain basis', () => {
+  const s = openStack();
+  try {
+    writeTree(s.root, TREE_T0);
+    const base = s.snapshots.capture(capOpts(s.root));
+    const initial = recognize(recOpts(s.root, { snapshotId: base.record.id }));
+    s.graph.record(base.record.id, initial);
+    writeTree(s.root, TREE_T);
+    const next = s.snapshots.capture(capOpts(s.root));
+    const diff = diffSnapshots(base.manifest, next.manifest);
+    const options = { compilerOptionsHash: initial.compilerOptionsHash, currentBasis: initial.basis };
+    assert.equal(s.cache.plan(diff, options).fullRescan, false);
+    assert.equal(s.cache.plan(diff, {
+      ...options,
+      currentBasis: { ...initial.basis, lockfileHash: 'b'.repeat(64) },
+    }).fullRescanReason, 'recognition-configuration-changed');
+    s.projections.db.prepare('UPDATE recognitions SET artifact_hash = ? WHERE snapshot_id = ?')
+      .run('c'.repeat(64), base.record.id);
+    assert.equal(s.cache.plan(diff, options).fullRescanReason, 'previous-artifact-unavailable');
+  } finally {
+    s.dispose();
+  }
+});
+
 test('DEV-P0-04: the merged result declares a full extraction scope with a consistent, recomputed basis hash', () => {
   const s = runScenario();
   try {
@@ -201,11 +227,20 @@ test('DEV-P0-04: the full-oracle parity gate accepts an incremental run that equ
   const s = runScenario();
   try {
     // In the ordinary case the merged graph IS the full graph, so the gate lets the incremental through.
-    const probe = recognize(recOpts(s.incStack.root, { snapshotId: s.toSnapshot }));
+    const probe = recognize(recOpts(s.incStack.root, {
+      snapshotId: s.toSnapshot,
+      captureId: s.merge.result.basis.captureId,
+    }));
     assert.equal(
       incrementalMatchesOracle(s.merge, probe),
       true,
       'a correct incremental merge matches the full-scan oracle and is accepted',
+    );
+    const changedBasis = { ...probe.basis, lockfileHash: 'a'.repeat(64) };
+    assert.equal(
+      incrementalMatchesOracle(s.merge, { ...probe, basis: changedBasis, basisHash: hashCanonicalJson(changedBasis) }),
+      false,
+      'identical graph content cannot substitute for matching compiler provenance',
     );
   } finally {
     s.incStack.dispose();

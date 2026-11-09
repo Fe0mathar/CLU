@@ -67,7 +67,12 @@ import {
   type GreatBookImprovementFieldView,
 } from './greatBookImprovementField.js';
 import { emptyOperationalConsoleProjection } from '../observability/operationalConsole/projection.js';
-import { isBranchUnavailable, type StatusSnapshot } from '../status/statusContractV5.js';
+import {
+  consoleAiOrchestrationSchema,
+  consoleCycleSchema,
+  isBranchUnavailable,
+  type StatusSnapshot,
+} from '../status/statusContractV5.js';
 import type { OperationalConsoleProjection } from '../observability/operationalConsole/contract.js';
 
 /* ------------------------------------------------------------------------- */
@@ -546,6 +551,12 @@ export function projectConsoleSnapshot(input: ProjectorInput): ConsoleSnapshot {
       },
     },
     sessions: EMPTY_SESSIONS,
+    ...(input.status.aiOrchestration === undefined
+      ? {}
+      : { aiOrchestration: consoleAiOrchestrationSchema.parse(withoutFreshness(input.status.aiOrchestration)) }),
+    ...(input.status.cycle === undefined
+      ? {}
+      : { cycle: consoleCycleSchema.parse(withoutFreshness(input.status.cycle)) }),
     recognition,
     progress: {
       recognition: input.recognition === null ? 0 : 100,
@@ -685,4 +696,9 @@ export function projectConsoleSnapshot(input: ProjectorInput): ConsoleSnapshot {
   // Validate against the strict runtime schema before returning: a projector that emits an
   // invalid snapshot is a defect, and it must fail here rather than in a renderer.
   return parseConsoleSnapshot({ seal, ...sealedBody });
+}
+
+function withoutFreshness<T extends object>(branch: T): Omit<T, 'freshness'> {
+  const { freshness: _freshness, ...facts } = branch as T & { freshness?: unknown };
+  return facts;
 }

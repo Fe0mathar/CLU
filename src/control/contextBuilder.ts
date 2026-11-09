@@ -63,10 +63,11 @@
  * rather than papered over, and belongs in the founding documents to resolve properly.
  */
 
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { lstatSync, readFileSync, realpathSync } from 'node:fs';
+import { join, relative } from 'node:path';
 
-import { hashBytes, hashCanonicalJson } from '../shared/ids.js';
+import { hashBytes, hashCanonicalJson, normalisePath } from '../shared/ids.js';
+import { relativePathSchema } from '../shared/schemas.js';
 import {
   EvidenceChainError,
   requireSpineHash,
@@ -80,6 +81,7 @@ import {
 import type { ClaimRecord, ClaimRegistry } from '../analysis/documents/claimRegistry.js';
 import type { GraphRegistry, UnitClassification } from '../analysis/source/graph.js';
 import type { SnapshotRegistry } from '../analysis/source/snapshot.js';
+import { decodeSourceByteRange, sourceTextLayout } from '../analysis/source/sourceEncoding.js';
 import type { MissionRegistry } from './mission.js';
 import {
   estimateTokens,
@@ -1047,27 +1049,39 @@ export class ContextBuilder {
     startByte: number,
     endByte: number,
   ): { text: string; fileHash: string } | null {
-    if (this.snapshots === null) return null;
+    if (
+      this.snapshots === null ||
+      !relativePathSchema.safeParse(modulePath).success ||
+      modulePath.includes('\\') ||
+      modulePath.split('/').some((segment) => segment === '..' || segment === '.' || segment === '')
+    ) {
+      return null;
+    }
 
     const expected = this.snapshots
       .files(snapshotId)
       .find((file) => file.path === modulePath);
     if (expected === undefined) return null;
 
-    let bytes: Buffer;
     try {
-      bytes = readFileSync(join(this.projectRoot, modulePath));
+      if (!lstatSync(this.projectRoot).isDirectory()) return null;
+      const root = realpathSync.native(this.projectRoot);
+      const physical = realpathSync.native(join(root, modulePath));
+      const found = normalisePath(relative(root, physical));
+      const samePath = process.platform === 'win32'
+        ? found.toLowerCase() === modulePath.toLowerCase()
+        : found === modulePath;
+      if (!samePath) return null;
+      const bytes = readFileSync(physical);
+      if (hashBytes(bytes) !== expected.hash) return null;
+      if (startByte < 0 || endByte > bytes.byteLength || startByte >= endByte) return null;
+      return {
+        text: decodeSourceByteRange(bytes, sourceTextLayout(bytes), startByte, endByte),
+        fileHash: expected.hash,
+      };
     } catch {
       return null;
     }
-
-    if (hashBytes(bytes) !== expected.hash) return null;
-    if (endByte > bytes.byteLength || startByte >= endByte) return null;
-
-    return {
-      text: bytes.subarray(startByte, endByte).toString('utf8'),
-      fileHash: expected.hash,
-    };
   }
 
   /**

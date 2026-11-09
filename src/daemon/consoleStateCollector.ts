@@ -41,7 +41,7 @@ import type { GreatBookImprovementFieldView } from '../ui/greatBookImprovementFi
 import type { FourNeonGaugesView } from '../ui/fourNeonGauges.js';
 import type { ConsoleTab, ReadinessSummary } from '../ui/viewModel.js';
 import type { OperationalConsoleProjection } from '../observability/operationalConsole/contract.js';
-import type { StatusSnapshot } from '../status/statusContractV5.js';
+import { isBranchUnavailable, type StatusSnapshot } from '../status/statusContractV5.js';
 import type { ProjectRecognitionIdentity } from '../shared/projectRecognitionIdentity.js';
 import type { ProjectOperationIdentity } from '../shared/projectOperationIdentity.js';
 
@@ -302,6 +302,7 @@ export interface CollectOptions {
 export function collectProjectorInput(source: RegistrySource, options: CollectOptions): ProjectorInput {
   const mission = source.currentMission();
   const snapshotFacts = source.latestSnapshot();
+  const { operationalConsole, improvementField, gauges } = options.status;
 
   // A recognition record and run identity are read only when a snapshot exists and its graph
   // has committed. A snapshot with no committed record yields a null recognition input, which
@@ -360,18 +361,11 @@ export function collectProjectorInput(source: RegistrySource, options: CollectOp
     projectRecognition: source.projectRecognitionIdentity?.() ?? null,
     readiness: source.configReadiness(),
     sources: source.stateSources(),
-    // Set only when the source provides a stream, so the property is absent (not
-    // explicitly undefined) otherwise — the projector then renders the empty console.
-    ...(source.operationalConsoleProjection !== undefined
-      ? { operationalConsole: source.operationalConsoleProjection(options.capturedAt) }
-      : {}),
-    ...(() => {
-      const field = source.improvementFieldProjection?.(options.capturedAt);
-      return field !== undefined ? { improvementField: field } : {};
-    })(),
-    ...(source.gaugesProjection !== undefined
-      ? { gauges: source.gaugesProjection(options.capturedAt) }
-      : {}),
+    // Use the same facts already sealed in Status. A second registry read could race a writer
+    // and show evidence under a Status seal that did not cover it.
+    ...(isBranchUnavailable(operationalConsole) ? {} : { operationalConsole }),
+    ...(isBranchUnavailable(improvementField) ? {} : { improvementField }),
+    ...(isBranchUnavailable(gauges) ? {} : { gauges }),
   };
 }
 

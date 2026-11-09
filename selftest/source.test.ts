@@ -47,17 +47,19 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 
-import { hashText } from '../src/shared/ids.js';
+import { hashBytes, hashText } from '../src/shared/ids.js';
 import { ArtifactStore } from '../src/memory/artifactStore.js';
 import { EventLog } from '../src/memory/eventLog.js';
 import { ProjectionStore } from '../src/memory/db.js';
 import {
   recognize,
+  RecognitionParityError,
   verifyProgramSnapshotParity,
   type RecognitionResult,
   type RecognitionStats,
@@ -306,6 +308,46 @@ test('changing one byte changes the snapshot id and nothing else', () => {
     assert.equal(diff.unchangedCount, 4);
   } finally {
     removeRoot(root);
+  }
+});
+
+test('snapshot roots stay within the target and respect exclusions even when listed explicitly', () => {
+  const root = makeProject();
+  try {
+    mkdirSync(join(root, 'src', 'generated', 'nested'), { recursive: true });
+    writeFixture(root, 'src/generated/nested/out.ts', 'export const generated = true;\n');
+    const options = { root, exclude: ['generated'] };
+    for (const invalid of ['../foreign', 'src/../foreign', '/foreign', 'F:\\foreign']) {
+      assert.throws(() => captureSnapshot({ ...options, sourceRoots: [invalid] }), /invalid snapshot source root/iu);
+    }
+    const manifest = captureSnapshot({
+      ...options,
+      sourceRoots: ['src', './src', 'src/./core', 'src/generated/nested'],
+    });
+    assert.deepEqual(manifest.source_roots, ['src', 'src/core', 'src/generated/nested']);
+    assert.equal(manifest.files.length, 5);
+    assert.equal(captureSnapshot({ ...options, sourceRoots: ['src/generated/nested'] }).files.length, 0);
+  } finally {
+    removeRoot(root);
+  }
+});
+
+test('snapshot records symlinks and junctions in explicit roots without following them', () => {
+  const root = makeProject();
+  const external = makeProject();
+  try {
+    symlinkSync(join(external, 'src'), join(root, 'linked'), 'junction');
+    const linked = captureSnapshot({ root, sourceRoots: ['linked/core', 'linked/render'] });
+    assert.deepEqual(linked.files, []);
+    assert.deepEqual(linked.skipped.map(({ path, reason }) => ({ path, reason })), [
+      { path: 'linked', reason: 'symlink' },
+    ]);
+    const combined = captureSnapshot({ root, sourceRoots: ['.', 'src/core', 'linked/core'] });
+    assert.equal(combined.files.some((file) => file.path.startsWith('linked/')), false);
+    assert.equal(combined.files.filter((file) => file.path === 'src/core/math.ts').length, 1);
+  } finally {
+    removeRoot(root);
+    removeRoot(external);
   }
 });
 
@@ -1110,6 +1152,61 @@ test('a real recognition proves exact parity with a snapshot of the same tree, a
     const afterDrift = verifyProgramSnapshotParity(drifted.programFiles, manifest.files, isTsFile);
     assert.equal(afterDrift.exact, false, 'a changed live file no longer matches the immutable snapshot');
     assert.ok(afterDrift.unaccounted.includes(target.path), 'the drifted file is reported unaccounted');
+  } finally {
+    removeRoot(root);
+  }
+});
+
+test('restricted recognition refuses changed compiler inputs outside the extraction surface', () => {
+  const root = makeProject();
+  try {
+    const manifest = captureProject(root);
+    const snapshotFiles = new Map(manifest.files.map(({ path, hash }) => [path, hash]));
+    writeFixture(root, 'src/core/math.ts', MATH_TS.replace('a + b', 'b + a'));
+    assert.throws(
+      () => recognize({
+        projectRoot: root,
+        tsconfigPath: join(root, 'tsconfig.json'),
+        snapshotId: manifest.id,
+        snapshotFiles,
+        restrictTo: ['src/app.ts'],
+      }),
+      (error) => error instanceof RecognitionParityError && error.violations.some(
+        ({ path, reason }) => path === 'src/core/math.ts' && reason === 'hash-mismatch',
+      ),
+    );
+  } finally {
+    removeRoot(root);
+  }
+});
+
+test('recognition uses a nested compiler config base and anchors into original BOM-encoded bytes', () => {
+  const root = makeProject();
+  try {
+    const config = join(root, 'config', 'tsconfig.json');
+    mkdirSync(dirname(config));
+    writeFileSync(config, JSON.stringify({ include: ['../src/encoded-*.ts'], compilerOptions: { types: [] } }));
+    const text = 'export function encoded() { return "ż"; }\n';
+    const inputs = [
+      { path: 'src/encoded-utf8.ts', bytes: Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from(text)]), bom: 3 },
+      { path: 'src/encoded-utf16le.ts', bytes: Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(text, 'utf16le')]), bom: 2 },
+      { path: 'src/encoded-utf16be.ts', bytes: Buffer.concat([Buffer.from([0xfe, 0xff]), Buffer.from(text, 'utf16le').swap16()]), bom: 2 },
+    ];
+    for (const input of inputs) writeFileSync(join(root, input.path), input.bytes);
+    const manifest = captureProject(root);
+    const result = recognize({
+      projectRoot: root,
+      tsconfigPath: config,
+      snapshotFiles: new Map(manifest.files.map(({ path, hash }) => [path, hash])),
+    });
+    assert.equal(result.basis.snapshotParityVerified, true);
+    assert.equal(result.programFiles.length, inputs.length);
+    for (const { path, bytes, bom } of inputs) {
+      assert.equal(result.programFiles.find((file) => file.path === path)?.hash, hashBytes(bytes));
+      const unit = result.units.find((unit) => unit.logicalId === `${path}#encoded`);
+      assert.equal(unit?.anchor.startByte, bom);
+      assert.equal(unit?.anchor.endByte, bytes.length - (bom === 3 ? 1 : 2));
+    }
   } finally {
     removeRoot(root);
   }

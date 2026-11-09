@@ -5,8 +5,8 @@
  * durable generation, readiness verdict and activation receipt comes from the backend API.
  */
 
-import { createConfigurationState } from './configurationState.js';
-import { renderProjectSelector } from './projectSelector.js';
+import { createConfigurationState, recordMatchesActive } from './configurationState.js';
+import { renderProjectSelector, renderStartupBinding } from './projectSelector.js';
 import {
   normalizeProjectIdDraft,
   projectDraftProblems,
@@ -18,9 +18,9 @@ import {
   renderAuthorityEditor,
 } from './authorityEditor.js';
 import { renderRecognitionEditor } from './recognitionEditor.js';
-import { renderHostEditor } from './hostEditor.js';
+import { canTestConsole, renderHostEditor } from './hostEditor.js';
 import { renderGitEditor } from './gitEditor.js';
-import { renderBrowserEditor } from './browserEditor.js';
+import { canTestChrome, renderBrowserEditor } from './browserEditor.js';
 import { availableGatewayModels, CREDENTIAL_REFERENCE_PATTERN, renderGatewayEditor } from './gatewayEditor.js';
 import { renderBenchmarkRuntimeEditor } from './benchmarkRuntimeEditor.js';
 import { renderProjectReadinessPanel } from './projectReadinessPanel.js';
@@ -36,6 +36,33 @@ import {
 } from './viewPrimitives.js';
 
 export { escapeHtml };
+
+const CAPABILITY_SECTIONS = Object.freeze({
+  git: 'git', ai: 'gpt-gateway', chrome: 'browser', console: 'powershell-host',
+});
+
+export function focusCapabilitySection(root, capability, result) {
+  if (!Object.hasOwn(CAPABILITY_SECTIONS, capability)) return false;
+  const section = root.querySelector(`[data-section="${CAPABILITY_SECTIONS[capability]}"]`);
+  if (!section) return false;
+  const commandBar = root.querySelector('.cfg-command-bar');
+  section.style.scrollMarginTop = `${Math.ceil(commandBar?.getBoundingClientRect().height ?? 0) + 12}px`;
+  if (typeof result?.summary === 'string' && result.summary) {
+    let detail = section.querySelector('[data-ribbon-check]');
+    if (!detail) {
+      detail = section.ownerDocument.createElement('p');
+      detail.className = 'cfg-connection-detail';
+      detail.setAttribute('data-ribbon-check', '');
+      detail.setAttribute('role', 'status');
+      section.querySelector('header')?.after(detail);
+    }
+    detail.textContent = result.summary;
+  }
+  section.tabIndex = -1;
+  section.focus({ preventScroll: true });
+  section.scrollIntoView({ block: 'start', inline: 'nearest' });
+  return true;
+}
 
 const NULLABLE_PATHS = new Set([
   'displayName',
@@ -67,7 +94,7 @@ function bodyObject(value) {
 function safeError(result, fallback = 'OPERATION_FAILED') {
   return {
     code: String(result?.serverCode ?? result?.error?.code ?? result?.refused ?? fallback).toUpperCase().replaceAll('-', '_'),
-    message: String(result?.error?.details?.message ?? result?.reason ?? 'The governed backend operation failed.'),
+    message: String(result?.error?.details?.message ?? result?.serverDetails?.summary ?? result?.reason ?? 'The governed backend operation failed.'),
   };
 }
 
@@ -127,6 +154,7 @@ function renderShell(snapshot, catalogue) {
   return `<div class="cfg-shell" data-phase="${escapeHtml(snapshot.phase)}" aria-busy="${!['idle', 'ready'].includes(snapshot.phase)}">
     <header class="cfg-shell-head"><div><span class="cfg-kicker">CONFIGURATION</span><h2>PROJECT PROFILE CONTROL PLANE</h2><p>One selected profile defines one complete target operating context. Drafts are local; the backend owns all authority and persistence.</p></div><div class="cfg-shell-status"><span class="cfg-badge is-neutral">REGISTRY g${snapshot.registryGeneration ?? '—'}</span><span class="cfg-badge is-local">${escapeHtml(phase)}</span></div></header>
     ${renderProjectSelector(snapshot)}
+    ${renderStartupBinding(snapshot)}
     ${renderNotice(snapshot)}
     <div class="cfg-layout">
       <div class="cfg-column">
@@ -168,12 +196,14 @@ export function mountConfigurationPanel(options) {
   const promptText = options.promptText ?? ((message, initial = '') => window.prompt(message, initial));
   const confirmAction = options.confirmAction ?? ((message) => window.confirm(message));
   const catalogue = { activeSource: globalThis.window?.__clueMetricsMeta?.source ?? 'canonical', entries: null };
+  const legacyConnections = { ai: null, git: null, busy: null };
+  let readinessReceipts = {};
   let destroyed = false;
 
   function render(snapshot = state.snapshot()) {
     catalogue.activeSource = globalThis.window?.__clueMetricsMeta?.source ?? 'canonical';
     if (destroyed) return;
-    root.innerHTML = renderShell(snapshot, catalogue);
+    root.innerHTML = renderShell({ ...snapshot, legacyConnections, readinessReceipts }, catalogue);
   }
 
   const unsubscribe = state.subscribe(render);
@@ -215,7 +245,34 @@ export function mountConfigurationPanel(options) {
 
   async function loadLegacyConfiguration() {
     const result = await actionClient.invoke('readConfig');
-    if (result.ok) state.setLegacyConfiguration(result.result);
+    if (!result.ok) return;
+    state.setLegacyConfiguration(result.result);
+    if (result.result?.legacyConnectionControls === true) {
+      const key = await actionClient.invoke('readLegacyOpenAiKey');
+      if (key.ok) legacyConnections.ai = key.result;
+      render();
+    }
+  }
+
+  async function loadReadinessReceipts() {
+    const result = await actionClient.invoke('readReadinessReceipts');
+    if (result.ok) {
+      readinessReceipts = bodyObject(result.result).receipts ?? {};
+      render();
+    }
+  }
+
+  async function configureLegacyConnection(kind, action) {
+    if (state.snapshot().legacyConfiguration?.legacyConnectionControls !== true || legacyConnections.busy) return;
+    legacyConnections.busy = kind;
+    render();
+    try {
+      const result = await actionClient.invoke(action);
+      legacyConnections[kind] = result.ok ? result.result : { state: 'failed', detail: safeError(result).message };
+    } finally {
+      legacyConnections.busy = null;
+      render();
+    }
   }
 
   async function loadCatalogues() {
@@ -229,7 +286,7 @@ export function mountConfigurationPanel(options) {
   }
 
   async function load() {
-    await Promise.allSettled([loadLegacyConfiguration(), loadCatalogues()]);
+    await Promise.allSettled([loadLegacyConfiguration(), loadReadinessReceipts(), loadCatalogues()]);
     return loadProjects();
   }
 
@@ -403,6 +460,30 @@ export function mountConfigurationPanel(options) {
     return invoke(action, { params: { projectId: record.profile.projectId } }, token, (value) => state.applyConnectionCheck(token, kind, value));
   }
 
+  async function testSessionCapability({ capability, label, canTest, action, kind }) {
+    const snapshot = state.snapshot();
+    if (!canTest(snapshot)) return;
+    const record = snapshot.selectedRecord;
+    const token = state.begin(`testing-${capability}`);
+    return invoke(action, {
+      projectId: record.profile.projectId,
+      expectedGeneration: record.generation,
+      expectedProfileHash: record.projectProfileHash,
+    }, token, (value) => {
+      const receipt = bodyObject(value);
+      if (!['pending', 'ready', 'failed'].includes(receipt.state) ||
+          !recordMatchesActive(record, { ...receipt.projectIdentity, profileGeneration: receipt.profileGeneration })) {
+        return state.applyFailure(token, `${capability.toUpperCase()}_TEST_IDENTITY_MISMATCH`, `The ${label} test result did not match this saved Project Profile generation.`);
+      }
+      const result = state.applyConnectionCheck(token, kind, receipt);
+      const document = root.ownerDocument;
+      if (result.applied && document?.defaultView) {
+        document.dispatchEvent(new document.defaultView.CustomEvent(`clue:${capability}-readiness`, { detail: { record, receipt } }));
+      }
+      return result;
+    });
+  }
+
   async function loadGatewayModels() {
     const record = savedConnectionRecord();
     if (!record) return;
@@ -551,6 +632,14 @@ export function mountConfigurationPanel(options) {
     const snapshot = state.snapshot();
 
     switch (action) {
+      case 'show-startup-binding': {
+        const binding = root.querySelector('#cfgStartupBinding');
+        const instructions = binding?.querySelector('details');
+        if (instructions) instructions.open = true;
+        binding?.focus({ preventScroll: true });
+        binding?.scrollIntoView({ block: 'center' });
+        break;
+      }
       case 'reload-projects':
         if (confirmDiscard(snapshot, 'reload authoritative state')) void loadProjects();
         break;
@@ -588,21 +677,18 @@ export function mountConfigurationPanel(options) {
       case 'validate-profile': void validateSelected(); break;
       case 'read-readiness': void readinessSelected(); break;
       case 'activate-project': void activateProfile(); break;
-      case 'test-host': void testConnection('host', 'testProjectHost'); break;
+      case 'test-console': void testSessionCapability({ capability: 'console', label: 'Console', canTest: canTestConsole, action: 'runConsoleTest', kind: 'host' }); break;
       case 'test-git': void testConnection('git', 'testProjectGit'); break;
       case 'sign-in-github': void testConnection('githubDirectory', 'signInProjectGitHub', 'opening-github-sign-in'); break;
+      case 'sign-in-legacy-github': void configureLegacyConnection('git', 'signInLegacyGitHub'); break;
       case 'list-github-repositories': void testConnection('githubDirectory', 'listProjectGitHubRepositories', 'listing-github-repositories'); break;
       case 'connect-github': void connectGitHub(); break;
-      case 'test-browser': void testConnection('browser', 'testProjectBrowser'); break;
-      case 'open-test-chrome': {
-        const record = savedConnectionRecord();
-        if (record) void saveProfileConnection('browser', 'openProjectTestChrome', 'opening-test-chrome', record);
-        break;
-      }
+      case 'test-chrome': void testSessionCapability({ capability: 'chrome', label: 'Chrome', canTest: canTestChrome, action: 'runChromeTest', kind: 'browser' }); break;
       case 'test-gateway': void testConnection('gateway', 'testProjectGpt'); break;
       case 'load-gateway-models': void loadGatewayModels(); break;
       case 'check-openai-key': void testConnection('openaiKey', 'readProjectOpenAiKey', 'checking-windows-key'); break;
       case 'set-openai-key': void setOpenAiKey(); break;
+      case 'set-legacy-openai-key': void configureLegacyConnection('ai', 'setLegacyOpenAiKey'); break;
       case 'use-host-global': setInheritedPath('integrations.powershell.executable', 'powershell.executable', 'global', ''); break;
       case 'use-host-override': setInheritedPath('integrations.powershell.executable', 'powershell.executable', 'override', 'Absolute PowerShell executable path'); break;
       case 'use-browser-global': setInheritedPath('integrations.chrome.executable', 'browser.executable', 'global', ''); break;
@@ -680,6 +766,7 @@ export function mountConfigurationPanel(options) {
 
   return Object.freeze({
     load,
+    focusCapability: (capability, result) => focusCapabilitySection(root, capability, result),
     reload: loadProjects,
     snapshot: state.snapshot,
     state,

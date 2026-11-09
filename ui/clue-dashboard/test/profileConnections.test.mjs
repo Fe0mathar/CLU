@@ -5,7 +5,7 @@ import test from 'node:test';
 import { createActionClient } from '../configuration/actionContracts.js';
 import { mountConfigurationPanel } from '../configuration/configurationPanel.js';
 import { renderGitEditor } from '../configuration/gitEditor.js';
-import { metadata, record } from './projectProfileUiFixture.mjs';
+import { metadata, pointer, record } from './projectProfileUiFixture.mjs';
 
 test('GitHub mismatch retains only the attempted repository and branch for the selected profile', () => {
   const saved = record('alpha');
@@ -102,6 +102,130 @@ test('profile connection controls register a verified GitHub checkout and ask Wi
       expectedGeneration: 2,
     });
     assert.ok(calls.every(({ path }) => path !== '/api/control/git-sync'));
+  } finally {
+    panel.destroy();
+  }
+});
+
+test('Test Chrome starts one scripted test for the active saved generation and publishes its evidence', async () => {
+  const saved = record('alpha');
+  const active = pointer('alpha');
+  const receipt = {
+    state: 'ready', summary: 'Dedicated Chrome and the WebGPU canary passed.', checks: [],
+    projectIdentity: {
+      projectId: active.projectId,
+      targetRootIdentity: active.targetRootIdentity,
+      projectProfileHash: active.projectProfileHash,
+    },
+    profileGeneration: active.profileGeneration,
+    executionId: 'BEXEC-1234', gpuReadbacks: [42, 42, 42],
+  };
+  let finishTest;
+  const testResult = new Promise((resolve) => { finishTest = resolve; });
+  const calls = [];
+  const listeners = new Map();
+  const document = Object.assign(new EventTarget(), { defaultView: { CustomEvent } });
+  const results = [];
+  document.addEventListener('clue:chrome-readiness', (event) => results.push(event.detail));
+  const root = {
+    innerHTML: '', ownerDocument: document,
+    addEventListener(name, listener) { listeners.set(name, listener); },
+  };
+  const actionClient = createActionClient({ request: async (request) => {
+    calls.push(request);
+    switch (`${request.method} ${request.path}`) {
+      case 'GET /api/config': return {};
+      case 'GET /api/projects': return { active, projects: [metadata('alpha')], registryGeneration: 1 };
+      case 'GET /api/projects/alpha': return { record: saved };
+      case 'POST /api/control/chrome-test': return testResult;
+      default: throw new Error(`Unexpected request ${request.method} ${request.path}`);
+    }
+  } });
+  const panel = mountConfigurationPanel({ root, actionClient });
+  const click = () => listeners.get('click')({
+    preventDefault() {}, target: { closest: () => ({ dataset: { cfgAction: 'test-chrome' } }) },
+  });
+
+  try {
+    await panel.load();
+    assert.match(root.innerHTML, /data-cfg-action="test-chrome">TEST CHROME</);
+    const browserCard = root.innerHTML.match(/<section [^>]*data-section="browser"[\s\S]*?<\/section>/u)?.[0];
+    assert.ok(browserCard);
+    assert.doesNotMatch(browserCard, /OPEN TEST CHROME|TEST CONNECTION/);
+    click();
+    click();
+    assert.match(root.innerHTML, /data-cfg-action="test-chrome" disabled/);
+    assert.match(root.innerHTML, /running the WebGPU canary/);
+    assert.deepEqual(calls.filter(({ method }) => method === 'POST'), [{
+      method: 'POST', path: '/api/control/chrome-test',
+      payload: { projectId: 'alpha', expectedGeneration: saved.generation, expectedProfileHash: saved.projectProfileHash },
+    }]);
+    assert.equal(results.length, 0);
+
+    finishTest(receipt);
+    await setImmediate();
+    assert.deepEqual(results, [{ record: saved, receipt }]);
+    assert.match(root.innerHTML, /canary passed/);
+    assert.match(root.innerHTML, /GPU readbacks · 42, 42, 42/);
+    assert.match(root.innerHTML, /Evidence ID · BEXEC-1234/);
+  } finally {
+    panel.destroy();
+  }
+});
+
+test('Test Console uses the running saved generation and publishes the completed host receipt', async () => {
+  const saved = record('alpha');
+  const active = pointer('alpha');
+  const receipt = {
+    state: 'ready', summary: 'The PowerShell host round trip passed.',
+    checks: [{ label: 'PowerShell host', state: 'Verified' }],
+    projectIdentity: active, profileGeneration: active.profileGeneration,
+    testedAt: '2026-11-09T20:09:28.000Z',
+  };
+  let finishTest;
+  const testResult = new Promise((resolve) => { finishTest = resolve; });
+  const calls = [];
+  const listeners = new Map();
+  const document = Object.assign(new EventTarget(), { defaultView: { CustomEvent } });
+  const results = [];
+  document.addEventListener('clue:console-readiness', (event) => results.push(event.detail));
+  const root = {
+    innerHTML: '', ownerDocument: document,
+    addEventListener(name, listener) { listeners.set(name, listener); },
+  };
+  const actionClient = createActionClient({ request: async (request) => {
+    calls.push(request);
+    switch (`${request.method} ${request.path}`) {
+      case 'GET /api/config': return { projectProfiles: { runtimeMode: 'project-profile' } };
+      case 'GET /api/projects': return { active, projects: [metadata('alpha')], registryGeneration: 1 };
+      case 'GET /api/projects/alpha': return { record: saved };
+      case 'POST /api/control/console-test': return testResult;
+      default: throw new Error(`Unexpected request ${request.method} ${request.path}`);
+    }
+  } });
+  const panel = mountConfigurationPanel({ root, actionClient });
+  const click = () => listeners.get('click')({
+    preventDefault() {}, target: { closest: () => ({ dataset: { cfgAction: 'test-console' } }) },
+  });
+
+  try {
+    await panel.load();
+    assert.match(root.innerHTML, /data-cfg-action="test-console">TEST CONSOLE</);
+    click();
+    click();
+    assert.match(root.innerHTML, /data-cfg-action="test-console" disabled/);
+    assert.match(root.innerHTML, /Running the PowerShell host test/);
+    assert.deepEqual(calls.filter(({ method }) => method === 'POST'), [{
+      method: 'POST', path: '/api/control/console-test',
+      payload: { projectId: 'alpha', expectedGeneration: saved.generation, expectedProfileHash: saved.projectProfileHash },
+    }]);
+    assert.deepEqual(results, []);
+
+    finishTest(receipt);
+    await setImmediate();
+    assert.deepEqual(results, [{ record: saved, receipt }]);
+    assert.match(root.innerHTML, /PowerShell host round trip passed/);
+    assert.match(root.innerHTML, /PowerShell host · Verified/);
   } finally {
     panel.destroy();
   }

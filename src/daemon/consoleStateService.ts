@@ -88,9 +88,10 @@ export class ConsoleStateService {
    */
   public refresh(): { snapshot: ConsoleSnapshot; revision: number } {
     const readiness = this.#evaluateReadiness();
+    const sources = this.#stateSources();
     const source = new RuntimeRegistrySource(this.#runtime, {
       readiness,
-      sources: this.#stateSources(),
+      sources,
       ...(this.#options.missionTitle !== undefined ? { missionTitle: this.#options.missionTitle } : {}),
       ...(this.#options.navigatorPath !== undefined ? { navigatorPath: this.#options.navigatorPath } : {}),
     });
@@ -103,8 +104,7 @@ export class ConsoleStateService {
     // bodies depending on who asked. §1 allows exactly one.
     const status = projectStatusFromRuntime(this.#runtime, {
       capturedAt,
-      readiness,
-      sources: this.#stateSources(),
+      source,
     }).snapshot;
 
     const input = collectProjectorInput(source, {

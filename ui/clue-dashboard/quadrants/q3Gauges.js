@@ -39,6 +39,117 @@ const fmtK = (n) => {
   return String(Math.round(n));
 };
 
+export function formatObservedUsd(value) {
+  if (!Number.isFinite(value) || value < 0) return '—';
+  return '$' + value.toLocaleString('en-US', { maximumFractionDigits: 4 });
+}
+
+/** The sealed Status shape is authoritative for call usage and provider pause. */
+export function normalizeAiProviderStatus(branch) {
+  if (branch?.configured !== true || 'state' in branch) return null;
+  const { usage, calls, spendUsd, latest } = branch;
+  const remainingAuthoritative = usage?.providerRemainingTokensAuthoritative === true &&
+    Number.isFinite(usage.providerRemainingTokens);
+  return {
+    provider: branch.provider,
+    enabled: branch.enabled === true,
+    ready: branch.operationallyReady === true,
+    providerPaused: branch.providerPaused === true,
+    providerBudgetExhausted: branch.providerBudgetExhausted === true,
+    model: branch.effectiveModel ?? branch.requestedModel ?? branch.model ?? null,
+    problem: branch.providerPauseReason ?? branch.policyProblems?.[0] ?? null,
+    submitted: calls?.submitted ?? 0,
+    completed: calls?.completed ?? 0,
+    failed: calls?.failed ?? 0,
+    refused: calls?.refused ?? 0,
+    pending: calls?.pending ?? 0,
+    inputTokens: usage?.inputTokens ?? null,
+    cachedInputTokens: usage?.cachedInputTokens ?? null,
+    outputTokens: usage?.outputTokens ?? null,
+    totalTokens: usage?.totalTokens ?? null,
+    remainingTokens: remainingAuthoritative ? usage.providerRemainingTokens : null,
+    remainingAuthoritative,
+    todayActualUsd: spendUsd?.todayActual ?? null,
+    monthActualUsd: spendUsd?.monthActual ?? null,
+    latestState: latest?.state ?? branch.providerState ?? null,
+    latestErrorCode: latest?.errorCode ?? null,
+  };
+}
+
+export function projectAiGauge(branch) {
+  const provider = normalizeAiProviderStatus(branch);
+  if (!provider) {
+    return { value: null, big: '—', bigUnit: '', status: 'UNAVAILABLE', warn: branch?.reason ?? 'No sealed AI orchestration reading', lines: [] };
+  }
+
+  const active = provider.pending > 0;
+  const critical = provider.providerBudgetExhausted;
+  const status = critical ? 'AI PAUSED' : !provider.enabled ? 'DISABLED'
+    : provider.providerPaused ? 'PAUSED' : !provider.ready ? 'BLOCKED' : active ? 'LIVE' : 'CONFIGURED';
+  const tokensObserved = provider.totalTokens !== null;
+  return {
+    // CLU-E has observed usage, not a provider quota denominator.
+    value: null,
+    big: critical ? 'LACK OF $' : tokensObserved ? fmtK(provider.totalTokens) : fmtK(provider.submitted),
+    bigUnit: critical ? '' : tokensObserved ? 'tok' : 'calls',
+    status,
+    critical,
+    warn: provider.problem,
+    lines: [
+      ['provider', String(provider.provider ?? '—').toUpperCase()],
+      ['model', provider.model ?? '—'],
+      ['tokens used', fmtK(provider.totalTokens)],
+      ['tokens left', provider.remainingAuthoritative ? fmtK(provider.remainingTokens) : 'provider n/a'],
+      ['calls', `${provider.completed}/${provider.submitted}`],
+      ['observed spend', formatObservedUsd(provider.todayActualUsd)],
+    ],
+    raw: {
+      successful: provider.completed,
+      retries: 0,
+      cache: 0,
+      failed: provider.failed + provider.refused,
+      inFlight: provider.pending,
+      queued: 0,
+      provider,
+    },
+  };
+}
+
+const RECOGNIZED_STAGES = new Set(['RECOGNIZED', 'SCREENED', 'CANDIDATES', 'CLOSING_EVIDENCE', 'HANDOFF']);
+
+function projectCycleGauge(branch) {
+  const current = branch?.current;
+  const closure = branch?.lastClosure;
+  const cycleId = current?.id ?? closure?.cycleId ?? null;
+  const grade = current?.grade ?? (current ? null : closure?.grade ?? null);
+  const stage = current?.stage ?? (closure ? 'CLOSED' : null);
+  const effectiveStage = stage === 'SUSPENDED' ? current.suspendedFrom : stage;
+  const recognized = RECOGNIZED_STAGES.has(effectiveStage) || stage === 'CLOSED';
+  const closureSummary = closure?.criteriaMet === true ? 'criteria met' : 'criteria unmet';
+  return {
+    value: null,
+    big: stage ?? '—',
+    bigUnit: '',
+    status: branch?.state ? 'UNAVAILABLE' : cycleId ?? 'IDLE',
+    warn: branch?.reason ?? null,
+    lines: [
+      ['cycle', cycleId ?? '—'],
+      ['stage', stage ?? '—'],
+      ['grade', grade ?? '—'],
+      ['last closure', closure ? `${closure.cycleId} · ${closureSummary}` : '—'],
+    ],
+    raw: {
+      phases: [
+        { key: 'recognition', value: cycleId ? (recognized ? 100 : 0) : null },
+        ...['deep_review', 'proven_improvement', 'certification', 'test_maturity'].map(key => ({ key, value: null })),
+      ],
+      cycleNum: cycleId ?? '—',
+      grade,
+      next: stage === 'SCREENED' || stage === 'CANDIDATES' ? 'Awaiting governed proof or closure' : null,
+    },
+  };
+}
+
 /**
  * Turns one sealed frame snapshot into the four gauge areas.
  *
@@ -64,7 +175,7 @@ export function deriveTelemetry(snapshot, excluded = new Set()) {
       value: used != null ? used : (anyActivity ? clamp3(Math.log10(1+burn)*33,0,100) : null),
       big: fmtK(calls.thisCycle ?? calls.today ?? 0), bigUnit: 'calls',
       status: anyActivity ? 'LIVE' : 'STANDBY',
-      warn: anyActivity ? null : 'AI gateway offline until Stage D2 — deterministic stages running',
+      warn: anyActivity ? null : 'No observed gateway call traffic',
       lines: [
         ['burn', fmtK(burn)+'/h'], ['in-flight', fmtK(calls.inFlight??0)],
         ['cache-avoided', fmtK(calls.avoidedByCache??0)], ['remaining', limit>0?fmtK(remaining):'∞'],
@@ -75,6 +186,7 @@ export function deriveTelemetry(snapshot, excluded = new Set()) {
              queued:Number(calls.queued||0), thisCycle:Number(calls.thisCycle||0), burn }
     };
   }
+  if (Object.hasOwn(d, 'aiOrchestration')) out.ai = projectAiGauge(d.aiOrchestration);
 
   /* B · cycle progress */
   const p = d.progress || null;
@@ -96,6 +208,7 @@ export function deriveTelemetry(snapshot, excluded = new Set()) {
       raw: { phases: phases.map((k,idx)=>({ key:k, value:vals[idx] })), cycleNum: Number((d.crown && d.crown.cycle) ?? 0), next: nextTxt, done }
     };
   }
+  if (Object.hasOwn(d, 'cycle')) out.cycle = projectCycleGauge(d.cycle);
 
   /* C · overall improvement (from the Q2 field) */
   const iv = d.improvementField || null;

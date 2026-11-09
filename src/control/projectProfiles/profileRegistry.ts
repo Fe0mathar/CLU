@@ -7,7 +7,7 @@
 
 import { existsSync, mkdirSync, readdirSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 
 import { z } from 'zod';
 
@@ -15,6 +15,7 @@ import { nowIso } from '../../shared/ids.js';
 import {
   asTargetRootIdentity,
   assertPathIdentity,
+  assertPathZonesDisjoint,
   resolvePathIdentity,
 } from '../../shared/pathIdentity.js';
 import {
@@ -30,6 +31,7 @@ import {
 } from '../../shared/schemas.js';
 import { canonicalizeProjectProfile } from './profileCanonicalization.js';
 import { computeProjectAuthorityHash } from './profileHash.js';
+import { resolveProjectOperatingZones } from './projectPathIsolation.js';
 import { ProfileEventLog, type ProfileEventInput } from './profileEventLog.js';
 import {
   readJsonFile,
@@ -129,6 +131,7 @@ export type ProfileRegistryErrorCode =
   | 'TARGET_ROOT_REBIND_FORBIDDEN'
   | 'REGISTRY_MALFORMED'
   | 'REGISTRY_INTEGRITY_FAILED'
+  | 'PROJECT_ZONE_CONFLICT'
   | 'ACTIVE_POINTER_CONFLICT';
 
 export class ProfileRegistryError extends Error {
@@ -294,7 +297,7 @@ export class ProjectProfileRegistry {
   public active(): ActiveProjectPointer | null {
     const state = this.readState();
     if (state.activeProjectId === null || state.activatedAt === null) return null;
-    const record = this.getProfile(state.activeProjectId);
+    const record = this.getProfileFromState(state, state.activeProjectId);
     return Object.freeze({
       pointerVersion: 'clue-active-project-pointer/1',
       projectId: record.profile.projectId,
@@ -320,6 +323,7 @@ export class ProjectProfileRegistry {
       if (duplicateRoot !== undefined) {
         throw new ProfileRegistryError('TARGET_ROOT_ALREADY_REGISTERED', `TARGET ROOT ALREADY REGISTERED\nExisting Project: ${duplicateRoot.projectId}`, { projectId: profile.projectId, existingProjectId: duplicateRoot.projectId });
       }
+      this.assertProjectZones(profile, state);
       const entry: ProjectProfileRegistryEntry = {
         projectId: profile.projectId,
         targetRootIdentity: profile.targetRootIdentity,
@@ -369,6 +373,7 @@ export class ProjectProfileRegistry {
       if (profile.projectId !== projectId || profile.targetRootIdentity !== entry.targetRootIdentity) {
         throw new ProfileRegistryError('TARGET_ROOT_REBIND_FORBIDDEN', `Project ${projectId} cannot change Project ID or physical Target Root through update.`, { projectId });
       }
+      this.assertProjectZones(profile, state);
       const previous = this.store.require(projectId);
       const afterRegistry = sortedRegistry({ ...state, generation: state.generation + 1 });
       let transaction = this.makeTransaction({ operation: 'update', options: operation, profile, afterRegistry, previous });
@@ -429,6 +434,7 @@ export class ProjectProfileRegistry {
           `Project Profile ${id} or its registry changed before activation. Read and verify the current generation.`,
           { projectId: id });
       }
+      this.assertProjectZones(record.profile, state);
       const activatedAt = this.now();
       const afterRegistry = sortedRegistry({ ...state, generation: state.generation + 1, activeProjectId: id, activatedAt });
       let transaction = this.makeTransaction({ operation: 'activate', options: operation, profile: record.profile, afterRegistry, previous: record });
@@ -457,19 +463,22 @@ export class ProjectProfileRegistry {
 
   public verifyIntegrity(): void {
     const state = this.readState();
+    const zones = [this.resolveRegistryZone()];
     for (const entry of state.projects) {
-      const record = this.store.require(entry.projectId);
-      if (record.profile.targetRootIdentity !== entry.targetRootIdentity) {
-        throw new ProfileRegistryError('REGISTRY_INTEGRITY_FAILED', `Registry target identity for ${entry.projectId} does not match the stored profile.`, { projectId: entry.projectId });
-      }
+      const record = this.getProfileFromState(state, entry.projectId);
       try {
-        const resolved = resolvePathIdentity(record.profile.targetRoot, { zone: 'target', expectedKind: 'directory' });
-        assertPathIdentity(entry.targetRootIdentity, resolved, `${entry.projectId} physical target root`);
+        const projectZones = resolveProjectOperatingZones(record.profile);
+        assertPathIdentity(entry.targetRootIdentity, projectZones[0], `${entry.projectId} physical target root`);
+        zones.push(...projectZones);
       } catch (error) {
-        throw new ProfileRegistryError('REGISTRY_INTEGRITY_FAILED', `Registered physical Target Root for ${entry.projectId} is unavailable or changed: ${(error as Error).message}`, { projectId: entry.projectId });
+        throw new ProfileRegistryError('REGISTRY_INTEGRITY_FAILED', `Registered filesystem zones for ${entry.projectId} are unavailable or unsafe: ${(error as Error).message}`, { projectId: entry.projectId });
       }
     }
-    if (state.activeProjectId !== null) this.getProfileFromState(state, state.activeProjectId);
+    try {
+      assertPathZonesDisjoint(zones);
+    } catch (error) {
+      throw new ProfileRegistryError('REGISTRY_INTEGRITY_FAILED', (error as Error).message);
+    }
   }
 
   public recover(): void {
@@ -487,10 +496,39 @@ export class ProjectProfileRegistry {
   }
 
   private getProfileFromState(state: ProjectProfileRegistryState, projectId: string): ProjectProfileRecord {
-    if (!state.projects.some((entry) => entry.projectId === projectId)) {
+    const entry = state.projects.find((candidate) => candidate.projectId === projectId);
+    if (entry === undefined) {
       throw new ProfileRegistryError('PROJECT_NOT_REGISTERED', `Project ${projectId} is not registered.`, { projectId });
     }
-    return this.store.require(projectId);
+    const record = this.store.require(projectId);
+    if (record.profile.targetRootIdentity !== entry.targetRootIdentity) {
+      throw new ProfileRegistryError('REGISTRY_INTEGRITY_FAILED', `Registry target identity for ${projectId} does not match the stored profile.`, { projectId });
+    }
+    return record;
+  }
+
+  private resolveRegistryZone() {
+    return resolvePathIdentity(resolve(this.root), { zone: 'clue-owned-state', expectedKind: 'directory' });
+  }
+
+  private assertProjectZones(profile: ProjectProfile, state: ProjectProfileRegistryState): void {
+    let existingProjectId: string | undefined;
+    try {
+      const candidate = resolveProjectOperatingZones(profile);
+      assertPathIdentity(profile.targetRootIdentity, candidate[0], `${profile.projectId} physical target root`);
+      assertPathZonesDisjoint([...candidate, this.resolveRegistryZone()]);
+      for (const entry of state.projects) {
+        if (entry.projectId === profile.projectId) continue;
+        existingProjectId = entry.projectId;
+        const other = this.getProfileFromState(state, entry.projectId);
+        assertPathZonesDisjoint([...candidate, ...resolveProjectOperatingZones(other.profile)]);
+      }
+    } catch (error) {
+      throw new ProfileRegistryError('PROJECT_ZONE_CONFLICT', (error as Error).message, {
+        projectId: profile.projectId,
+        ...(existingProjectId === undefined ? {} : { existingProjectId }),
+      });
+    }
   }
 
   private recoverLocked(): void {

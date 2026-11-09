@@ -2,7 +2,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join, normalize } from 'node:path';
 import { stringify as toYaml } from 'yaml';
 
@@ -213,4 +213,19 @@ test('legacy v2 startup stays unchanged and profile target identity is re-verifi
       error instanceof ProjectRuntimeBindingError &&
       error.code === 'PROFILE_TARGET_ROOT_IDENTITY_MISMATCH',
   );
+});
+
+test('profile runtime refuses a database redirected through an ancestor before creating files', (t) => {
+  const fixture = makeProjectProfileFixture();
+  t.after(() => fixture.dispose());
+  writeInstallationConfig(fixture.root);
+  const registry = new ProjectProfileRegistry(fixture.profiles);
+  const redirect = join(fixture.workspace, 'redirect');
+  const record = registry.create({
+    ...fixture.profile,
+    state: { ...fixture.profile.state, databasePath: join(redirect, 'new', 'clue.db') },
+  });
+  symlinkSync(fixture.target, redirect, 'junction');
+  assert.throws(() => openProfileRuntime(fixture.root, record, 'initialize-new'), { code: 'PROFILE_STATE_PATH_INVALID' });
+  assert.equal(existsSync(join(fixture.target, 'new')), false);
 });

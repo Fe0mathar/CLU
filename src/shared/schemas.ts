@@ -137,7 +137,8 @@ export const CONFIG_SCHEMA_VERSION = 2;
  * A Git remote for the registered target.
  *
  * ADR-0005 decision 1. Two forms are accepted, matching what Git itself accepts:
- * a URL (`https://`, `ssh://`, `git://`, `file://`) and the scp-like `user@host:path`.
+ * a built-in transport URL (`http://`, `https://`, `ssh://`, `git://`, `file://`)
+ * and the scp-like `user@host:path`.
  *
  * Credentials are refused, not warned about. `CLUE_Git_Integration_v9.md` §5.3 states that
  * credentials embedded in URLs are prohibited, and a configuration file is the worst possible
@@ -161,12 +162,25 @@ export const gitRemoteSchema = z
       ctx.addIssue({ code: z.ZodIssueCode.custom, message });
     };
 
+    if (/[\s\x00-\x1f\x7f\\]/u.test(value) || value.startsWith('-')) {
+      refuse('remote contains ambiguous whitespace, control characters, or separators');
+      return;
+    }
+
     if (/^[a-z][a-z0-9+.-]*:\/\//iu.test(value)) {
       let url: URL;
       try {
         url = new URL(value);
       } catch {
         refuse('not a parseable URL');
+        return;
+      }
+      if (!['http:', 'https:', 'ssh:', 'git:', 'file:'].includes(url.protocol)) {
+        refuse('remote must use a built-in Git transport');
+        return;
+      }
+      if (value.includes('?') || value.includes('#')) {
+        refuse('remote must not contain query parameters or fragments');
         return;
       }
       if (url.password !== '') {
@@ -184,13 +198,10 @@ export const gitRemoteSchema = z
 
     // scp-like `user@host:path`. The user part must not contain `:`, which is how a password
     // would appear in this form.
-    const scp = value.match(/^([^@/\\]+)@([A-Za-z0-9.-]+):(.+)$/u);
+    const scp = value.match(/^([A-Za-z0-9._-]+)@([A-Za-z0-9.-]+):([^?#]+)$/u);
     if (scp === null) {
       refuse('expected a URL (https://, ssh://, git://, file://) or `user@host:path`');
       return;
-    }
-    if (scp[1]?.includes(':') === true) {
-      refuse('remote must not embed a password (Git Integration §5.3)');
     }
   });
 
@@ -1395,7 +1406,8 @@ export const eventRecordSchema = z
     mission_version: z.string().min(1),
     actor: actorSchema,
     subject_id: entityIdSchema.nullable().default(null),
-    payload: z.unknown(),
+    // JSON omits undefined payloads. Keep legacy journal records replayable.
+    payload: z.unknown().optional(),
     previous_hash: sha256Schema.nullable(),
     hash: sha256Schema,
   })

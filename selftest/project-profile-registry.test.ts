@@ -55,6 +55,29 @@ test('PP-06 aliases and caller-forged physical identity cannot split a target', 
   });
 });
 
+test('two profiles cannot share a workspace or nest a future state root under an alias', () => {
+  withRoot((root) => {
+    const registry = registryAt(root);
+    const alpha = makeProjectProfileFixture(root, { projectId: 'alpha' });
+    registry.create(alpha.profile);
+    const beta = makeProjectProfileFixture(root, { projectId: 'beta', workspaceRoot: alpha.workspace });
+    assert.throws(() => registry.create(beta.profile), { code: 'PROJECT_ZONE_CONFLICT', existingProjectId: 'alpha' });
+
+    const alias = join(root, 'alpha-workspace-alias');
+    symlinkSync(alpha.workspace, alias, 'junction');
+    const candidate = makeProjectProfileFixture(root, { projectId: 'gamma' }).profile;
+    assert.throws(() => registry.create({
+      ...candidate,
+      shadowRoot: join(alias, 'not-created', 'shadow'),
+      integrations: {
+        ...candidate.integrations,
+        powershell: { ...candidate.integrations.powershell, shadowRoot: join(alias, 'not-created', 'shadow') },
+      },
+    }), { code: 'PROJECT_ZONE_CONFLICT', existingProjectId: 'alpha' });
+    assert.deepEqual(registry.listMetadata().map(({ projectId }) => projectId), ['alpha']);
+  });
+});
+
 test('PP-06 update cannot rebind identity; activation and delete remain coherent', () => {
   withRoot((root) => {
     const registry = registryAt(root);

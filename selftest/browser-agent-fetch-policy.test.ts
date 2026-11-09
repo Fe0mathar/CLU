@@ -2,11 +2,13 @@
  * `DEV-P1-24` — adversarial source-map fetch policy.
  *
  * The code under analysis chooses `sourceMappingURL`, so the URL, redirect, response headers and
- * body are all untrusted. These tests drive the public `sourceMapFor()` path through a fake CDP
- * page and replace only the platform `fetch` boundary.
+ * body are all untrusted. These tests drive the public `sourceMapFor()` path through a loopback
+ * discovery endpoint and fake CDP socket, then replace `fetch` for source maps.
  */
 
 import assert from 'node:assert/strict';
+import { once } from 'node:events';
+import { createServer } from 'node:http';
 import test from 'node:test';
 
 import { BrowserAgent } from '../src/experiment/browser/browserAgent.js';
@@ -16,7 +18,6 @@ const TARGET = {
   type: 'page',
   title: 'shadow clone',
   url: 'http://localhost:5173/index.html',
-  webSocketDebuggerUrl: 'ws://127.0.0.1:9222/devtools/page/TARGET-fetch-policy',
 };
 const SCRIPT_URL = 'http://localhost:5173/assets/app.js';
 const VALID_MAP = JSON.stringify({ version: 3, sources: ['app.ts'], names: [], mappings: '' });
@@ -85,7 +86,7 @@ interface Harness {
   readonly agent: BrowserAgent;
   readonly socket: FakeSocket;
   readonly mapFetchCount: () => number;
-  readonly close: () => void;
+  readonly close: () => Promise<void>;
 }
 
 async function harness(
@@ -93,8 +94,28 @@ async function harness(
   mapFetch: MapFetch,
   requestTimeoutMs = 250,
 ): Promise<Harness> {
+  const server = createServer((request, response) => {
+    if (request.url !== '/json/list') {
+      response.writeHead(404).end();
+      return;
+    }
+    response.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify([{
+      ...TARGET,
+      webSocketDebuggerUrl: `ws://127.0.0.1:${port}/devtools/page/${TARGET.id}`,
+    }]));
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const address = server.address();
+  assert.ok(address && typeof address === 'object');
+  const { port } = address;
   const originalSocket = (globalThis as Record<string, unknown>)['WebSocket'];
   const originalFetch = globalThis.fetch;
+  const restore = async (): Promise<void> => {
+    globalThis.fetch = originalFetch;
+    (globalThis as Record<string, unknown>)['WebSocket'] = originalSocket;
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  };
   let count = 0;
 
   FakeSocket.instances = [];
@@ -102,18 +123,13 @@ async function harness(
   (globalThis as Record<string, unknown>)['WebSocket'] = FakeSocket;
   globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
     const url = String(input);
-    if (url.endsWith('/json/list')) {
-      return {
-        json: async (): Promise<unknown> => [TARGET],
-      } as Response;
-    }
     count += 1;
     return await mapFetch(url, init);
   }) as typeof fetch;
 
   try {
     const agent = await BrowserAgent.attach({
-      port: 9222,
+      port,
       allowedOrigins: ['http://localhost:*'],
       requestTimeoutMs,
     });
@@ -129,15 +145,13 @@ async function harness(
       agent,
       socket,
       mapFetchCount: () => count,
-      close: () => {
+      close: async () => {
         agent.close();
-        globalThis.fetch = originalFetch;
-        (globalThis as Record<string, unknown>)['WebSocket'] = originalSocket;
+        await restore();
       },
     };
   } catch (error) {
-    globalThis.fetch = originalFetch;
-    (globalThis as Record<string, unknown>)['WebSocket'] = originalSocket;
+    await restore();
     throw error;
   }
 }
@@ -160,7 +174,7 @@ test('DEV-P1-24: a same-origin JSON source map is accepted once and cached', asy
     assert.equal(await h.agent.sourceMapFor(SCRIPT_URL), VALID_MAP);
     assert.equal(h.mapFetchCount(), 1, 'the accepted evidence is stable for the attachment');
   } finally {
-    h.close();
+    await h.close();
   }
 });
 
@@ -172,7 +186,7 @@ test('DEV-P1-24: an off-origin URL cannot disguise its network host as localhost
     assert.equal(await h.agent.sourceMapFor(SCRIPT_URL), null);
     assert.equal(h.mapFetchCount(), 0, 'origin policy runs before the network boundary');
   } finally {
-    h.close();
+    await h.close();
   }
 });
 
@@ -185,7 +199,7 @@ test('DEV-P1-24: redirects are refused at the fetch boundary', async () => {
     assert.equal(await h.agent.sourceMapFor(SCRIPT_URL), null);
     assert.equal(h.mapFetchCount(), 1);
   } finally {
-    h.close();
+    await h.close();
   }
 });
 
@@ -198,7 +212,7 @@ test('DEV-P1-24: an HTML response cannot smuggle application/json inside a param
   try {
     assert.equal(await h.agent.sourceMapFor(SCRIPT_URL), null);
   } finally {
-    h.close();
+    await h.close();
   }
 });
 
@@ -224,7 +238,7 @@ test('DEV-P1-24: a declared over-budget map is refused before its body is consum
     assert.equal(await h.agent.sourceMapFor(SCRIPT_URL), null);
     assert.equal(readers, 0, 'the declared bound refuses before reading the body');
   } finally {
-    h.close();
+    await h.close();
   }
 });
 
@@ -249,7 +263,7 @@ test('DEV-P1-24: a chunked map is cancelled as soon as the actual byte budget is
     assert.ok(pulls >= 33, 'the actual streamed count, not a header, crosses the bound');
     assert.equal(cancelled, true, 'the peer is stopped when the evidence is refused');
   } finally {
-    h.close();
+    await h.close();
   }
 });
 
@@ -266,7 +280,7 @@ test('DEV-P1-24: the attachment timeout also bounds later source-map requests', 
         }
         signal.addEventListener('abort', () => reject(signal.reason), { once: true });
       }),
-    25,
+    100,
   );
   try {
     const result = await Promise.race([
@@ -275,6 +289,6 @@ test('DEV-P1-24: the attachment timeout also bounds later source-map requests', 
     ]);
     assert.equal(result, null, 'the configured attachment timeout applies after attach as well');
   } finally {
-    h.close();
+    await h.close();
   }
 });

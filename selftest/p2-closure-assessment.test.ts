@@ -318,3 +318,31 @@ test('P2-CLOSURE-03: a proof-authoritative closure must be current-mission and l
     assert.ok(result.blockers.some((item) => item.id === 'P2-CYCLE-CLOSURE'));
   }
 });
+
+test('P2 closure cannot borrow a verdict written after the cycle closed', () => {
+  const board = {
+    missionVersionId: 'MISSION-000010',
+    proofAttempts: [
+      {
+        cycleId: 'CYCLE-new',
+        missionVersion: 'MISSION-000010',
+        contract: { sequence: 102 },
+        verdict: { sequence: 105, disposition: 'ACCEPT', greatBookState: 'recorded', greatBookEntryId: 'GBI-late' },
+      },
+      {
+        cycleId: 'CYCLE-new',
+        missionVersion: 'MISSION-000010',
+        contract: { sequence: 106 },
+        verdict: null,
+      },
+    ],
+  } as unknown as ProofBoardView;
+  assert.deepEqual(proofFactsForLatestClosure(board, 'CYCLE-new', 100, 104), {
+    currentMissionVersionId: 'MISSION-000010',
+    lastCycleId: 'CYCLE-new',
+    proofAttempts: 1,
+    verdicts: 0,
+    accepts: 0,
+    greatBookEntries: 0,
+  });
+});

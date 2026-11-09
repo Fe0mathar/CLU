@@ -68,7 +68,7 @@ import {
   type MissionLink,
   type SnapshotLink,
 } from '../../shared/evidenceIdentity.js';
-import { parseOrThrow } from '../../shared/schemas.js';
+import { absolutePathForm, parseOrThrow } from '../../shared/schemas.js';
 import {
   projectRecognitionIdentitySchema,
   type ProjectRecognitionIdentity,
@@ -350,27 +350,27 @@ export function captureSnapshot(options: CaptureOptions): SnapshotManifest {
   // id, and the stored manifest all derive from this one list, so root order or equivalent spelling
   // ('src' vs './src', or a repeated root) can neither double-inventory a file nor produce a different
   // manifest for the same tree.
-  const canonicalRoots = [...new Set(options.sourceRoots.map(normalisePath))].sort(compareStr);
-
+  const canonicalRoots = [...new Set(options.sourceRoots.map(canonicalSourceRoot))].sort(compareStr);
+  const coveredRoots: string[] = [];
+  const skippedRoots = new Set<string>();
   for (const sourceRoot of canonicalRoots) {
-    const absoluteRoot = join(options.root, sourceRoot);
-    let rootStat;
-    try {
-      rootStat = statSync(absoluteRoot);
-    } catch (error) {
-      skipped.push({
-        path: normalisePath(sourceRoot),
-        reason: 'unreadable',
-        detail: (error as Error).message,
-      });
+    // Overlapping configured roots still describe one physical file set. Keep the complete
+    // declared policy in the manifest, while walking each subtree at most once.
+    const comparable = process.platform === 'win32' ? sourceRoot.toLowerCase() : sourceRoot;
+    if (coveredRoots.some((root) => root === '.' || comparable === root || comparable.startsWith(`${root}/`))) {
       continue;
     }
-    if (!rootStat.isDirectory()) {
-      skipped.push({ path: normalisePath(sourceRoot), reason: 'special', detail: 'not a directory' });
+    coveredRoots.push(comparable);
+    const inspected = inspectSourceRoot(options.root, sourceRoot, excluded);
+    if (inspected === null) continue;
+    if (typeof inspected !== 'string') {
+      if (!skippedRoots.has(inspected.path)) {
+        skippedRoots.add(inspected.path);
+        skipped.push(inspected);
+      }
       continue;
     }
-
-    walk(absoluteRoot, options.root, excluded, excludedExtensions, files, skipped, options.executableOf);
+    walk(inspected, options.root, excluded, excludedExtensions, files, skipped, options.executableOf);
   }
 
   // Sorting here is a convenience for readers; identity does not depend on it, because
@@ -420,6 +420,46 @@ export function captureSnapshot(options: CaptureOptions): SnapshotManifest {
   );
 }
 
+function canonicalSourceRoot(sourceRoot: string): string {
+  const segments = normalisePath(sourceRoot).split('/');
+  if (
+    sourceRoot.length === 0 ||
+    sourceRoot.includes('\0') ||
+    absolutePathForm(sourceRoot) !== null ||
+    /^[a-z]:/iu.test(segments[0] ?? '') ||
+    segments.includes('..')
+  ) {
+    throw new Error(`Invalid snapshot source root: ${JSON.stringify(sourceRoot)}`);
+  }
+  return segments.filter((segment) => segment !== '' && segment !== '.').join('/') || '.';
+}
+
+/** Check each path component before opening the directory. lstat of only the final
+ * component would miss an intermediate symlink or Windows junction. */
+function inspectSourceRoot(
+  root: string,
+  sourceRoot: string,
+  excluded: ReadonlySet<string>,
+): string | SkippedEntry | null {
+  let absolute = join(root, '.');
+  let path = '.';
+  for (const component of ['.', ...(sourceRoot === '.' ? [] : sourceRoot.split('/'))]) {
+    if (component !== '.') {
+      absolute = join(absolute, component);
+      path = path === '.' ? component : `${path}/${component}`;
+      if (matchesConfiguredExclusion(path, component, excluded)) return null;
+    }
+    try {
+      const stat = lstatSync(absolute);
+      if (stat.isSymbolicLink()) return skippedSymlink(path, absolute);
+      if (!stat.isDirectory()) return { path, reason: 'special', detail: 'not a directory' };
+    } catch (error) {
+      return { path, reason: 'unreadable', detail: (error as Error).message };
+    }
+  }
+  return absolute;
+}
+
 function walk(
   directory: string,
   root: string,
@@ -450,19 +490,7 @@ function walk(
       // DEV-P0-02: record the actual link target text (via readlink), not just "file link". The skipped
       // records are folded into the content id, so re-pointing a symlink at a different target now
       // changes the snapshot identity instead of being invisible.
-      let target: string;
-      try {
-        target = readlinkSync(absolute);
-      } catch {
-        target = 'unresolved';
-      }
-      let kind = 'link';
-      try {
-        kind = lstatSync(absolute).isDirectory() ? 'dir-link' : 'file-link';
-      } catch {
-        // Keep the generic kind.
-      }
-      skipped.push({ path: relativePath, reason: 'symlink', detail: `${kind} -> ${target}` });
+      skipped.push(skippedSymlink(relativePath, absolute));
       continue;
     }
 
@@ -494,6 +522,17 @@ function walk(
       skipped.push({ path: relativePath, reason: 'unreadable', detail: (error as Error).message });
     }
   }
+}
+
+function skippedSymlink(path: string, absolute: string): SkippedEntry {
+  let target: string;
+  try {
+    target = readlinkSync(absolute);
+  } catch {
+    target = 'unresolved';
+  }
+  // Preserve the existing manifest spelling for links without dereferencing their target.
+  return { path, reason: 'symlink', detail: `file-link -> ${target}` };
 }
 
 

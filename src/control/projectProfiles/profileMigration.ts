@@ -37,7 +37,7 @@ import { ProfileRegistryError, ProjectProfileRegistry } from './profileRegistry.
 const routingSchema = z
   .object({
     provider: z.literal('openai'),
-    routes: z.record(z.object({ enabled: z.boolean(), model: z.string().min(1) }).passthrough()),
+    routes: z.record(z.string(), z.object({ enabled: z.boolean(), model: z.string().min(1) }).passthrough()),
   })
   .passthrough();
 
@@ -301,7 +301,7 @@ function buildProfile(repoRoot: string, inputs: LegacyInputs, migratedAt: string
         publicationMode: publicationMode(inputs.profile),
       },
       chrome: {
-        executable: { source: 'global-default', defaultKey: 'chrome.executable', value: null },
+        executable: { source: 'global-default', defaultKey: 'browser.executable', value: null },
         launchMode: 'CLUE_MANAGED',
         dedicatedProfileDirectory: browserProfile,
         remoteDebuggingPort: inputs.config.browser.remote_debugging_port,
@@ -320,7 +320,7 @@ function buildProfile(repoRoot: string, inputs: LegacyInputs, migratedAt: string
     state: {
       databasePath: normalisePathForStorage(join(workspaceDisplay, 'db', 'clue.db')),
       eventLogRoot: stateRoot('events'),
-      artifactStoreRoot: stateRoot('artifacts'),
+      artifactStoreRoot: stateRoot('blobs'),
       greatBookScope: projectId,
       recognitionRoot: stateRoot('recognition'),
       proofRoot: stateRoot('proof'),

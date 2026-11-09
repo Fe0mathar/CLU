@@ -171,6 +171,65 @@ test('Q1 SURF: exposes the rendered snapshot and run', () => {
   assert.match(app, /snapshotId: state\.snapshotId,\s*runId: state\.recognitionRunId,\s*files: activeFiles\(\)\.length/);
 });
 
+test('Q1 SURF: micro-pattern strokes clear inherited shadows and restore the caller state', () => {
+  const shadow = { shadowBlur: 14, shadowColor: 'white' };
+  const strokes = [];
+  const noop = () => {};
+  const stack = [];
+  const ctx = {
+    ...shadow,
+    save() { stack.push({ shadowBlur: this.shadowBlur, shadowColor: this.shadowColor }); },
+    restore() {
+      const saved = stack.pop();
+      assert.ok(saved, 'restore without save');
+      Object.assign(this, saved);
+    },
+    translate: noop,
+    beginPath: noop,
+    moveTo: noop,
+    lineTo: noop,
+    stroke() { strokes.push([this.shadowBlur, this.shadowColor]); },
+  };
+  const drawMicroPattern = runInNewContext(
+    `${sourceSection('function drawMicroPattern(', 'function drawFileLabel(')}\ndrawMicroPattern`,
+    { ctx, rgbaHex: () => 'white', hash01: () => 0.5, TAU: Math.PI * 2 },
+  );
+
+  drawMicroPattern(10, 10, 5, { pattern: 'double', accent: '#fff' }, 'file');
+  assert.deepEqual(strokes, Array.from({ length: 8 }, () => [0, 'transparent']));
+  assert.equal(ctx.shadowBlur, shadow.shadowBlur);
+  assert.equal(ctx.shadowColor, shadow.shadowColor);
+});
+
+test('Q1 SURF: idle draws wait one second and dirty or animated frames draw immediately', () => {
+  const idleDelay = app.match(/const DRAW_IDLE_MS = \d+;/)?.[0];
+  assert.ok(idleDelay, 'missing idle delay');
+  const state = {
+    mode: 'surf', visible: true, cssWidth: 640, cssHeight: 480,
+    lastDrawAt: 0, dirty: false, files: new Map([['file', {}]]),
+  };
+  const draws = [];
+  let animating = false;
+  const surfTick = sourceSection('function tick(now) {\n      if (state.destroyed) return;', 'function draw(now) {');
+  const tick = runInNewContext(
+    `${idleDelay}\n${surfTick}\ntick`,
+    {
+      state, document: { hidden: false }, requestAnimationFrame: () => 1,
+      updateCameraAnimation: () => animating, hasTransientAnimation: () => false,
+      draw(now) { draws.push(now); state.lastDrawAt = now; state.dirty = false; },
+    },
+  );
+
+  tick(999);
+  assert.deepEqual(draws, []);
+  tick(1000);
+  state.dirty = true;
+  tick(1001);
+  animating = true;
+  tick(1002);
+  assert.deepEqual(draws, [1000, 1001, 1002]);
+});
+
 test('Q1 SURF: the root reuses the canonical DIVE project dragon instead of inventing a SURF identity', () => {
   const parity = sourceSection(
     'function syncProjectIdentityIcon()',

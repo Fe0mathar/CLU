@@ -1,11 +1,8 @@
 /**
  * `DEV-P1-24` — browser, profile and navigation identity on recorded exchanges.
  *
- * Nothing in the suite exercised `browserAgent.ts` before this file, because the module
- * talks to a real Chromium over a real socket. It does not have to: both platform touch
- * points are globals read at call time — `fetch` for `/json/list` and `globalThis.WebSocket`
- * for the session — so a fake endpoint here drives the production `attach` path exactly as
- * Chrome would, with no dependency and no browser.
+ * A loopback HTTP endpoint serves `/json/list`, and a fake WebSocket drives the CDP
+ * exchange. This exercises the production attach path without starting Chromium.
  *
  * What is being held: an exchange must name the browser that produced it, the profile
  * endpoint it came through, and the document that was loaded when it happened. Before this,
@@ -14,7 +11,9 @@
  */
 
 import assert from 'node:assert/strict';
+import { once } from 'node:events';
 import { mkdtempSync, rmSync } from 'node:fs';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -32,7 +31,6 @@ const TARGET = {
   type: 'page',
   title: 'shadow clone',
   url: 'http://localhost:5173/index.html',
-  webSocketDebuggerUrl: 'ws://127.0.0.1:9222/devtools/page/TARGET-abc123',
 };
 
 interface MessageEventLike {
@@ -48,6 +46,8 @@ interface MessageEventLike {
 class FakeSocket {
   public static instances: FakeSocket[] = [];
   public static answerVersion = true;
+  public frameUrl = TARGET.url;
+  public readonly requests: { id: number; method: string; params: Record<string, unknown> }[] = [];
 
   private readonly messageHandlers: ((event: MessageEventLike) => void)[] = [];
   private readonly openHandlers: (() => void)[] = [];
@@ -65,7 +65,8 @@ class FakeSocket {
   }
 
   public send(data: string): void {
-    const request = JSON.parse(data) as { id: number; method: string };
+    const request = JSON.parse(data) as (typeof this.requests)[number];
+    this.requests.push(request);
     let result: Record<string, unknown> = {};
     if (request.method === 'Browser.getVersion') {
       if (!FakeSocket.answerVersion) {
@@ -82,8 +83,16 @@ class FakeSocket {
       };
     } else if (request.method === 'Page.getFrameTree') {
       result = {
-        frameTree: { frame: { id: 'FRAME-main', loaderId: 'LOADER-first', url: TARGET.url } },
+        frameTree: { frame: { id: 'FRAME-main', loaderId: 'LOADER-first', url: this.frameUrl } },
       };
+    } else if (request.method === 'Runtime.enable') {
+      this.event('Runtime.executionContextCreated', {
+        context: { id: 1, uniqueId: 'UNIQUE-main', auxData: { isDefault: true, frameId: 'FRAME-main' } },
+      });
+    } else if (request.method === 'Runtime.evaluate') {
+      result = { result: { value: 42 } };
+    } else if (request.method === 'Page.getLayoutMetrics') {
+      result = { cssVisualViewport: { clientWidth: 800, clientHeight: 600 } };
     }
     setTimeout(() => this.deliver({ id: request.id, result }), 0);
   }
@@ -107,20 +116,33 @@ interface Harness {
   readonly store: OperationalConsoleEventStore;
   readonly recorder: OperationalConsoleRecorder;
   readonly eventFile: string;
-  readonly restore: () => void;
+  readonly port: number;
+  readonly restore: () => Promise<void>;
 }
 
-function harness(): Harness {
+async function harness(
+  webSocketUrl = (port: number) => `ws://127.0.0.1:${port}/devtools/page/${TARGET.id}`,
+): Promise<Harness> {
+  const server = createServer((request, response) => {
+    if (request.url !== '/json/list') {
+      response.writeHead(404).end();
+      return;
+    }
+    response.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify([{
+      ...TARGET,
+      webSocketDebuggerUrl: webSocketUrl(port),
+    }]));
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const address = server.address();
+  assert.ok(address && typeof address === 'object');
+  const { port } = address;
   const originalSocket = (globalThis as Record<string, unknown>)['WebSocket'];
-  const originalFetch = (globalThis as Record<string, unknown>)['fetch'];
 
   FakeSocket.instances = [];
   FakeSocket.answerVersion = true;
   (globalThis as Record<string, unknown>)['WebSocket'] = FakeSocket;
-  (globalThis as Record<string, unknown>)['fetch'] = async (input: unknown): Promise<unknown> => {
-    if (String(input).endsWith('/json/list')) return { json: async (): Promise<unknown> => [TARGET] };
-    throw new Error(`unexpected fetch: ${String(input)}`);
-  };
 
   const root = mkdtempSync(join(tmpdir(), 'clue-browser-identity-'));
   const eventFile = join(root, 'console', 'events.ndjson');
@@ -134,21 +156,86 @@ function harness(): Harness {
     store,
     recorder,
     eventFile,
-    restore: () => {
+    port,
+    restore: async () => {
       store.close();
       rmSync(root, { recursive: true, force: true });
       (globalThis as Record<string, unknown>)['WebSocket'] = originalSocket;
-      (globalThis as Record<string, unknown>)['fetch'] = originalFetch;
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     },
   };
 }
 
-function attachOptions(recorder: OperationalConsoleRecorder): {
+const governed = {
+  projectIdentity: {
+    projectId: 'browser-agent-fixture',
+    targetRootIdentity: `path:v1:linux:${'1'.repeat(64)}`,
+    projectProfileHash: `profile:v1:${'2'.repeat(64)}`,
+  },
+  profileGeneration: 1,
+  chromeInstanceId: 'CHROME-fixture',
+};
+
+test('governed Chrome attachment refuses a debugger socket for a different page or host', async () => {
+  for (const webSocketUrl of [
+    (port: number) => `ws://127.0.0.1:${port}/devtools/page/other-page`,
+    (port: number) => `ws://example.test:${port}/devtools/page/${TARGET.id}`,
+  ]) {
+    const fixture = await harness(webSocketUrl);
+    try {
+      await assert.rejects(
+        BrowserAgent.attach({ ...attachOptions(fixture), ...governed }),
+        { code: 'ORIGIN_REFUSED' },
+      );
+      assert.equal(FakeSocket.instances.length, 0);
+    } finally {
+      await fixture.restore();
+    }
+  }
+});
+
+test('strict page controls pin the main world and refuse action after same-origin target drift', async () => {
+  const fixture = await harness();
+  try {
+    const agent = await BrowserAgent.attach({ ...attachOptions(fixture), ...governed });
+    try {
+      const socket = FakeSocket.instances[0];
+      assert.ok(socket);
+      const expected = {
+        ...governed,
+        browserSessionId: agent.identity().sessionId,
+        targetPageId: TARGET.id,
+        targetUrl: TARGET.url,
+      };
+      assert.equal(await agent.evaluateGoverned('40 + 2', expected), 42);
+      const evaluation = socket.requests.find((request) => request.method === 'Runtime.evaluate');
+      assert.equal(evaluation?.params['uniqueContextId'], 'UNIQUE-main');
+      assert.match(String(evaluation?.params['expression']), /location\.href/);
+
+      await agent.controlGoverned({ type: 'click', x: 10, y: 15 }, expected);
+      const events = () => socket.requests.filter((request) => request.method === 'Input.dispatchMouseEvent');
+      assert.deepEqual(events().map((event) => event.params['type']), ['mousePressed', 'mouseReleased']);
+      await assert.rejects(agent.controlGoverned({ type: 'click', x: 800, y: 0 }, expected), { code: 'PROTOCOL_ERROR' });
+
+      socket.frameUrl = 'http://localhost:5173/other.html';
+      await assert.rejects(agent.controlGoverned({ type: 'click', x: 10, y: 15 }, expected), { code: 'ORIGIN_REFUSED' });
+      await assert.rejects(agent.evaluateGoverned('1', expected), { code: 'ORIGIN_REFUSED' });
+      assert.equal(events().length, 2);
+      assert.equal(socket.requests.filter((request) => request.method === 'Runtime.evaluate').length, 1);
+    } finally {
+      agent.close();
+    }
+  } finally {
+    await fixture.restore();
+  }
+});
+
+function attachOptions({ port, recorder }: Harness): {
   port: number;
   allowedOrigins: readonly string[];
   operationalConsole: OperationalConsoleRecorder;
 } {
-  return { port: 9222, allowedOrigins: ['http://localhost:*'], operationalConsole: recorder };
+  return { port, allowedOrigins: ['http://localhost:*'], operationalConsole: recorder };
 }
 
 /** The source ids of the last request exchange recorded. */
@@ -158,12 +245,12 @@ function lastRequestSourceIds(eventFile: string): readonly string[] {
 }
 
 test('DEV-P1-24: attach binds browser, profile endpoint and the loaded document', async () => {
-  const h = harness();
+  const h = await harness();
   try {
-    const agent = await BrowserAgent.attach(attachOptions(h.recorder));
+    const agent = await BrowserAgent.attach(attachOptions(h));
     const identity = agent.identity();
 
-    assert.equal(identity.endpoint, '127.0.0.1:9222', 'the profile is the endpoint it listens on');
+    assert.equal(identity.endpoint, `127.0.0.1:${h.port}`, 'the profile is the endpoint it listens on');
     assert.equal(identity.targetId, TARGET.id);
     assert.match(identity.sessionId, /^BROWSER-/);
     assert.equal(identity.product, 'Chrome/126.0.6478.127');
@@ -175,14 +262,14 @@ test('DEV-P1-24: attach binds browser, profile endpoint and the loaded document'
 
     agent.close();
   } finally {
-    h.restore();
+    await h.restore();
   }
 });
 
 test('DEV-P1-24: every recorded exchange names the session, endpoint and target', async () => {
-  const h = harness();
+  const h = await harness();
   try {
-    const agent = await BrowserAgent.attach(attachOptions(h.recorder));
+    const agent = await BrowserAgent.attach(attachOptions(h));
     const identity = agent.identity();
     const events = readOperationalConsoleEvents(h.eventFile);
     assert.ok(events.length > 0, 'attach records the calls it makes');
@@ -201,14 +288,14 @@ test('DEV-P1-24: every recorded exchange names the session, endpoint and target'
 
     agent.close();
   } finally {
-    h.restore();
+    await h.restore();
   }
 });
 
 test('DEV-P1-24: a main-frame navigation re-identifies the document; a subframe does not', async () => {
-  const h = harness();
+  const h = await harness();
   try {
-    const agent = await BrowserAgent.attach(attachOptions(h.recorder));
+    const agent = await BrowserAgent.attach(attachOptions(h));
     const socket = FakeSocket.instances[0];
     assert.ok(socket !== undefined);
 
@@ -239,15 +326,15 @@ test('DEV-P1-24: a main-frame navigation re-identifies the document; a subframe 
 
     agent.close();
   } finally {
-    h.restore();
+    await h.restore();
   }
 });
 
 test('DEV-P1-24: two agents on one page are distinguishable in one record', async () => {
-  const h = harness();
+  const h = await harness();
   try {
-    const first = await BrowserAgent.attach(attachOptions(h.recorder));
-    const second = await BrowserAgent.attach(attachOptions(h.recorder));
+    const first = await BrowserAgent.attach(attachOptions(h));
+    const second = await BrowserAgent.attach(attachOptions(h));
 
     assert.notEqual(
       first.identity().sessionId,
@@ -263,22 +350,22 @@ test('DEV-P1-24: two agents on one page are distinguishable in one record', asyn
     first.close();
     second.close();
   } finally {
-    h.restore();
+    await h.restore();
   }
 });
 
 test('DEV-P1-24: a browser that declines to identify itself leaves null, not "unknown"', async () => {
-  const h = harness();
+  const h = await harness();
   try {
     FakeSocket.answerVersion = false;
-    const agent = await BrowserAgent.attach(attachOptions(h.recorder));
+    const agent = await BrowserAgent.attach(attachOptions(h));
     const identity = agent.identity();
 
     assert.equal(identity.product, null, 'a value the protocol never gave is absent, not invented');
     assert.equal(identity.revision, null);
     // The rest still binds: a browser that will not name itself is still on this endpoint,
     // driving this target, on this document.
-    assert.equal(identity.endpoint, '127.0.0.1:9222');
+    assert.equal(identity.endpoint, `127.0.0.1:${h.port}`);
     assert.equal(identity.loaderId, 'LOADER-first');
 
     const ids = lastRequestSourceIds(h.eventFile);
@@ -287,6 +374,6 @@ test('DEV-P1-24: a browser that declines to identify itself leaves null, not "un
 
     agent.close();
   } finally {
-    h.restore();
+    await h.restore();
   }
 });

@@ -90,12 +90,19 @@ Batch 1 records the existing workspace in place. It does not split or copy its d
 
 ```text
 workspace/db/clue.db          database, Great Book and cycle projection binding
+workspace/events              existing event log
+workspace/blobs               existing content-addressed artifacts and proof evidence
 workspace/snapshots           recognition and snapshot binding
 workspace/proof-contracts     proof binding
 ```
 
 This describes current storage truth. Later batches may introduce more explicit scoped services,
 but no later migration may claim that existing history was originally stored elsewhere.
+
+Earlier migration records may name `workspace/artifacts` even when the v2 artifact store is
+`workspace/blobs`. If adoption or startup reports this mismatch, review the exact saved profile
+generation and update `state.artifactStoreRoot` to the existing `blobs` directory through the
+normal profile update command. The correction preserves the original evidence bytes in place.
 
 ## 6. Idempotency
 

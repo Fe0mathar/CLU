@@ -8,6 +8,8 @@ import {
   type BrowserSessionIdentity,
   type TargetInfo,
 } from '../../experiment/browser/browserAgent.js';
+import { probeChromeConsole } from '../../experiment/browser/browserConsoleProbe.js';
+import type { ManagedProjectChrome } from '../../experiment/browser/managedChromeHost.js';
 import {
   resolveGovernedBrowserTarget,
   type GovernedBrowserTargetIdentity,
@@ -61,6 +63,8 @@ export interface ProjectBrowserReadinessOptions {
   readonly previousTargetPageId?: string | null;
   readonly checkedAt?: string;
   readonly requestTimeoutMs?: number;
+  readonly managedChrome?: ManagedProjectChrome;
+  readonly attestManagedChrome?: () => Promise<ManagedProjectChrome>;
   /** Enabled only after the host has verified a newly opened dedicated test window. */
   readonly writeVisibleMarker?: boolean;
   readonly listTargets?: (
@@ -133,7 +137,9 @@ export async function testProjectBrowserReadiness(
   }
 
   let targets: readonly TargetInfo[];
+  let managed: ManagedProjectChrome | undefined;
   try {
+    managed = options.managedChrome ?? await options.attestManagedChrome?.();
     targets = await (options.listTargets ?? BrowserAgent.listTargets)(
       host,
       chrome.remoteDebuggingPort,
@@ -162,10 +168,22 @@ export async function testProjectBrowserReadiness(
       base,
     );
   }
+  if (managed !== undefined && (resolution.selectedBy !== 'EXACT_TARGET_URL' ||
+      managed.port !== chrome.remoteDebuggingPort || resolution.target.targetUrl !== managed.targetUrl)) {
+    return result(
+      'TARGET NOT FOUND',
+      'BROWSER_MANAGED_TARGET_MISMATCH',
+      'The exact configured page is unavailable in the verified dedicated Chrome instance.',
+      base,
+    );
+  }
+  const target = managed === undefined ? resolution.target : {
+    ...resolution.target, chromeInstanceId: managed.chromeInstanceId,
+  };
 
   let session: BrowserSessionIdentity;
   try {
-    session = await (options.probeSession ?? defaultSessionProbe)(resolution.target, {
+    session = await (options.probeSession ?? defaultSessionProbe)(target, {
       record,
       host,
       requestTimeoutMs: timeoutMs,
@@ -173,7 +191,7 @@ export async function testProjectBrowserReadiness(
     });
   } catch (error) {
     const mapped = browserFailure(error);
-    return result(mapped.state, mapped.code, mapped.detail, base, resolution.target);
+    return result(mapped.state, mapped.code, mapped.detail, base, target);
   }
 
   try {
@@ -190,12 +208,12 @@ export async function testProjectBrowserReadiness(
         `browser session profile generation ${String(session.profileGeneration)} does not match active generation ${String(record.generation)}`,
       );
     }
-    if (session.targetId !== resolution.target.targetPageId) {
+    if (session.targetId !== target.targetPageId) {
       throw new Error(
-        `browser session attached to ${session.targetId}, expected ${resolution.target.targetPageId}`,
+        `browser session attached to ${session.targetId}, expected ${target.targetPageId}`,
       );
     }
-    if (session.chromeInstanceId !== resolution.target.chromeInstanceId) {
+    if (session.chromeInstanceId !== target.chromeInstanceId) {
       throw new Error('browser session Chrome instance identity does not match target resolution');
     }
   } catch (error) {
@@ -204,7 +222,7 @@ export async function testProjectBrowserReadiness(
       'BROWSER_SESSION_IDENTITY_MISMATCH',
       errorMessage(error),
       base,
-      resolution.target,
+      target,
       session,
     );
   }
@@ -214,7 +232,7 @@ export async function testProjectBrowserReadiness(
     'BROWSER_READY',
     'Chrome endpoint, exact permitted target, execution channel, capture channel and Project Profile identity are ready.',
     base,
-    resolution.target,
+    target,
     session,
   );
 }
@@ -240,27 +258,30 @@ async function defaultSessionProbe(
     requestTimeoutMs: input.requestTimeoutMs,
   });
   try {
-    const identity = agent.identity();
-    const value = await agent.evaluateGoverned(
-      input.writeVisibleMarker
-        ? `(console.info('[CLU-E] Dedicated browser connection verified'), {clueProbe:true, href:String(globalThis.location?.href ?? '')})`
-        : `({clueProbe:true, href:String(globalThis.location?.href ?? '')})`,
-      {
-        projectIdentity: target.projectIdentity,
-        profileGeneration: target.profileGeneration,
-        browserSessionId: identity.sessionId,
-        targetPageId: target.targetPageId,
-      },
-    );
-    // Capturing a JSON value is a separate gate from command execution.
-    try {
-      JSON.stringify(value);
-    } catch (error) {
+    const expected = {
+      projectIdentity: target.projectIdentity,
+      profileGeneration: target.profileGeneration,
+      browserSessionId: agent.identity().sessionId,
+      targetPageId: target.targetPageId,
+      targetUrl: target.targetUrl,
+    };
+    const roundTrip = await probeChromeConsole(agent, (source) => agent.evaluateGoverned(source, expected));
+    if (!roundTrip.executed) {
+      throw new BrowserReadinessProbeError(
+        'EXECUTION CHANNEL FAILED',
+        'EXECUTION_CHANNEL_FAILED',
+        'The exact Chrome page did not return the verification value.',
+      );
+    }
+    if (!roundTrip.captured) {
       throw new BrowserReadinessProbeError(
         'CAPTURE CHANNEL FAILED',
         'CAPTURE_CHANNEL_FAILED',
-        errorMessage(error),
+        'The matching Chrome console event did not reach CLU-E.',
       );
+    }
+    if (input.writeVisibleMarker) {
+      await agent.evaluateGoverned("console.info('[CLU-E] Dedicated browser connection verified')", expected);
     }
     return agent.identity();
   } finally {

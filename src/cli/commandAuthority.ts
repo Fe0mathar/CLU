@@ -113,6 +113,13 @@ export const COMMAND_AUTHORITIES: readonly CommandAuthority[] = [
     rationale: 'projects operation-specific readiness for one explicit profile generation',
   },
   {
+    command: 'project preflight',
+    capability: 'fs.read.workspace',
+    mutates: false,
+    requiresMission: false,
+    rationale: 'inspects the exact active startup profile and local Windows proof prerequisites, emitting JSON to stdout',
+  },
+  {
     command: 'project test-host',
     capability: 'process.run.host',
     mutates: false,
@@ -125,6 +132,13 @@ export const COMMAND_AUTHORITIES: readonly CommandAuthority[] = [
     mutates: false,
     requiresMission: false,
     rationale: 'reads local Git identity/state and never synchronizes a remote',
+  },
+  {
+    command: 'project browser-run',
+    capability: 'browser.control',
+    mutates: true,
+    requiresMission: true,
+    rationale: 'executes one explicitly pinned browser scenario in the active managed Chrome and records its evidence',
   },
   {
     command: 'project test-chrome',
@@ -160,6 +174,13 @@ export const COMMAND_AUTHORITIES: readonly CommandAuthority[] = [
     mutates: true,
     requiresMission: false,
     rationale: 'writes only a workspace ownership receipt while preserving projection/event history',
+  },
+  {
+    command: 'project prepare-dashboard',
+    capability: 'fs.write.workspace',
+    mutates: true,
+    requiresMission: false,
+    rationale: 'prepares the explicitly confirmed active profile workspace and publishes its verified startup selector',
   },
   {
     command: 'project cutover-v3',

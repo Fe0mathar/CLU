@@ -82,6 +82,7 @@ const REQUIRED_OPERATOR_PATHS = [
   'CLUE-Windows-Setup.bat',
   'CLUE-Windows-Supervisor.bat',
   'CLUE-Windows-WFP-Diagnostic.bat',
+  'CLUE-Windows-WFP-BFE-Lab.bat',
   'CLUE-Windows-WFP-Enforcement-Fault.bat',
   'CLUE-Windows-Sandbox-Diagnostic.bat',
   'CLUE-Windows-Host-Test.bat',
@@ -95,6 +96,9 @@ const REQUIRED_OPERATOR_PATHS = [
   'CLUE-Windows-Governed-WFP-Active-Loss.bat',
   'CLUE-Windows-Proof-Supervisor.bat',
   'CLUE-Windows-Qualify-Proof-Supervisor.bat',
+  'CLUE-Windows-Production-Network-Fault.bat',
+  'CLUE-Windows-Reviewed-Release.bat',
+  'AUDIT_AND_UPGRADE.md',
   'CONFIG-EDIT.md',
   'MANIFEST.txt',
   'clue-status.md',
@@ -886,9 +890,14 @@ function commandText(command, args) {
 
 function releaseTestEnvironment() {
   const configuredKey = readYamlFile(ROOT, CONFIG_PATH).gateway?.api_key_env;
-  const excluded = new Set(['OPENAI_API_KEY', 'NODE_OPTIONS', 'NODE_PATH', 'NODE_TEST_CONTEXT']);
+  const excluded = new Set([
+    'OPENAI_API_KEY', 'GH_TOKEN', 'GITHUB_TOKEN', 'GH_ENTERPRISE_TOKEN', 'GITHUB_ENTERPRISE_TOKEN',
+    'NODE_OPTIONS', 'NODE_PATH', 'NODE_TEST_CONTEXT',
+  ]);
   if (typeof configuredKey === 'string') excluded.add(configuredKey.toUpperCase());
-  return Object.fromEntries(Object.entries(process.env).filter(([name]) => !excluded.has(name.toUpperCase())));
+  return Object.fromEntries(Object.entries(process.env).filter(([name]) =>
+    !excluded.has(name.toUpperCase()) && !/^GIT_/iu.test(name),
+  ));
 }
 
 function safeLabel(label) {

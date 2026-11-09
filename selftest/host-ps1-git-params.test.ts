@@ -24,7 +24,7 @@ import { fileURLToPath } from 'node:url';
 function findPwsh(): string | null {
   for (const candidate of [process.env['PWSH'], 'pwsh', 'pwsh.exe']) {
     if (candidate === undefined || candidate === '') continue;
-    const probe = spawnSync(candidate, ['-NoProfile', '-Command', '1'], { encoding: 'utf8' });
+    const probe = spawnSync(candidate, ['-NoProfile', '-Command', 'if ($PSVersionTable.PSVersion -lt [version]"7.2") { exit 1 }'], { encoding: 'utf8' });
     if (!probe.error && probe.status === 0) return candidate;
   }
   return null;
@@ -204,6 +204,73 @@ test('DEV-P0-12: the landing ref prefix is enforced independently in the host', 
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test('the host keeps Git operands in their zones and refreshes only from the canonical checkout', (t) => {
+  const pwsh = findPwsh();
+  if (pwsh === null || spawnSync('git', ['--version']).status !== 0) {
+    t.skip('PowerShell 7.2+ and Git are required');
+    return;
+  }
+  const root = mkdtempSync(join(tmpdir(), 'clue-ps1-git-zones-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const roots = { canon: join(root, 'canonical'), shadow: join(root, 'shadow'), ws: join(root, 'workspace'), prof: join(root, 'profile') };
+  for (const path of Object.values(roots)) mkdirSync(path);
+  function git(cwd: string, ...args: string[]): string {
+    const result = spawnSync('git', args, { cwd, encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout.trim();
+  }
+  git(roots.canon, 'init');
+  git(roots.shadow, 'init');
+  git(roots.canon, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--allow-empty', '-m', 'canonical');
+  git(roots.shadow, 'remote', 'add', 'origin', 'https://example.invalid/unused.git');
+
+  const gitRequest = (id: string, verb: string, params: unknown) => ({
+    v: 1, id, command: 'git', args: { zone: 'shadow', root: roots.shadow, verb, params },
+  });
+  const refreshRequest = (id: string, commit: string | null) => ({
+    v: 1, id, command: 'shadow.refresh', args: { canonicalRoot: roots.canon, shadowRoot: roots.shadow, commit },
+  });
+  const replies = runHost(pwsh, roots, [
+    gitRequest('external-hash', 'hashObject', { of: 'path', path: join(root, 'private.txt') }),
+    gitRequest('external-clone', 'clone', { of: 'clone', source: roots.canon, dest: join(root, 'escape') }),
+    refreshRequest('checkout-option', '--orphan'),
+    refreshRequest('canonical-refresh', null),
+  ]);
+  assert.equal(replies.get('external-hash')?.code, 'ZONE_MISMATCH');
+  assert.equal(replies.get('external-clone')?.code, 'ZONE_MISMATCH');
+  assert.equal(replies.get('checkout-option')?.code, 'INVALID_ARGUMENT');
+  assert.equal(replies.get('canonical-refresh')?.ok, true, JSON.stringify(replies.get('canonical-refresh')));
+  assert.equal(git(roots.shadow, 'rev-parse', 'HEAD'), git(roots.canon, 'rev-parse', 'HEAD'));
+});
+
+test('the host invokes the installed npm CLI directly and strips the provider key from the script', (t) => {
+  const pwsh = findPwsh();
+  if (pwsh === null) {
+    t.skip('PowerShell 7.2+ is required');
+    return;
+  }
+  const root = mkdtempSync(join(tmpdir(), 'clue-ps1-npm-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const roots = { canon: join(root, 'canonical'), shadow: join(root, 'shadow'), ws: join(root, 'workspace'), prof: join(root, 'profile') };
+  for (const path of Object.values(roots)) mkdirSync(path);
+  writeFileSync(join(roots.shadow, 'package.json'), JSON.stringify({ scripts: { typecheck: 'node check-env.cjs' } }));
+  writeFileSync(join(roots.shadow, 'check-env.cjs'), 'process.exitCode = process.env.OPENAI_API_KEY ? 12 : 0;');
+  const previous = process.env['OPENAI_API_KEY'];
+  process.env['OPENAI_API_KEY'] = 'fixture-only-not-a-real-key';
+  t.after(() => {
+    if (previous === undefined) delete process.env['OPENAI_API_KEY'];
+    else process.env['OPENAI_API_KEY'] = previous;
+  });
+
+  const replies = runHost(pwsh, roots, [{
+    v: 1, id: 'typecheck', command: 'shadow.run',
+    args: { shadowRoot: roots.shadow, script: 'typecheck', timeoutMs: 10_000 },
+  }]);
+  const reply = replies.get('typecheck');
+  assert.equal(reply?.ok, true, JSON.stringify(reply));
+  assert.equal((reply as Reply & { result: { exitCode: number } }).result.exitCode, 0);
 });
 
 test('DEV-P0-12: browser launch requires a startup-pinned executable and an allowed origin', (t) => {

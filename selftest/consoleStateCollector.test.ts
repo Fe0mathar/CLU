@@ -20,6 +20,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { projectStatus } from '../src/status/statusProjector.js';
+import { emptyFourNeonGauges } from '../src/ui/fourNeonGauges.js';
 
 import {
   collectProjectorInput,
@@ -99,6 +100,20 @@ function options(source?: RegistrySource): CollectOptions {
   }).snapshot;
   return { capturedAt, operator: 'selftest', activeTab: 'dashboard', status };
 }
+
+test('the collector uses the gauge facts already sealed by Status', () => {
+  let reads = 0;
+  const source = baseSource({
+    gaugesProjection(capturedAt) {
+      reads += 1;
+      return emptyFourNeonGauges(capturedAt);
+    },
+  });
+  const captured = options(source);
+  const input = collectProjectorInput(source, captured);
+  assert.deepEqual(input.gauges, captured.status.gauges);
+  assert.equal(reads, 1);
+});
 
 /* ------------------------------------------------------------------------- */
 /* Identity regimes                                                           */

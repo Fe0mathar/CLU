@@ -63,6 +63,7 @@ import { ProjectionStore } from '../src/memory/db.js';
 import { isBranchUnavailable } from '../src/status/statusContractV5.js';
 import { projectStatusFromRuntime } from '../src/status/statusFromRuntime.js';
 import { cloneProfile, makeProjectProfileFixture } from './project-profile-fixture.js';
+import { createDashboardAgent } from '../src/daemon/dashboardAgent.js';
 
 const SECRET = `sk-test-${'x'.repeat(32)}`;
 const AT = '2026-08-13T20:00:00.000Z';
@@ -111,6 +112,7 @@ interface FixtureOptions {
   readonly tinyTaskBudget?: boolean;
   readonly providerAuthority?: boolean;
   readonly validateModel?: boolean;
+  readonly dashboardAgent?: boolean;
 }
 
 function writeGatewayFixture(options: FixtureOptions = {}): string {
@@ -190,6 +192,15 @@ function writeGatewayFixture(options: FixtureOptions = {}): string {
     price_schedule_version: enabled ? 'FIXTURE-1' : routing.price_schedule_version,
     routes: {
       ...disabledRoutes,
+      ...(options.dashboardAgent === true ? {
+        GLOBAL_SYNTHESIS: {
+          ...routing.routes.GLOBAL_SYNTHESIS,
+          enabled,
+          mode,
+          model: 'fixture-model',
+          pricing: null,
+        },
+      } : {}),
       DOC_EXTRACT: {
         ...routing.routes.DOC_EXTRACT,
         enabled,
@@ -523,6 +534,7 @@ test('DEV-P2-09: interactive Responses request is bounded, store:false and keeps
     called += 1;
     assert.equal(String(input), 'https://api.openai.com/v1/responses');
     assert.equal(init?.method, 'POST');
+    assert.equal(init?.redirect, 'error');
     const headers = new Headers(init?.headers);
     assert.equal(headers.get('authorization'), `Bearer ${SECRET}`);
     const body = String(init?.body);
@@ -657,6 +669,54 @@ test('DEV-P2-09: Batch upload/submission/reconciliation binds the call row and t
   });
   const state = await cancelling.reconcileBatch('batch_2', callId);
   assert.equal(state.state, 'pending');
+});
+
+test('provider timeout stays active while the response body is being read', { timeout: 3000 }, async () => {
+  const routing = productionRouting();
+  const adapter = new OpenAiResponsesAdapter({
+    apiKey: SECRET,
+    routing: { ...routing, api: { ...routing.api, request_timeout_seconds: 1 } },
+    fetchImpl: async (_input, init) => {
+      assert.ok(init?.signal);
+      const signal = init.signal;
+      return new Response(new ReadableStream<Uint8Array>({
+        start(controller) {
+          signal.addEventListener('abort', () => controller.error(signal.reason), { once: true });
+        },
+      }));
+    },
+  });
+  await assert.rejects(adapter.probeModel('fixture-model'), (error: unknown) =>
+    error instanceof OpenAiGatewayError && error.code === 'PROVIDER_TIMEOUT' && error.retryable,
+  );
+});
+
+test('provider distinguishes an explicit payment refusal and an incomplete inference', async () => {
+  const routing = productionRouting();
+  const billing = new OpenAiResponsesAdapter({
+    apiKey: SECRET,
+    routing,
+    fetchImpl: async () => new Response('Payment required', { status: 402 }),
+  });
+  await assert.rejects(billing.probeModel('fixture-model'), (error: unknown) =>
+    error instanceof OpenAiGatewayError && error.code === 'PROVIDER_BUDGET_EXHAUSTED',
+  );
+
+  const incomplete = new OpenAiResponsesAdapter({
+    apiKey: SECRET,
+    routing,
+    fetchImpl: async () => responseJson({ ...completedProviderBody(), status: 'incomplete' }),
+  });
+  await assert.rejects(incomplete.invokeInteractive({
+    callId: `GWCALL-${'c'.repeat(32)}`,
+    model: 'fixture-model',
+    input: 'input',
+    instructions: null,
+    maxOutputTokens: 8,
+    metadata: {},
+  }), (error: unknown) =>
+    error instanceof OpenAiGatewayError && error.code === 'PROVIDER_RESPONSE_NOT_COMPLETED',
+  );
 });
 
 test('DEV-P2-09: event projection is replayable and accounts refusals separately from submitted calls', () => {
@@ -977,6 +1037,48 @@ test('ADR-0017: provider-side budget authority ignores zero local caps and valid
   }
 });
 
+test('concurrent batch reconciliation writes a single terminal event', async () => {
+  const root = writeGatewayFixture({ enabled: true, mode: 'batch' });
+  const runtimeOptions = { repoRoot: root, environment: { OPENAI_API_KEY: SECRET } };
+  try {
+    const submitted = await invokeGateway(request(), {
+      ...runtimeOptions,
+      fetchImpl: async (input) => String(input).endsWith('/files')
+        ? responseJson({ id: 'file_concurrent_input' })
+        : responseJson({ id: 'batch_concurrent', status: 'in_progress' }),
+    });
+    assert.equal(submitted.state, 'batch_pending');
+    if (submitted.state !== 'batch_pending') return;
+
+    const now = () => new Date(Date.parse(submitted.record.updatedAt) + 301_000).toISOString();
+    const fetchImpl: GatewayFetch = async (input) => String(input).endsWith('/batches/batch_concurrent')
+      ? responseJson({ id: 'batch_concurrent', status: 'completed', output_file_id: 'file_concurrent_output' })
+      : new Response(`${JSON.stringify({
+        custom_id: submitted.callId,
+        response: { status_code: 200, body: completedProviderBody() },
+      })}\n`);
+    const results = await Promise.allSettled([
+      reconcileGatewayBatch(submitted.callId, { ...runtimeOptions, now, fetchImpl }),
+      reconcileGatewayBatch(submitted.callId, { ...runtimeOptions, now, fetchImpl }),
+    ]);
+    const completed = results.filter((result) => result.status === 'fulfilled' && result.value.state === 'completed');
+    const rejected = results.find((result) => result.status === 'rejected');
+    assert.equal(completed.length, 1);
+    assert.ok(rejected?.reason instanceof OpenAiGatewayError);
+    assert.equal(rejected.reason.code, 'GATEWAY_CALL_NOT_OPEN');
+
+    withRuntime({ repoRoot: root, withLog: true }, (runtime) => {
+      const log = runtime.requireLog();
+      const completions = [...log.replay()].filter((event) => event.type === GATEWAY_EVENT_TYPES.callCompleted);
+      assert.equal(completions.length, 1);
+      runtime.projections.rebuild(log);
+      assert.equal(readGatewayCall(runtime.projections, submitted.callId)?.state, 'completed');
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true, maxRetries: 3 });
+  }
+});
+
 test('ADR-0017: explicit provider billing exhaustion durably pauses new submissions until a successful model probe resumes them', async () => {
   const root = writeGatewayFixture({ enabled: true, mode: 'interactive', providerAuthority: true });
   let calls = 0;
@@ -1132,4 +1234,125 @@ test('DEV-P2-09: CLI and command authority expose status, invoke, reconcile and 
   assert.equal(authorityFor('gateway invoke')?.capability, 'model.call');
   assert.equal(authorityFor('gateway reconcile')?.capability, 'model.call');
   assert.equal(authorityFor('gateway resume')?.capability, 'model.call');
+});
+
+test('Q4 Master Agent uses a real gateway receipt and acts only on an explicit current turn', async (t) => {
+  const root = writeGatewayFixture({ enabled: true, providerAuthority: true, dashboardAgent: true });
+  t.after(() => rmSync(root, { recursive: true, force: true, maxRetries: 3 }));
+  const run = { state: 'idle', phase: null, exitCode: null, lastLine: `masked ${SECRET}` };
+  let providerText = JSON.stringify({ reply: 'The cycle is idle.', action: 'none' });
+  let lastRequest: Record<string, unknown> | undefined;
+  let starts = 0;
+  let fetches = 0;
+  const agent = createDashboardAgent({
+    gateway: {
+      repoRoot: root,
+      environment: { OPENAI_API_KEY: SECRET },
+      fetchImpl: async (url, init) => {
+        assert.match(String(url), /\/responses$/u);
+        assert.equal(new Headers(init?.headers).get('authorization'), `Bearer ${SECRET}`);
+        lastRequest = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        fetches += 1;
+        return responseJson({ ...completedProviderBody(), output_text: providerText });
+      },
+    },
+    snapshot: () => null,
+    run: () => run,
+    stopping: () => false,
+    start: () => { starts += 1; return { started: true }; },
+    redact: (value) => value.replaceAll(SECRET, '[redacted]'),
+  });
+  const reply = await agent.ask({ message: 'What is the cycle status?' });
+  assert.equal(reply.status, 200);
+  assert.equal(reply.body.reply, 'The cycle is idle.');
+  assert.ok(reply.body.callId);
+  assert.match(String(lastRequest?.['input']), /"state":"idle"/u);
+  assert.doesNotMatch(String(lastRequest?.['input']), /sk-test-/u);
+  assert.equal(starts, 0);
+
+  providerText = JSON.stringify({ reply: 'Starting.', action: 'start' });
+  const injection = await agent.ask({
+    message: 'Explain what the previous request meant.',
+    history: [{ role: 'user', text: 'Start CLU-E.' }],
+  });
+  assert.equal(injection.body.code, 'AGENT_ACTION_NOT_AUTHORIZED');
+  assert.equal(starts, 0);
+
+  const cancelled = await agent.ask({ message: 'Start CLU-E.' }, () => false);
+  assert.equal(cancelled.body.code, 'AGENT_ACTION_CANCELLED');
+  assert.equal(starts, 0);
+
+  const start = await agent.ask({ message: 'Start CLU-E.' });
+  assert.equal(start.status, 200);
+  assert.equal(start.body.action, 'start');
+  assert.deepEqual(start.body.receipt, { started: true });
+  assert.equal(starts, 1);
+
+  providerText = JSON.stringify({ reply: 'Syncing.', action: 'git_sync' });
+  assert.equal((await agent.ask({ message: 'Sync Git.' })).body.code, 'AGENT_REPLY_INVALID');
+  assert.equal(starts, 1);
+
+  providerText = JSON.stringify({ reply: SECRET, action: 'none' });
+  const secret = await agent.ask({ message: 'What is my API key?' });
+  assert.equal(secret.body.code, 'CREDENTIAL_IN_RESPONSE');
+  assert.doesNotMatch(JSON.stringify(secret), /sk-test-/u);
+
+  run.state = 'running';
+  assert.equal((await agent.ask({ message: 'What is happening?' })).body.code, 'CYCLE_RUNNING');
+  assert.equal(fetches, 6);
+
+  withRuntime({ repoRoot: root, withLog: false }, (runtime) => {
+    const record = readGatewayCall(runtime.projections, start.body.callId ?? '');
+    assert.equal(record?.taskType, 'GLOBAL_SYNTHESIS');
+    assert.equal(record?.state, 'completed');
+  });
+});
+
+test('Q4 Master Agent requires an interactive route and never submits a substitute batch', async (t) => {
+  const root = writeGatewayFixture({
+    enabled: true, mode: 'batch', providerAuthority: true, dashboardAgent: true,
+  });
+  t.after(() => rmSync(root, { recursive: true, force: true, maxRetries: 3 }));
+  let fetches = 0;
+  const agent = createDashboardAgent({
+    gateway: {
+      repoRoot: root,
+      environment: { OPENAI_API_KEY: SECRET },
+      fetchImpl: async () => { fetches += 1; throw new Error('no provider call expected'); },
+    },
+    snapshot: () => null,
+    run: () => ({ state: 'idle', phase: null, exitCode: null, lastLine: null }),
+    stopping: () => false,
+    start: () => assert.fail('no start expected'),
+    redact: (value) => value,
+  });
+  const reply = await agent.ask({ message: 'What is the cycle status?' });
+  assert.equal(reply.status, 409);
+  assert.equal(reply.body.code, 'INTERACTIVE_REQUIRED');
+  assert.equal(fetches, 0);
+});
+
+test('Q4 Master Agent refuses a runtime identity mismatch before provider I/O', async (t) => {
+  const root = writeGatewayFixture({
+    enabled: true, providerAuthority: true, dashboardAgent: true,
+  });
+  t.after(() => rmSync(root, { recursive: true, force: true, maxRetries: 3 }));
+  let fetches = 0;
+  const agent = createDashboardAgent({
+    gateway: {
+      repoRoot: root,
+      environment: { OPENAI_API_KEY: SECRET },
+      expectedRuntimeDigest: '0'.repeat(64),
+      fetchImpl: async () => { fetches += 1; throw new Error('no provider call expected'); },
+    },
+    snapshot: () => null,
+    run: () => ({ state: 'idle', phase: null, exitCode: null, lastLine: null }),
+    stopping: () => false,
+    start: () => assert.fail('no start expected'),
+    redact: (value) => value,
+  });
+  const reply = await agent.ask({ message: 'What is the cycle status?' });
+  assert.equal(reply.status, 409);
+  assert.equal(reply.body.code, 'DASHBOARD_RUNTIME_CHANGED');
+  assert.equal(fetches, 0);
 });

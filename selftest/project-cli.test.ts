@@ -11,12 +11,15 @@ const EXPECTED = [
   'activate',
   'active',
   'adopt-legacy',
+  'browser-run',
   'create',
   'cutover-v3',
   'delete',
   'init',
   'list',
   'migrate-legacy',
+  'preflight',
+  'prepare-dashboard',
   'readiness',
   'rollback-v3',
   'show',
@@ -56,7 +59,7 @@ test('Batch 6: the complete non-browser Project Profile control plane is availab
   for (const name of EXPECTED) {
     const authority = authorityFor(`project ${name}`);
     assert.ok(authority !== null, `project ${name} has closed authority`);
-    assert.equal(authority.requiresMission, false, `${name} operates before target mission bootstrap`);
+    assert.equal(authority.requiresMission, name === 'browser-run', `${name} mission requirement`);
   }
 });
 
@@ -68,6 +71,7 @@ test('Batch 6: state-changing commands require explicit file, generation or conf
   assert.deepEqual(requiredOptions(child('migrate-legacy')), ['--confirmation']);
   assert.deepEqual(requiredOptions(child('adopt-legacy')), ['--confirmation']);
   assert.deepEqual(requiredOptions(child('cutover-v3')), ['--confirmation']);
+  assert.deepEqual(requiredOptions(child('browser-run')), ['--build-id', '--scenario', '--sha256']);
   assert.deepEqual(requiredOptions(child('rollback-v3')), ['--confirmation']);
   const initialization = child('init');
   assert.ok(initialization.options.some((option) => option.long === '--confirmation'));

@@ -340,6 +340,15 @@ export class ProjectionStore {
     this.readOnly = options.readOnly ?? false;
     this.rehydrateKernel = options.rehydrateKernel;
     const databaseExistedAtOpen = existsSync(databasePath);
+    const workspaceBinding = options.workspaceIdentity;
+    if (!databaseExistedAtOpen && workspaceBinding !== undefined && workspaceBinding.onMissing !== 'initialize-new') {
+      throw new WorkspaceProjectIdentityError(
+        'WORKSPACE_IDENTITY_DATABASE_MISSING',
+        `workspace projection database does not exist: ${databasePath}`,
+        parseWorkspaceIdentityInput(workspaceBinding.expected),
+        null,
+      );
+    }
 
     if (this.readOnly) {
       // A read-only store never writes: no directory, no schema, no file-touching pragma. The
@@ -347,7 +356,7 @@ export class ProjectionStore {
       this.database = new Database(databasePath, { readonly: true, fileMustExist: true });
     } else {
       mkdirSync(dirname(databasePath), { recursive: true });
-      this.database = new Database(databasePath);
+      this.database = new Database(databasePath, { fileMustExist: databaseExistedAtOpen });
     }
 
     // DEV-P1-47: from here to the end of the constructor, every throw used to escape with the
@@ -377,6 +386,10 @@ export class ProjectionStore {
     // constructor itself. A helper would have to drop the modifier to compile, trading a real
     // immutability guarantee for a cosmetic one.
     try {
+      // A foreign or unbound database must be refused before WAL or schema changes.
+      const workspaceToBind = workspaceBinding === undefined
+        ? null
+        : this.workspaceIdentityToBind(workspaceBinding, databaseExistedAtOpen);
       if (!this.readOnly) {
         this.database.pragma('journal_mode = WAL');
         this.database.pragma(
@@ -473,10 +486,10 @@ export class ProjectionStore {
         this.reconcileSchemaVersion();
       }
 
-      if (options.workspaceIdentity !== undefined) {
+      if (workspaceToBind !== null) {
         this.bindWorkspaceIdentity(
-          options.workspaceIdentity,
-          databaseExistedAtOpen,
+          workspaceToBind,
+          workspaceBinding?.onMissing === 'adopt-legacy',
           options.workspaceIdentityNow ?? nowIso,
         );
       }
@@ -913,27 +926,15 @@ export class ProjectionStore {
     }
   }
 
-  private bindWorkspaceIdentity(
+  private workspaceIdentityToBind(
     binding: WorkspaceProjectIdentityBinding,
     databaseExistedAtOpen: boolean,
-    clock: () => string,
-  ): void {
+  ): WorkspaceProjectIdentityInput | null {
     const expected = parseWorkspaceIdentityInput(binding.expected);
-    if (!this.tableExists(WORKSPACE_IDENTITY_TABLE)) {
-      throw new WorkspaceProjectIdentityError(
-        'WORKSPACE_IDENTITY_UNINITIALIZED',
-        this.readOnly
-          ? 'workspace identity schema is absent; run the explicit migration/adoption command with a writable runtime'
-          : 'workspace identity schema was not installed',
-        expected,
-        null,
-      );
-    }
-
     const actual = this.workspaceIdentity();
     if (actual !== null) {
       assertWorkspaceIdentityMatches(expected, actual);
-      return;
+      return null;
     }
 
     if (this.readOnly || binding.onMissing === 'reject') {
@@ -953,10 +954,18 @@ export class ProjectionStore {
         null,
       );
     }
-    if (binding.onMissing === 'adopt-legacy' && !databaseExistedAtOpen) {
+    return expected;
+  }
+
+  private bindWorkspaceIdentity(
+    expected: WorkspaceProjectIdentityInput,
+    adoptLegacy: boolean,
+    clock: () => string,
+  ): void {
+    if (!this.tableExists(WORKSPACE_IDENTITY_TABLE)) {
       throw new WorkspaceProjectIdentityError(
-        'WORKSPACE_IDENTITY_DATABASE_MISSING',
-        'legacy adoption requires an existing projection database; refusing to create an empty database and call it historical state',
+        'WORKSPACE_IDENTITY_UNINITIALIZED',
+        'workspace identity schema was not installed',
         expected,
         null,
       );
@@ -967,11 +976,9 @@ export class ProjectionStore {
       identityVersion: WORKSPACE_PROJECT_IDENTITY_VERSION,
       ...expected,
       createdAt: clock(),
-      origin: binding.onMissing === 'adopt-legacy' ? 'legacy-adoption' : 'new-workspace',
-      legacyProjectionHeadHash:
-        binding.onMissing === 'adopt-legacy' ? status.headHash : null,
-      legacyIndexedEvents:
-        binding.onMissing === 'adopt-legacy' ? status.indexedEvents : 0,
+      origin: adoptLegacy ? 'legacy-adoption' : 'new-workspace',
+      legacyProjectionHeadHash: adoptLegacy ? status.headHash : null,
+      legacyIndexedEvents: adoptLegacy ? status.indexedEvents : 0,
     });
 
     this.database

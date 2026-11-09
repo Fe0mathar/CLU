@@ -92,6 +92,19 @@ test('PP-34: browser ambiguity and wrong origin remain explicit refusal states',
   assert.match(renderBrowserEditor(forbidden), /ORIGIN_FORBIDDEN/);
 });
 
+test('Chrome shows session evidence only for the exact saved profile generation', () => {
+  const state = snapshot();
+  const { profileGeneration, ...projectIdentity } = state.active;
+  const chromeTest = {
+    state: 'ready', summary: 'Chrome test passed.', projectIdentity, profileGeneration,
+    executionId: 'BEXEC-verified', gpuReadbacks: [42, 42, 42],
+  };
+  state.legacyConfiguration = { chromeTest };
+  assert.match(renderBrowserEditor(state), /Evidence ID · BEXEC-verified/);
+  state.legacyConfiguration = { chromeTest: { ...chromeTest, profileGeneration: profileGeneration + 1 } };
+  assert.doesNotMatch(renderBrowserEditor(state), /BEXEC-verified/);
+});
+
 test('PP-34: GPT editor accepts references, rejects raw keys, and never renders a secret fixture', () => {
   assert.equal(CREDENTIAL_REFERENCE_PATTERN.test('env:OPENAI_API_KEY'), true);
   assert.equal(CREDENTIAL_REFERENCE_PATTERN.test('credential-store:OpenAI/Primary'), true);

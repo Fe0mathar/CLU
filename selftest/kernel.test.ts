@@ -1354,7 +1354,8 @@ test('DEV-P1-03: runAsync records completion when the promise settles, and run r
   }
 });
 
-test('DEV-P1-03: rotation records an archive manifest, the chain spans files, and a tampered segment is caught', () => {
+test('DEV-P1-03: same-millisecond rotations preserve every segment and expose tampering', (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-08-15T12:00:00.000Z') });
   const fixture = makeFixture();
   try {
     const projections = new ProjectionStore(join(fixture.config.workspace.root, 'db', 'clue.db'));
@@ -1375,7 +1376,8 @@ test('DEV-P1-03: rotation records an archive manifest, the chain spans files, an
       }
 
       const manifest = audit.readManifest();
-      assert.ok(manifest.segments.length >= 1, 'at least one segment was archived');
+      assert.equal(manifest.segments.length, 7);
+      assert.equal(new Set(manifest.segments.map((segment) => segment.segment)).size, 7);
       assert.equal(audit.verifyArchive().segments, manifest.segments.length);
 
       // The chain spans the rotation: the first active record links to the newest archived one.
@@ -1400,6 +1402,51 @@ test('DEV-P1-03: rotation records an archive manifest, the chain spans files, an
         () => audit.verifyArchive(),
         (error: unknown) => error instanceof AuditLogError && error.code === 'SEGMENT_ALTERED',
       );
+    } finally {
+      projections.close();
+    }
+  } finally {
+    removeFixture(fixture.root);
+  }
+});
+
+test('DEV-P1-03: a malformed audit archive manifest blocks verification and rotation', () => {
+  const fixture = makeFixture();
+  try {
+    const workspace = fixture.config.workspace.root;
+    const projections = new ProjectionStore(join(workspace, 'db', 'clue.db'));
+    try {
+      const logsDir = join(workspace, 'logs');
+      const audit = new AuditLog(logsDir, projections, new SecretRegistry(), { maxLogBytes: 200 });
+      const input = {
+        actor: 'cli',
+        command: 'probe',
+        capability: 'fs.read.workspace',
+        decision: 'allowed',
+        missionVersion: 'MISSION-000001',
+      } as const;
+      assert.deepEqual(audit.verifyArchive(), { segments: 0 });
+      audit.record(input);
+      const activePath = join(logsDir, 'audit.ndjson');
+      const active = readFileSync(activePath);
+      writeFileSync(join(logsDir, 'audit-archive.json'), '{');
+      const invalidManifest = (error: unknown) => error instanceof AuditLogError && error.code === 'MANIFEST_INVALID';
+      assert.throws(() => audit.verifyArchive(), invalidManifest);
+      assert.throws(() => audit.record(input), invalidManifest);
+      assert.deepEqual(readFileSync(activePath), active);
+      writeFileSync(join(logsDir, 'audit-archive.json'), JSON.stringify({
+        schema: 'clue.audit.archive/1',
+        segments: [{
+          segment: '../audit.ndjson',
+          sha256: 'a'.repeat(64),
+          bytes: active.byteLength,
+          first_id: null,
+          last_id: null,
+          head_hash: null,
+          rotated_at: '2026-08-15T12:00:00.000Z',
+        }],
+      }));
+      assert.throws(() => audit.verifyArchive(), invalidManifest);
     } finally {
       projections.close();
     }

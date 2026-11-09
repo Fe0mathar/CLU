@@ -30,7 +30,9 @@
  * the transport and nothing else.
  */
 
+import { spawn } from 'node:child_process';
 import { realpathSync } from 'node:fs';
+import { join } from 'node:path';
 
 import { fileURLToPath } from 'node:url';
 
@@ -150,6 +152,10 @@ interface ConsoleServeCliOptions {
   readonly missionTitle?: string;
 }
 
+interface DashboardCliOptions extends ConsoleServeCliOptions {
+  readonly open?: boolean;
+}
+
 /**
  * Runs the read-only console server until interrupted.
  *
@@ -255,7 +261,8 @@ export function buildProgram(): Command {
     .option('--port <number>', 'bind port (default 47900)')
     .option('--refresh <ms>', 'sealed-frame re-derive cadence in ms', '1000')
     .option('--mission-title <title>', 'display title for the mission')
-    .action(async (options: ConsoleServeCliOptions) => {
+    .option('--open', 'open the dashboard in the default browser on Windows after it starts')
+    .action(async (options: DashboardCliOptions) => {
       process.exitCode = await runGuardedAsync(async () => {
         const refreshIntervalMs = Number.parseInt(options.refresh, 10);
         if (!Number.isFinite(refreshIntervalMs) || refreshIntervalMs < 0) {
@@ -271,6 +278,16 @@ export function buildProgram(): Command {
           });
           write('CLU-E dashboard — four quadrants, one sealed snapshot.');
           write(`  open   ${handle.url}`);
+          const windowsRoot = process.env['SystemRoot'];
+          if (options.open && process.platform === 'win32' && windowsRoot) {
+            const browser = spawn(
+              join(windowsRoot, 'System32', 'rundll32.exe'),
+              ['url.dll,FileProtocolHandler', handle.url],
+              { detached: true, stdio: 'ignore', windowsHide: true },
+            );
+            browser.once('error', () => write(`Open ${handle.url} in your browser.`));
+            browser.unref();
+          }
           write('Start CLU-E from the dashboard. Ctrl-C here stops the server.');
           await new Promise<void>((resolveSignal) => {
             process.once('SIGINT', () => resolveSignal());

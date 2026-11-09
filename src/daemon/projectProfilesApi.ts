@@ -6,7 +6,6 @@
  */
 
 import { readFileSync } from 'node:fs';
-import { execFile } from 'node:child_process';
 import { join } from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 
@@ -47,9 +46,8 @@ import {
   readWindowsOpenAiCredential,
   windowsOpenAiCredentialReference,
 } from '../control/projectProfiles/windowsOpenAiCredential.js';
-import { HostClient, type HostBanner } from '../experiment/host/hostClient.js';
-import { originAllowed } from '../experiment/browser/browserAgent.js';
-import { resolveExecutablePath } from '../control/projectProfiles/hostReadiness.js';
+import type { HostBanner } from '../experiment/host/hostClient.js';
+import { attestManagedProjectChrome, ManagedChromeHostError, openManagedProjectChrome } from '../experiment/browser/managedChromeHost.js';
 import {
   launchGitHubProfileSignIn,
   listGitHubProfileRepositories,
@@ -62,6 +60,7 @@ import {
   type Actor,
   type ProjectProfileRecord,
 } from '../shared/schemas.js';
+import { runProjectHostProbe } from './dashboardConsoleProbe.js';
 
 export const PROJECT_PROFILES_API_VERSION = 'clue-project-profiles-api/1' as const;
 export const PROJECT_PROFILES_API_MAX_BODY_BYTES = 1024 * 1024;
@@ -209,7 +208,7 @@ export class ProjectProfilesApiService {
     this.runtime = options.runtime;
     this.actor = options.actor ?? 'daemon';
     this.activateProject = options.activateProject;
-    this.hostProbe = options.hostProbe ?? ((binding) => defaultHostProbe(binding, this.runtime));
+    this.hostProbe = options.hostProbe ?? ((binding) => runProjectHostProbe(binding, this.runtime));
     this.openAiModelsFetch = options.openAiModelsFetch;
     this.now = options.now ?? (() => new Date().toISOString());
     this.allowHostConnections = options.allowHostConnections === true;
@@ -514,9 +513,12 @@ export class ProjectProfilesApiService {
   public async testBrowser(projectId: string, writeVisibleMarker = false): Promise<ProjectBrowserReadiness> {
     const record = this.requireRecord(projectId);
     const result = await testProjectBrowserReadiness(record, {
-      globalChromeExecutable: this.runtime.config.browser.executable,
+      globalChromeExecutable: loadLegacyConfig(this.runtime.repoRoot).browser.executable,
       checkedAt: this.now(),
       writeVisibleMarker,
+      ...(record.profile.integrations.chrome.launchMode === 'CLUE_MANAGED'
+        ? { attestManagedChrome: () => attestManagedProjectChrome(this.runtime, record) }
+        : {}),
     });
     this.remember(record, { browser: result });
     return result;
@@ -525,53 +527,21 @@ export class ProjectProfilesApiService {
   public async openTestChrome(projectId: string, expectedGeneration: number): Promise<unknown> {
     this.requireHostConnections();
     const record = this.requireCurrentGeneration(projectId, expectedGeneration);
-    if (process.platform !== 'win32') return { state: 'UNAVAILABLE', detail: 'The visible Chrome launcher requires an interactive Windows session.' };
-    const profile = record.profile;
-    const chrome = profile.integrations.chrome;
-    const url = chrome.targetUrl === null ? null : new URL(chrome.targetUrl);
-    if (chrome.launchMode !== 'CLUE_MANAGED' || url === null || url.username || url.password ||
-        !originAllowed(url.href, chrome.allowedOrigins) || chrome.remoteDebuggingPort < 1024) {
-      return { state: 'BLOCKED', detail: 'Save CLU-E Managed mode, a permitted HTTP(S) Target URL and a debugging port from 1024 to 65535.' };
-    }
-    const config = this.runtime.config;
-    const pwsh = resolveExecutablePath(config.powershell.executable, process.env);
-    const executable = resolveExecutablePath(
-      chrome.executable.source === 'global-default' ? config.browser.executable : chrome.executable.value,
-      process.env,
-    );
-    if (pwsh === null || executable === null) {
-      return { state: 'UNAVAILABLE', detail: 'The configured PowerShell or Chrome executable is unavailable.' };
-    }
-    const env = Object.fromEntries(Object.entries(process.env).filter(([name]) =>
-      /^(?:path|pathext|systemroot|systemdrive|windir|comspec|userprofile|home|homedrive|homepath|appdata|localappdata|programdata|programfiles(?:\(x86\))?|temp|tmp)$/iu.test(name),
-    ));
-    const args = [
-      '-NoLogo', '-NoProfile', '-NonInteractive', '-File', join(this.runtime.repoRoot, 'scripts', 'launch-test-browser.ps1'),
-      '-Executable', executable, '-ProfileDir', chrome.dedicatedProfileDirectory,
-      '-Port', String(chrome.remoteDebuggingPort), '-Url', url.href, '-AllowedOrigin', url.origin,
-      '-ForbiddenRoots', profile.targetRoot,
-      '-ProjectId', profile.projectId, '-TargetRootIdentity', profile.targetRootIdentity,
-      '-ProjectProfileHash', record.projectProfileHash, '-ProfileGeneration', String(record.generation), '-Json',
-    ];
-    const launched = await new Promise<{ ok: boolean; headless: boolean | null; detail: string }>((done) => {
-      execFile(pwsh, args, { cwd: this.runtime.repoRoot, env, windowsHide: true, timeout: 45_000, maxBuffer: 256 * 1024 }, (error, stdout) => {
-        try {
-          const output = requireObject(JSON.parse(stdout.replace(/^\uFEFF/u, '')));
-          done({
-            ok: error === null && output['status'] === 'ok',
-            headless: typeof output['headless'] === 'boolean' ? output['headless'] : null,
-            detail: typeof output['message'] === 'string' ? safeMessage(output['message']) : 'The launcher returned no status detail.',
-          });
-        } catch {
-          done({ ok: false, headless: null, detail: 'The Chrome launcher did not return a valid result. Check PowerShell and the project browser settings.' });
-        }
-      });
-    });
-    if (!launched.ok || launched.headless !== false) {
-      return { state: 'BLOCKED', detail: launched.ok ? 'The registered session is headless. Close it before opening a visible test window.' : launched.detail };
+    let launched;
+    try {
+      launched = await openManagedProjectChrome(this.runtime, record);
+    } catch (error) {
+      return { state: error instanceof ManagedChromeHostError ? error.state : 'BLOCKED', detail: safeMessage(error) };
     }
     this.requireCurrentGeneration(projectId, expectedGeneration);
-    const tested = await this.testBrowser(projectId, true);
+    const tested = await testProjectBrowserReadiness(record, {
+      globalChromeExecutable: loadLegacyConfig(this.runtime.repoRoot).browser.executable,
+      checkedAt: this.now(),
+      writeVisibleMarker: true,
+      managedChrome: launched,
+    });
+    this.requireCurrentGeneration(projectId, expectedGeneration);
+    this.remember(record, { browser: tested });
     return tested.ready ? {
       ...tested, detail: 'Dedicated Chrome connected. Open DevTools Console to see the CLU-E verification message.',
     } : tested;
@@ -836,35 +806,6 @@ export async function handleProjectProfilesApiRequest(
 
 export function deleteConfirmation(record: ProjectProfileRecord): string {
   return `DELETE PROFILE ${record.profile.projectId} ${record.generation} ${record.projectProfileHash.slice(0, 12)}`;
-}
-
-async function defaultHostProbe(binding: ProjectHostLaunchBinding, runtime: Runtime): Promise<HostBanner> {
-  const subjectId = `PROJECT-READINESS-${binding.projectIdentity.projectId}`;
-  const token = runtime.policy.issueToken('daemon', ['process.run.host'], {
-    subjectId,
-    purpose: 'project-readiness',
-    attempt: 1,
-  });
-  const client = new HostClient({
-    executable: binding.executable,
-    scriptPath: binding.scriptPath,
-    policy: runtime.policy,
-    actor: 'daemon',
-    tokenSecret: token.secret,
-    operationSubjectId: subjectId,
-    operationPurpose: 'project-readiness',
-    operationAttempt: 1,
-    hostRoots: binding.roots,
-    projectIdentity: binding.projectIdentity,
-  });
-  try {
-    const result = await client.start();
-    if (!result.ok) throw result.error;
-    return result.value;
-  } finally {
-    client.stop();
-    runtime.policy.revokeToken(token.secret);
-  }
 }
 
 function requirementsFor(

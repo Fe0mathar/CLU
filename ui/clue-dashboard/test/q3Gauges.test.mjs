@@ -62,7 +62,50 @@ test('DEV-P1-16: a present-but-quiet AI gateway is STANDBY, and says why', () =>
 
   // Standby and offline are different from absent, and all three are different from busy.
   assert.equal(out.ai.status, 'STANDBY');
-  assert.match(out.ai.warn, /AI gateway offline until Stage D2/);
+  assert.match(out.ai.warn, /No observed gateway call traffic/);
+});
+
+test('sealed gateway counts show a reading without inventing provider capacity', () => {
+  const aiOrchestration = {
+    configured: true, provider: 'openai', enabled: true, operationallyReady: true,
+    effectiveModel: 'gpt-5.6-sol', calls: { submitted: 2, completed: 1, pending: 1 },
+    usage: { totalTokens: 129, providerRemainingTokens: 500, providerRemainingTokensAuthoritative: false },
+  };
+  const live = deriveTelemetry(snapshot({ aiOrchestration })).ai;
+  assert.equal(live.status, 'LIVE');
+  assert.equal(live.big, '129');
+  assert.equal(live.bigUnit, 'tok');
+  assert.equal(live.value, null);
+  assert.equal(live.raw.provider.remainingTokens, null);
+  assert.ok(live.lines.some(([label, value]) => label === 'tokens left' && value === 'provider n/a'));
+
+  const budgetPause = deriveTelemetry(snapshot({ aiOrchestration: {
+    ...aiOrchestration, providerPaused: true, providerBudgetExhausted: true,
+  } })).ai;
+  assert.equal(budgetPause.big, 'LACK OF $');
+  assert.equal(budgetPause.critical, true);
+  assert.equal(budgetPause.value, null);
+});
+
+test('sealed missing gateway is distinct from disabled or idle', () => {
+  const result = deriveTelemetry(snapshot({
+    sessions: { calls: { thisCycle: 0 } },
+    aiOrchestration: { state: 'unavailable', reason: 'Gateway policy could not be read' },
+  }));
+  assert.equal(result.ai.status, 'UNAVAILABLE');
+  assert.equal(result.ai.big, '—');
+  assert.equal(result.ai.warn, 'Gateway policy could not be read');
+});
+
+test('sealed cycle stage replaces the legacy synthetic completion percentage', () => {
+  const result = deriveTelemetry(snapshot({
+    progress: { recognition: 100, proven_improvement: 100 },
+    cycle: { current: { id: 'CYCLE-000001', stage: 'SCREENED', grade: 'diagnostic' }, lastClosure: null },
+  }));
+  assert.equal(result.cycle.big, 'SCREENED');
+  assert.equal(result.cycle.value, null);
+  assert.equal(result.cycle.raw.cycleNum, 'CYCLE-000001');
+  assert.deepEqual(result.cycle.raw.phases.map(({ value }) => value), [100, null, null, null, null]);
 });
 
 test('DEV-P1-16: cycle progress is the mean of five phases, and IDLE at zero', () => {

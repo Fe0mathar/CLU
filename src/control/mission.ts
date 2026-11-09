@@ -36,7 +36,7 @@
  * actually in force, which is the failure a prose-declared amendment invites.
  */
 
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { join, relative, dirname } from 'node:path';
 
 import {
@@ -259,6 +259,7 @@ export function parsePackSeal(
   text: string,
 ): { readonly declared: Map<string, string> } | { readonly error: string } {
   const declared = new Map<string, string>();
+  const portablePaths = new Set<string>();
   for (const raw of text.split('\n')) {
     const line = raw.replace(/\r$/, '');
     if (line.trim() === '') continue;
@@ -266,11 +267,67 @@ export function parsePackSeal(
     if (match === null || match[1] === undefined || match[2] === undefined) {
       return { error: `unparseable seal line: ${JSON.stringify(line.slice(0, 60))}` };
     }
-    if (declared.has(match[2])) return { error: `duplicate declared path: ${match[2]}` };
-    declared.set(match[2], match[1]);
+    const path = match[2];
+    if (/[\\:\u0000-\u001f]/u.test(path) ||
+        path.split('/').some((part) => part === '' || /[. ]$/u.test(part))) {
+      return { error: `non-portable declared path: ${JSON.stringify(path)}` };
+    }
+    const pathKey = path.toLowerCase();
+    if (portablePaths.has(pathKey)) return { error: `duplicate declared path: ${path}` };
+    portablePaths.add(pathKey);
+    declared.set(path, match[1]);
   }
   if (declared.size === 0) return { error: 'the seal declares no files' };
   return { declared };
+}
+
+/**
+ * Verifies the installed pack against its seal and returns the seal identity.
+ *
+ * Shared by ratification, epoch sealing and P2 closure assessment. `act` names the
+ * operation whose authority check failed.
+ */
+export function verifyInstalledPackAgainstSeal(repoRoot: string, act: string): {
+  readonly pack: ResolvedDocumentationPack;
+  readonly sealSha: string;
+  readonly declared: Map<string, string>;
+} {
+  const pack = resolveDocumentationPack(repoRoot);
+  const physicalRoot = realpathSync.native(repoRoot);
+  const sealPath = join(physicalRoot, ...pack.sealFile.split('/'));
+  if (!existsSync(sealPath)) {
+    throw new Error(`${pack.sealFile} absent at the repository root — ${pack.installHint} first.`);
+  }
+  if (relative(sealPath, realpathSync.native(sealPath)) !== '' || !statSync(sealPath).isFile()) {
+    throw new Error(`${pack.sealFile} must be an unlinked regular file.`);
+  }
+  const sealBytes = readFileSync(sealPath);
+  const parsedSeal = parsePackSeal(sealBytes.toString('utf8'));
+  if ('error' in parsedSeal) {
+    throw new Error(`${pack.sealFile}: ${parsedSeal.error}`);
+  }
+  const { declared } = parsedSeal;
+
+  const drifted: string[] = [];
+  for (const [relativePath, expected] of declared) {
+    const absolute = join(physicalRoot, ...relativePath.split('/'));
+    if (!existsSync(absolute)) {
+      drifted.push(`${relativePath} (absent)`);
+      continue;
+    }
+    if (relative(absolute, realpathSync.native(absolute)) !== '' || !statSync(absolute).isFile()) {
+      drifted.push(`${relativePath} (not an unlinked regular file)`);
+      continue;
+    }
+    if (hashBytes(readFileSync(absolute)) !== expected) drifted.push(relativePath);
+  }
+  if (drifted.length > 0) {
+    throw new Error(
+      `Refusing to ${act}: ${drifted.length}/${declared.size} pack files disagree with ` +
+        `${pack.sealFile} (${drifted.slice(0, 3).join(', ')}${drifted.length > 3 ? ', …' : ''}).`,
+    );
+  }
+  return { pack, sealSha: hashBytes(sealBytes), declared };
 }
 
 export class MissionDriftError extends Error {
@@ -476,7 +533,7 @@ export class MissionRegistry {
       throw new Error('Ratification requires the confirmation statement that was typed.');
     }
 
-    const { pack, sealSha, declared } = this.verifyPackAgainstSeal('ratify');
+    const { pack, sealSha, declared } = verifyInstalledPackAgainstSeal(this.repoRoot, 'ratify');
 
     const manifestHash = declared.get(pack.manifestFile);
     if (manifestHash === undefined) {
@@ -533,48 +590,6 @@ export class MissionRegistry {
     this.projections.sync(this.log);
 
     return { ...payload, event_id: event.id, sequence: event.sequence };
-  }
-
-  /**
-   * Verifies the installed pack against its seal and returns the seal identity.
-   *
-   * Shared by ratification and the epoch seal: both acts sign a statement about the pack,
-   * and neither may sign one the disk contradicts. `act` names the refusal so the operator
-   * knows which act was refused.
-   */
-  private verifyPackAgainstSeal(act: string): {
-    readonly pack: ResolvedDocumentationPack;
-    readonly sealSha: string;
-    readonly declared: Map<string, string>;
-  } {
-    const pack = resolveDocumentationPack(this.repoRoot);
-    const sealPath = join(this.repoRoot, ...pack.sealFile.split('/'));
-    if (!existsSync(sealPath)) {
-      throw new Error(`${pack.sealFile} absent at the repository root — ${pack.installHint} first.`);
-    }
-    const sealBytes = readFileSync(sealPath);
-    const parsedSeal = parsePackSeal(sealBytes.toString('utf8'));
-    if ('error' in parsedSeal) {
-      throw new Error(`${pack.sealFile}: ${parsedSeal.error}`);
-    }
-    const { declared } = parsedSeal;
-
-    const drifted: string[] = [];
-    for (const [relativePath, expected] of declared) {
-      const absolute = join(this.repoRoot, ...relativePath.split('/'));
-      if (!existsSync(absolute)) {
-        drifted.push(`${relativePath} (absent)`);
-        continue;
-      }
-      if (hashBytes(readFileSync(absolute)) !== expected) drifted.push(relativePath);
-    }
-    if (drifted.length > 0) {
-      throw new Error(
-        `Refusing to ${act}: ${drifted.length}/${declared.size} pack files disagree with ` +
-          `${pack.sealFile} (${drifted.slice(0, 3).join(', ')}${drifted.length > 3 ? ', …' : ''}).`,
-      );
-    }
-    return { pack, sealSha: hashBytes(sealBytes), declared };
   }
 
   /** One replay scan: the latest epoch per name, and the latest overall. */
@@ -646,7 +661,7 @@ export class MissionRegistry {
       );
     }
     const ratified = ratification.record;
-    const { pack, sealSha } = this.verifyPackAgainstSeal('seal the epoch');
+    const { pack, sealSha } = verifyInstalledPackAgainstSeal(this.repoRoot, 'seal the epoch');
     if (
       ratified.seal_sha256 !== sealSha ||
       ratified.seal_path !== pack.sealFile ||

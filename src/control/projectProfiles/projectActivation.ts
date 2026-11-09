@@ -8,6 +8,7 @@ import {
 } from '../../memory/db.js';
 import { operationIdentityFromProfileRecord } from '../../shared/projectOperationIdentity.js';
 import { ProjectBrowserSessionCoordinator } from './projectBrowserSessions.js';
+import { assertProjectStatePaths } from './projectPathIsolation.js';
 import {
   ProjectRuntimeManager,
   type ProjectRuntimeActivationRequest,
@@ -49,6 +50,7 @@ export function adoptLegacyWorkspaceForProfile(
       `Project ${record.profile.projectId} is native; legacy workspace adoption is forbidden`,
     );
   }
+  assertProjectStatePaths(record.profile);
   const identity = operationIdentityFromProfileRecord(record);
   const expected: WorkspaceProjectIdentityInput = {
     projectId: identity.projectId,

@@ -66,6 +66,7 @@ import {
   type ProjectRecognitionIdentity,
 } from '../shared/projectRecognitionIdentity.js';
 import { z } from 'zod';
+import { consoleAiOrchestrationSchema, consoleCycleSchema } from '../status/statusContractV5.js';
 import {
   operationalConsoleProjectionSchema,
   type OperationalConsoleProjection,
@@ -678,6 +679,8 @@ export interface DashboardView {
   readonly crown: CommandCrown;
   readonly lens: MissionContextLens;
   readonly sessions: SessionsPanel;
+  readonly aiOrchestration?: z.infer<typeof consoleAiOrchestrationSchema> | undefined;
+  readonly cycle?: z.infer<typeof consoleCycleSchema> | undefined;
   readonly recognition: RecognitionField;
   readonly progress: ProgressBoard;
   readonly velocity: VelocityBoard;
@@ -1336,6 +1339,8 @@ const dashboardViewSchema = z
     crown: commandCrownSchema,
     lens: missionContextLensSchema,
     sessions: sessionsPanelSchema,
+    aiOrchestration: consoleAiOrchestrationSchema.optional(),
+    cycle: consoleCycleSchema.optional(),
     recognition: recognitionFieldSchema,
     progress: progressBoardSchema,
     velocity: velocityBoardSchema,

@@ -260,18 +260,37 @@ function skippedVersionId(locationId: string, reason: string, detail: string): S
   });
 }
 
-function previousByPath(previous: RepositoryInventoryPointer | null | undefined): Map<string, RepositoryInventoryPointer['files'][number]> {
-  return new Map((previous?.files ?? []).map((file) => [normalizePath(file.path), file] as const));
+function sameRecognitionGeneration(
+  first: ProjectRecognitionIdentity | undefined,
+  second: ProjectRecognitionIdentity | undefined,
+): boolean {
+  if (first === undefined || second === undefined) return first === second;
+  return projectRecognitionIdentityEquals(first, second);
+}
+
+type PriorFiles = ReadonlyMap<string, RepositoryInventoryPointer['files'][number]> | null;
+
+function previousByPath(options: RepositoryInventoryCaptureOptions): PriorFiles {
+  const previous = options.previous;
+  if (
+    previous == null ||
+    previous.repositoryId !== options.repositoryId ||
+    !sameRecognitionGeneration(previous.projectRecognition, options.projectRecognition)
+  ) {
+    return null;
+  }
+  return new Map(previous.files.map((file) => [normalizePath(file.path), file] as const));
 }
 
 function lifecycleState(
   path: string,
-  contentHash: string | null,
-  previous: ReadonlyMap<string, RepositoryInventoryPointer['files'][number]>,
+  versionId: string,
+  previous: PriorFiles,
 ): RepositoryFileRecord['inventoryState'] {
+  if (previous === null) return 'committed';
   const prior = previous.get(path);
-  if (prior === undefined) return previous.size === 0 ? 'committed' : 'added';
-  return prior.contentHash === contentHash ? 'committed' : 'modified';
+  if (prior === undefined) return 'added';
+  return prior.fileVersionId === versionId ? 'committed' : 'modified';
 }
 
 function generatedPath(path: string): boolean {
@@ -292,14 +311,15 @@ function recordForSourceFile(
   input: RepositoryInventoryCaptureOptions,
   manifest: SnapshotManifest,
   source: SourceFile,
-  previous: ReadonlyMap<string, RepositoryInventoryPointer['files'][number]>,
+  previous: PriorFiles,
 ): RepositoryFileRecord {
   const path = normalizePath(source.path);
   const classification = classifyArtifactPath(path);
   const locationId = fileLocationId(input.repositoryId, path);
+  const versionId = fileVersionId(locationId, source);
   return repositoryFileRecordSchema.parse({
     fileLocationId: locationId,
-    fileVersionId: fileVersionId(locationId, source),
+    fileVersionId: versionId,
     repositoryId: input.repositoryId,
     snapshotId: manifest.id,
     recognitionSnapshotId: input.recognitionSnapshotId,
@@ -318,7 +338,7 @@ function recordForSourceFile(
       reason: classification.reason,
       classifierVersion: classification.classifierVersion,
     },
-    inventoryState: lifecycleState(path, source.hash, previous),
+    inventoryState: lifecycleState(path, versionId, previous),
     recognitionState: initialRecognitionState(path, classification, input.recognitionSourceRoots),
     adapterId: classification.adapterId,
     adapterVersion: classification.adapterVersion,
@@ -337,14 +357,15 @@ function recordForSkipped(
   input: RepositoryInventoryCaptureOptions,
   manifest: SnapshotManifest,
   skipped: SnapshotManifest['skipped'][number],
-  previous: ReadonlyMap<string, RepositoryInventoryPointer['files'][number]>,
+  previous: PriorFiles,
 ): RepositoryFileRecord {
   const path = normalizePath(skipped.path);
   const classification = classifyArtifactPath(path);
   const locationId = fileLocationId(input.repositoryId, path);
+  const versionId = skippedVersionId(locationId, skipped.reason, skipped.detail);
   return repositoryFileRecordSchema.parse({
     fileLocationId: locationId,
-    fileVersionId: skippedVersionId(locationId, skipped.reason, skipped.detail),
+    fileVersionId: versionId,
     repositoryId: input.repositoryId,
     snapshotId: manifest.id,
     recognitionSnapshotId: input.recognitionSnapshotId,
@@ -363,7 +384,7 @@ function recordForSkipped(
       reason: classification.reason,
       classifierVersion: classification.classifierVersion,
     },
-    inventoryState: lifecycleState(path, null, previous),
+    inventoryState: lifecycleState(path, versionId, previous),
     recognitionState: 'unsupported',
     adapterId: null,
     adapterVersion: null,
@@ -382,9 +403,10 @@ function removedRecords(
   input: RepositoryInventoryCaptureOptions,
   manifest: SnapshotManifest,
   currentPaths: ReadonlySet<string>,
-  previous: ReadonlyMap<string, RepositoryInventoryPointer['files'][number]>,
+  previous: PriorFiles,
 ): RepositoryFileRecord[] {
   const output: RepositoryFileRecord[] = [];
+  if (previous === null) return output;
   for (const prior of previous.values()) {
     if (currentPaths.has(prior.path)) continue;
     const classification = classifyArtifactPath(prior.path);
@@ -440,7 +462,7 @@ export function captureRepositoryInventory(options: RepositoryInventoryCaptureOp
     sourceRoots: ['.'],
     exclude: options.exclude,
   });
-  const previous = previousByPath(options.previous);
+  const previous = previousByPath(options);
   const files = manifest.files.map((file) => recordForSourceFile(options, manifest, file, previous));
   const skipped = manifest.skipped.map((entry) => recordForSkipped(options, manifest, entry, previous));
   const all = [...files, ...skipped].sort((a, b) => a.path.localeCompare(b.path));
@@ -579,10 +601,18 @@ export function enrichRepositoryInventory(
   inventory: RepositoryInventory,
   result: RecognitionResult,
 ): RepositoryInventoryEnrichment {
-  const byPath = new Map(inventory.files.map((file) => [normalizePath(file.path), file] as const));
   const grouped = unitsByPath(result);
   const unresolved = unresolvedByPath(result);
-  const programPaths = new Set(result.programFiles.map((file) => normalizePath(file.path)));
+  const programHashes = new Map(result.programFiles.map((file) => [normalizePath(file.path), file.hash] as const));
+  const sameBasis = sameRecognitionGeneration(inventory.projectRecognition, result.basis.projectRecognition) &&
+    (result.basis.snapshotId === undefined || result.basis.snapshotId === inventory.recognitionSnapshotId);
+  const matchingFiles = new Map<string, RepositoryFileRecord>();
+  if (sameBasis) {
+    for (const file of inventory.files) {
+      const path = normalizePath(file.path);
+      if (!file.excluded && programHashes.get(path) === file.contentHash) matchingFiles.set(path, file);
+    }
+  }
   const logicalToPath = new Map(
     result.units.map((unit) => [unit.logicalId, normalizePath(unit.modulePath)] as const),
   );
@@ -591,12 +621,12 @@ export function enrichRepositoryInventory(
   for (const edge of result.edges) {
     const fromPath = logicalToPath.get(edge.from);
     const toPath = logicalToPath.get(edge.to);
-    if (fromPath !== undefined) {
-      outboundByPath.set(fromPath, (outboundByPath.get(fromPath) ?? 0) + 1);
-    }
-    if (!edge.external && toPath !== undefined) {
+    if (fromPath === undefined || !matchingFiles.has(fromPath)) continue;
+    if (!edge.external) {
+      if (toPath === undefined || !matchingFiles.has(toPath)) continue;
       inboundByPath.set(toPath, (inboundByPath.get(toPath) ?? 0) + 1);
     }
+    outboundByPath.set(fromPath, (outboundByPath.get(fromPath) ?? 0) + 1);
   }
   const summaries: RepositorySemanticSummary[] = [];
   const files: RepositoryFileRecord[] = [];
@@ -604,16 +634,19 @@ export function enrichRepositoryInventory(
   for (const file of inventory.files) {
     if (file.excluded) continue;
     const path = normalizePath(file.path);
-    const units = grouped.get(path) ?? [];
+    const matching = matchingFiles.has(path);
+    const units = matching ? grouped.get(path) ?? [] : [];
     const membershipIds = units.map((unit) => unit.logicalId).sort();
     const module = units.find((unit) => unit.kind === 'module') ?? units[0] ?? null;
-    const unresolvedCount = unresolved.get(path) ?? 0;
-    const isProgramFile = programPaths.has(path);
+    const unresolvedCount = matching ? unresolved.get(path) ?? 0 : 0;
+    const isProgramFile = programHashes.has(path);
     const state: RepositoryFileRecord['recognitionState'] = !isProgramFile
       ? 'unsupported'
-      : units.length === 0 || unresolvedCount > 0
-        ? 'partial'
-        : 'recognized';
+      : !matching
+        ? 'failed'
+        : units.length === 0 || unresolvedCount > 0
+          ? 'partial'
+          : 'recognized';
     const outgoing = outboundByPath.get(path) ?? 0;
     const incoming = inboundByPath.get(path) ?? 0;
     const summary = repositorySemanticSummarySchema.parse({
@@ -623,7 +656,7 @@ export function enrichRepositoryInventory(
       recognitionState: state,
       adapterId: isProgramFile ? 'typescript-static' : null,
       adapterVersion: isProgramFile ? RECOGNIZER_VERSION : null,
-      semanticDepth: isProgramFile ? 'file→class→function' : null,
+      semanticDepth: matching ? 'file→class→function' : null,
       semanticMembershipIds: membershipIds,
       preferredSemanticRootId: module?.logicalId ?? null,
       semanticSummary: {
@@ -652,7 +685,7 @@ export function enrichRepositoryInventory(
   return {
     files: files.sort((a, b) => a.path.localeCompare(b.path)),
     summaries: summaries.sort((a, b) => a.path.localeCompare(b.path)),
-    edges: fileEdgeRecords(result, byPath),
+    edges: fileEdgeRecords(result, matchingFiles),
   };
 }
 
@@ -691,11 +724,7 @@ export function readRepositoryInventoryPointer(
   if (!existsSync(path)) return null;
   try {
     const pointer = repositoryInventoryPointerSchema.parse(JSON.parse(readFileSync(path, 'utf8')));
-    if (expectedProjectRecognition === undefined) return pointer;
-    if (
-      pointer.projectRecognition === undefined ||
-      !projectRecognitionIdentityEquals(pointer.projectRecognition, expectedProjectRecognition)
-    ) {
+    if (!sameRecognitionGeneration(pointer.projectRecognition, expectedProjectRecognition)) {
       // A pointer from another project/profile generation is stale lifecycle context, not evidence.
       return null;
     }

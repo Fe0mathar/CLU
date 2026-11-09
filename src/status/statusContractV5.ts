@@ -1120,6 +1120,11 @@ const currentWorkBranchSchema = z
 const branch = <T extends z.ZodTypeAny>(populated: T) =>
   z.union([branchUnavailableSchema, populated]);
 
+// The console frame carries these Status branches without the capture-dependent freshness
+// envelope, so repeated observation alone does not move a gauge or the frame revision.
+export const consoleAiOrchestrationSchema = branch(aiOrchestrationBranchSchema.omit({ freshness: true }));
+export const consoleCycleSchema = branch(cycleBranchSchema.omit({ freshness: true }));
+
 /**
  * The complete validator. `.strict()` throughout, because §3 requires unknown additional
  * fields to be *rejected* until a schema revision defines them — a status body that

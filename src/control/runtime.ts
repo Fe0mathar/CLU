@@ -112,6 +112,7 @@ import {
 } from '../shared/schemas.js';
 import { activeCommandMissionRequirement } from '../shared/commandContext.js';
 import { canonicalJson, hashText, type Sha256 } from '../shared/ids.js';
+import { containsPath, resolvePathIdentity } from '../shared/pathIdentity.js';
 import type { ProjectOperationIdentity } from '../shared/projectOperationIdentity.js';
 import {
   resolveProjectRuntimeBinding,
@@ -1366,17 +1367,64 @@ function sameDatabaseFile(before: BigIntStats | undefined, after: BigIntStats | 
 }
 
 /** Copy a quiescent DB and committed WAL bytes. SQLite sidecars are opened only in scratch. */
-function copyProjectionDatabase(source: string, destination: string): void {
+function copyProjectionDatabase(source: string, destination: string, maximumBytes?: bigint): void {
   const sourceWal = source + '-wal';
   const before = databaseFile(source);
   const beforeWal = databaseFile(sourceWal);
   if (before === undefined) {
     throw new RuntimeError('PROJECTION_REBUILD_REFUSED', 'The live projection database is missing.');
   }
+  if (maximumBytes !== undefined && before.size + (beforeWal?.size ?? 0n) > maximumBytes) {
+    throw new RuntimeError('PROJECTION_REBUILD_REFUSED', 'The projection database and WAL exceed the scratch copy limit.');
+  }
   copyFileSync(source, destination, constants.COPYFILE_EXCL);
   if (beforeWal !== undefined) copyFileSync(sourceWal, destination + '-wal', constants.COPYFILE_EXCL);
   if (!sameDatabaseFile(before, databaseFile(source)) || !sameDatabaseFile(beforeWal, databaseFile(sourceWal))) {
     throw new RuntimeError('PROJECTION_REBUILD_REFUSED', 'The projection database changed while being copied.');
+  }
+}
+
+/** Inspect initialized project projections without opening the original SQLite file or WAL. */
+export function withProjectRuntimeSnapshot<T>(
+  projectProfile: ProjectProfileRecord,
+  repoRoot: string,
+  registryRoot: string,
+  inspect: (runtime: Runtime) => T,
+): T {
+  const options = { repoRoot, projectProfile, withLog: false, readOnly: true };
+  const resolved = resolveRuntimeConfig(options);
+  const state = resolved.projectBinding?.state;
+  if (state === undefined) throw new Error('A Project Profile runtime is required.');
+  const temporaryRoot = realpathSync.native(tmpdir());
+  const { config } = resolved;
+  const protectedRoots = [repoRoot, registryRoot, config.project.root, config.workspace.root,
+    config.shadow.root, config.browser.profile_dir];
+  if (protectedRoots.some((root) => containsPath(resolvePathIdentity(root, {
+    zone: 'clue-owned-state', expectedKind: 'directory', mustExist: false,
+  }).canonicalPath, temporaryRoot))) {
+    throw new RuntimeError('PROJECTION_REBUILD_REFUSED', 'OS temporary storage must be outside CLU-E operating roots.');
+  }
+  const pinnedHead = EventLog.verifyReadOnly(state.eventLogRoot);
+  const directory = mkdtempSync(join(temporaryRoot, 'clue-profile-preflight-'));
+  const scratch: ScratchProjectionDatabase = { path: join(directory, 'observed.db'), writable: false };
+  try {
+    copyProjectionDatabase(state.databasePath, scratch.path, 2n * 1024n ** 3n);
+    const runtime = assembleRuntime(options, resolved, scratch);
+    if (runtime.projections.isStaleAgainst(pinnedHead)) {
+      throw new RuntimeError('PROJECTIONS_STALE', 'The copied projections disagree with the committed event head.');
+    }
+    const observation = inspect(runtime);
+    const observedHead = EventLog.verifyReadOnly(state.eventLogRoot);
+    if (observedHead?.hash !== pinnedHead?.hash || observedHead?.sequence !== pinnedHead?.sequence) {
+      throw new RuntimeError('PROJECTIONS_STALE', 'The committed event head changed during preflight.');
+    }
+    return observation;
+  } finally {
+    try {
+      scratch.store?.close();
+    } finally {
+      rmSync(directory, { recursive: true, force: true, maxRetries: 3 });
+    }
   }
 }
 

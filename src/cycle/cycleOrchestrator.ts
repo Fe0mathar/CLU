@@ -43,6 +43,7 @@ import {
   type PerformedRun,
 } from '../control/benchmarkRun.js';
 import { requireProofExecutionBoundary } from '../benchmark/restrictedExecution.js';
+import { isCompleteCluBenchmarkV020 } from '../benchmark/benchmarkRunner.js';
 import { captureSnapshot, snapshotManifestSchema } from '../analysis/source/snapshot.js';
 import { assertExactRunInputs, captureExactRunInputs } from '../control/exactRunInputs.js';
 import { resolveProjectRecognition } from '../control/projectProfiles/projectRecognition.js';
@@ -266,6 +267,11 @@ export class CycleOrchestrator {
         }
         if (!closingRun.contract.registered) {
           throw new Error('A diagnostic benchmark cannot become closing evidence. Run the locked Master Benchmark.');
+        }
+        const { contract, result, budget } = closingRun.outcome;
+        if (contract.benchmark_id === 'clu-master' && contract.benchmark_version === '0.2.0' &&
+            (budget.exhausted || !isCompleteCluBenchmarkV020(result))) {
+          throw new Error('The closing clu-master 0.2.0 run must complete all 13 required measures within its budget. Rerun `clue cycle close`.');
         }
         assertBenchmarkRunSubject(this.runtime, closingRun);
       }
@@ -889,7 +895,7 @@ export class CycleOrchestrator {
    * live pre-SCREENED stage; refuses a suspended cycle (the operator resumes those); a
    * cycle already at or past SCREENED performs nothing and is returned as it stands.
    */
-  public drive(): DriveResult {
+  public drive(navigatorPath: string | null = null): DriveResult {
     const performed: DriveStep[] = [];
     let lock: CycleInputLock | null = null;
 
@@ -920,7 +926,7 @@ export class CycleOrchestrator {
           break;
         }
         case 'OPENING_EVIDENCE': {
-          performed.push(this.stepRecognition(cycle));
+          performed.push(this.stepRecognition(cycle, navigatorPath));
           break;
         }
         case 'RECOGNIZED': {
@@ -988,8 +994,8 @@ export class CycleOrchestrator {
     };
   }
 
-  private stepRecognition(cycle: CycleRecord): DriveStep {
-    const outcome = runRecognition(this.runtime, { force: false, navigatorPath: null });
+  private stepRecognition(cycle: CycleRecord, navigatorPath: string | null): DriveStep {
+    const outcome = runRecognition(this.runtime, { force: false, navigatorPath });
     const evidence = this.runtime.artifacts.putJson(
       {
         stage: 'RECOGNIZED',

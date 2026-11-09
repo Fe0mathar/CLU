@@ -230,8 +230,8 @@ function Assert-ProfileIsSafe {
 
     $resolved = [System.IO.Path]::GetFullPath($Path).TrimEnd('\')
 
-    if ($resolved.Length -le 3) {
-        Write-Result -Status 'error' -Message "Refusing to use a drive root as a profile: $resolved" -ExitCode 2
+    if ($resolved.Length -le 3 -or $resolved.StartsWith('\\')) {
+        Write-Result -Status 'error' -Message "Refusing to use a drive root or network path as a profile: $resolved" -ExitCode 2
     }
 
     # A debugging port has no authentication. Attaching it to the browser holding your
@@ -282,15 +282,16 @@ function Assert-ProfileIsSafe {
 function Get-ClueBrowserProcess {
     param([Parameter(Mandatory)] [string] $ResolvedProfile)
 
-    $marker = "--user-data-dir=$ResolvedProfile"
-    $quoted = "--user-data-dir=`"$ResolvedProfile`""
+    $profileArgument = "--user-data-dir=$ResolvedProfile"
 
     try {
-        Get-CimInstance -ClassName Win32_Process -ErrorAction Stop |
+        Get-CimInstance -ClassName Win32_Process -Filter "Name = 'chrome.exe'" -ErrorAction Stop |
             Where-Object {
-                $_.CommandLine -and (
-                    $_.CommandLine.Contains($marker) -or $_.CommandLine.Contains($quoted)
-                )
+                if (-not $_.CommandLine) { return $false }
+                foreach ($argument in [regex]::Matches($_.CommandLine, '(?:[^\s"]+|"(?:[^"\\]|\\.)*")+')) {
+                    if ($argument.Value.Replace('"', '') -eq $profileArgument) { return $true }
+                }
+                return $false
             }
     }
     catch {
@@ -305,11 +306,44 @@ function Test-DevToolsEndpoint {
 
     try {
         $response = Invoke-WebRequest -Uri "http://127.0.0.1:$EndpointPort/json/version" `
-            -UseBasicParsing -TimeoutSec $TimeoutSec -ErrorAction Stop
+            -UseBasicParsing -NoProxy -MaximumRedirection 0 -TimeoutSec $TimeoutSec -ErrorAction Stop
         return ($response.Content | ConvertFrom-Json)
     }
     catch {
         return $null
+    }
+}
+
+function Test-DebuggerProcessBinding {
+    param(
+        [Parameter(Mandatory)] [int] $EndpointPort,
+        [Parameter(Mandatory)] [int] $ExpectedPid,
+        [Parameter(Mandatory)] [bool] $ExpectVisible
+    )
+
+    try {
+        $owner = Get-Process -Id $ExpectedPid -ErrorAction Stop
+        if ($owner.ProcessName -ne 'chrome' -or ($ExpectVisible -and $owner.MainWindowHandle -eq 0)) { return $false }
+        $listeners = @(Get-NetTCPConnection -State Listen -LocalPort $EndpointPort -ErrorAction Stop)
+        $owned = @($listeners | Where-Object {
+            $_.OwningProcess -eq $ExpectedPid -and $_.LocalAddress -in @('127.0.0.1', '::1')
+        })
+        return $owned.Count -eq $listeners.Count -and @($owned | Where-Object LocalAddress -eq '127.0.0.1').Count -eq 1
+    }
+    catch { return $false }
+}
+
+function Assert-DebuggerProcessBinding {
+    param(
+        [Parameter(Mandatory)] [object] $State,
+        [Parameter(Mandatory)] [int] $EndpointPort
+    )
+    $statePid = [int](Get-StateField -State $State -Name 'pid')
+    $expectVisible = -not [bool](Get-StateField -State $State -Name 'headless')
+    if (-not (Test-DebuggerProcessBinding -EndpointPort $EndpointPort -ExpectedPid $statePid -ExpectVisible $expectVisible)) {
+        Write-Result -Status 'error' -ExitCode 5 -Message (
+            'The debugging listener is not owned exclusively by the expected Chrome process on loopback, or the visible window is unavailable.'
+        )
     }
 }
 
@@ -431,7 +465,7 @@ function Assert-StateBinding {
 
     if ($mismatches.Count -gt 0) {
         Write-Result -Status 'error' -ExitCode 5 -Message (
-            "${Context}: dedicated browser binding mismatch in $($mismatches -join ', ')."
+            "${Context}: dedicated browser binding mismatch in $($mismatches -join ', '). Close the dedicated test window and reopen it for the saved profile."
         ) -Data @{
             expectedProjectId  = $ProjectId
             actualProjectId    = Get-StateField -State $State -Name 'projectId'
@@ -538,7 +572,9 @@ if ($Status) {
     }
 
     Assert-StateBinding -State $state -Context 'Status' -ResolvedProfile $resolvedProfile -EndpointPort $Port -Processes $processes
+    Assert-DebuggerProcessBinding -State $state -EndpointPort $Port
     $data = State-ResultData -State $state
+    $data.listenerVerified = $true
     $data.profile = $resolvedProfile
     $data.port = $Port
     $data.processes = $processes.Count
@@ -598,7 +634,9 @@ if ($running.Count -gt 0) {
     if ($null -ne $existingVersion) {
         $state = Read-StateFile -ResolvedProfile $resolvedProfile
         Assert-StateBinding -State $state -Context 'Reuse' -ResolvedProfile $resolvedProfile -EndpointPort $Port -Processes $running -Target $Url -VerifyTarget
+        Assert-DebuggerProcessBinding -State $state -EndpointPort $Port
         $data = State-ResultData -State $state
+        $data.listenerVerified = $true
         $data.profile = $resolvedProfile
         $data.port = $Port
         $data.browser = $existingVersion.Browser
@@ -620,7 +658,7 @@ $arguments = @(
     # Bound to loopback explicitly. An unauthenticated debugging port must never be
     # reachable from another machine.
     '--remote-debugging-address=127.0.0.1'
-    "--user-data-dir=`"$resolvedProfile`""
+    "--user-data-dir=$resolvedProfile"
 
     # Measurement fidelity. Chrome throttles timers in unfocused and occluded windows,
     # so without these a frame-time reading taken while the window sits behind an editor
@@ -648,12 +686,21 @@ if ($Headless) {
     $arguments += '--headless=new'
 }
 
-$arguments += "`"$Url`""
+$arguments += $Url
 
 Write-Verbose "Launching: $Executable $($arguments -join ' ')"
 
 try {
-    $process = Start-Process -FilePath $Executable -ArgumentList $arguments -PassThru -ErrorAction Stop
+    $start = [System.Diagnostics.ProcessStartInfo]::new($Executable)
+    $start.UseShellExecute = $false
+    $start.RedirectStandardInput = $true
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    foreach ($argument in $arguments) { $start.ArgumentList.Add($argument) }
+    $process = [System.Diagnostics.Process]::Start($start)
+    $process.StandardInput.Close()
+    $process.BeginOutputReadLine()
+    $process.BeginErrorReadLine()
 }
 catch {
     Write-Result -Status 'error' -ExitCode 2 -Message "Could not start Chrome: $_"
@@ -664,15 +711,19 @@ catch {
 $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
 $version = $null
 while ((Get-Date) -lt $deadline) {
-    $version = Test-DevToolsEndpoint -EndpointPort $Port -TimeoutSec 2
-    if ($null -ne $version) { break }
+    $candidateVersion = Test-DevToolsEndpoint -EndpointPort $Port -TimeoutSec 2
+    if ($null -ne $candidateVersion -and (Test-DebuggerProcessBinding -EndpointPort $Port -ExpectedPid $process.Id -ExpectVisible (-not [bool]$Headless))) {
+        $version = $candidateVersion
+        break
+    }
+    if ($process.HasExited) { break }
     Start-Sleep -Milliseconds 400
 }
 
 if ($null -eq $version) {
     Write-Result -Status 'error' -ExitCode 4 -Message (
-        "Chrome started as PID $($process.Id) but the debugging endpoint did not answer " +
-        "within $TimeoutSeconds seconds. The port may be in use by another process."
+        "Chrome started as PID $($process.Id) but a dedicated loopback debugger owned by that process could not be verified. " +
+        "Close the dedicated window and check for a port conflict before retrying."
     ) -Data @{ profile = $resolvedProfile; port = $Port; pid = $process.Id }
 }
 
@@ -683,6 +734,9 @@ Write-Result -Status 'ok' -Message 'Dedicated browser running and reachable.' -D
     targetRootIdentity = $TargetRootIdentity
     profileHash        = $ProjectProfileHash
     generation         = if ($ProfileGeneration -gt 0) { $ProfileGeneration } else { $null }
+    listenerVerified   = $true
+    statePid           = $process.Id
+    targetUrl          = $Url
     pid          = $process.Id
     profile      = $resolvedProfile
     port         = $Port

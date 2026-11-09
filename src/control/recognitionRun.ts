@@ -270,6 +270,7 @@ export function runRecognition(
 
     const plan = cache.plan(diff, {
       compilerOptionsHash: probe.compilerOptionsHash,
+      currentBasis: probe.basis,
       ...(projectRecognition === undefined ? {} : { projectRecognition }),
       ...(
         options.force ||
@@ -295,32 +296,22 @@ export function runRecognition(
       // no performance benefit and would make merge provenance claim a change that did not occur.
       result = probe;
     } else if (!plan.fullRescan && base !== null) {
-      // DEV-P0-04: an incremental run must persist one *complete* merged result, not the
-      // re-extracted fragment. Load the previous complete result, re-extract only the changed
-      // surface, and merge them into one whole result whose hash equals a full scan of the same
-      // tree — so a rehydration after the projection database is deleted reconstructs the entire
-      // graph, not only the fragment. carryForward is no longer an authority-producing step.
-      const previous = graph.resultOf(base, projectRecognition);
-      const previousRecognition = graph.recognition(base);
-      if (previous === null || previousRecognition === null) {
-        // The base artifact is unavailable, so a merge could not reconstruct the whole graph;
-        // fall back to recording the complete full-extraction probe rather than a fragment.
-        result = probe;
-      } else {
-        const fresh = recognize({
-          projectRoot: targetRoot,
-          tsconfigPath,
-          restrictTo: plan.extractionSurface,
-          exclude: excludedPaths,
-          snapshotId,
-          captureId,
-          snapshotFiles,
-          ...(lockfileHash !== undefined ? { lockfileHash } : {}),
-          ...(projectRecognition === undefined ? {} : { projectRecognition }),
-        });
+      // Merge the refreshed surface onto the previous complete result, then compare it to the
+      // full scan. A subsequent projection rebuild must restore the complete graph.
+      let previous: ReturnType<typeof graph.resultOf> = null;
+      let previousRecognition: ReturnType<typeof graph.recognition> = null;
+      try {
+        previous = graph.resultOf(base, projectRecognition);
+        previousRecognition = graph.recognition(base);
+      } catch {
+        notices.push('the previous recognition could not be verified; recording the complete full scan.');
+      }
+      if (previous !== null && previousRecognition !== null) {
+        // The full probe already contains the freshly extracted surface, so both branches
+        // use the same compiler inputs and the target is compiled only once.
         incrementalMerge = mergeIncrementalResult({
           plan,
-          fresh,
+          fresh: probe,
           previous,
           previousResultHash: previousRecognition.result_hash,
         });

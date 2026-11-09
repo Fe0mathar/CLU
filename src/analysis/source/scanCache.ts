@@ -39,7 +39,7 @@ import type Database from 'better-sqlite3';
 import { z } from 'zod';
 
 import { hashCanonicalJson, nowIso, requireSha256 } from '../../shared/ids.js';
-import { parseOrThrow } from '../../shared/schemas.js';
+import { parseOrThrow, recognitionBasisSchema } from '../../shared/schemas.js';
 import {
   projectRecognitionIdentityEquals,
   projectRecognitionIdentitySchema,
@@ -74,6 +74,7 @@ export type FullRescanReason =
   | 'no-previous-recognition'
   | 'compiler-options-changed'
   | 'recognition-configuration-changed'
+  | 'previous-artifact-unavailable'
   | 'previous-projection-incomplete'
   | 'previous-snapshot-missing'
   | 'requested';
@@ -324,6 +325,8 @@ export interface ScanCacheDeps {
 export interface PlanOptions {
   /** Compiler options hash of the recognition about to run. */
   readonly compilerOptionsHash: string;
+  /** Current compiler/configuration provenance when the full probe has established it. */
+  readonly currentBasis?: RecognitionBasis;
   /** Exact Project Profile recognition generation governing this scan, when profile-bound. */
   readonly projectRecognition?: ProjectRecognitionIdentity;
   /** Force a full rescan regardless of what the diff says. */
@@ -743,7 +746,7 @@ export class ScanCache {
     if (fromSnapshot === null) return 'no-previous-recognition';
 
     const row = this.projections.db
-      .prepare('SELECT compiler_options_hash, complete, artifact_hash FROM recognitions WHERE snapshot_id = ?')
+      .prepare('SELECT compiler_options_hash, complete, artifact_hash, basis_hash FROM recognitions WHERE snapshot_id = ?')
       .get(fromSnapshot);
     if (row === undefined) return 'previous-snapshot-missing';
 
@@ -756,15 +759,31 @@ export class ScanCache {
       return 'compiler-options-changed';
     }
 
-    const previousRecognition = this.projectRecognitionOf(record);
+    const previousBasis = this.recognitionBasisOf(record);
+    if (previousBasis === null) return 'previous-artifact-unavailable';
+    const current = options.currentBasis;
+    if (
+      current !== undefined &&
+      (
+        current.tsconfigPath !== previousBasis.tsconfigPath ||
+        current.tsconfigHash !== previousBasis.tsconfigHash ||
+        current.tsCompilerVersion !== previousBasis.tsCompilerVersion ||
+        current.recognizerVersion !== previousBasis.recognizerVersion ||
+        current.identityAlgorithm !== previousBasis.identityAlgorithm ||
+        current.lockfileHash !== previousBasis.lockfileHash
+      )
+    ) {
+      return 'recognition-configuration-changed';
+    }
+    const previousRecognition = previousBasis.projectRecognition;
     if (options.projectRecognition !== undefined) {
       if (
-        previousRecognition === null ||
+        previousRecognition === undefined ||
         !projectRecognitionIdentityEquals(previousRecognition, options.projectRecognition)
       ) {
         return 'recognition-configuration-changed';
       }
-    } else if (previousRecognition !== null) {
+    } else if (previousRecognition !== undefined) {
       // A legacy run must never reuse a Project Profile-bound recognition artifact.
       return 'recognition-configuration-changed';
     }
@@ -772,19 +791,20 @@ export class ScanCache {
     return null;
   }
 
-  private projectRecognitionOf(record: Record<string, unknown>): ProjectRecognitionIdentity | null {
+  private recognitionBasisOf(record: Record<string, unknown>): z.infer<typeof recognitionBasisSchema> | null {
     const artifactHash = record['artifact_hash'];
     if (typeof artifactHash !== 'string' || artifactHash.length === 0) return null;
     try {
       const raw = this.artifacts.getJson(requireSha256(artifactHash, 'recognition artifact hash'));
       if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return null;
-      const basis = (raw as Record<string, unknown>)['basis'];
-      if (typeof basis !== 'object' || basis === null || Array.isArray(basis)) return null;
-      const candidate = (basis as Record<string, unknown>)['projectRecognition'];
-      const parsed = projectRecognitionIdentitySchema.safeParse(candidate);
-      return parsed.success ? parsed.data : null;
+      const artifact = raw as Record<string, unknown>;
+      const parsed = recognitionBasisSchema.safeParse(artifact['basis']);
+      if (!parsed.success) return null;
+      const digest = hashCanonicalJson(parsed.data);
+      if (digest !== artifact['basis_hash'] || digest !== record['basis_hash']) return null;
+      return parsed.data;
     } catch {
-      // A missing/unreadable previous identity is not safe evidence for reuse.
+      // Missing or unreadable evidence always requires a full scan.
       return null;
     }
   }
@@ -874,18 +894,18 @@ export function mergeIncrementalResult(args: {
 }): IncrementalMerge {
   const { plan, fresh, previous, previousResultHash } = args;
   const carried = new Set(plan.carriedFiles);
-  const dropped = new Set(plan.droppedFiles);
+  const extracted = new Set(plan.extractionSurface);
 
   const units: SourceUnit[] = [
-    ...fresh.units.filter((unit) => !dropped.has(unit.modulePath)),
+    ...fresh.units.filter((unit) => extracted.has(unit.modulePath)),
     ...previous.units.filter((unit) => carried.has(unit.modulePath)),
   ];
   const edges: SourceEdge[] = [
-    ...fresh.edges.filter((edge) => !dropped.has(moduleOfEdge(edge))),
+    ...fresh.edges.filter((edge) => extracted.has(moduleOfEdge(edge))),
     ...previous.edges.filter((edge) => carried.has(moduleOfEdge(edge))),
   ];
   const unresolved: UnresolvedReference[] = [
-    ...fresh.unresolved.filter((reference) => !dropped.has(reference.anchor.path)),
+    ...fresh.unresolved.filter((reference) => extracted.has(reference.anchor.path)),
     ...previous.unresolved.filter((reference) => carried.has(reference.anchor.path)),
   ];
 
@@ -934,20 +954,21 @@ export function mergeIncrementalResult(args: {
     mergeVersion: MERGE_VERSION,
     carriedModules: [...carried].sort(compareStrings),
     extractedModules: [...plan.extractionSurface].sort(compareStrings),
-    droppedModules: [...dropped].sort(compareStrings),
+    droppedModules: [...new Set(plan.droppedFiles)].sort(compareStrings),
   };
 }
 
 /**
  * Full-oracle parity check (DEV-P0-04). The incremental merge is an optimisation; the full-extraction
  * probe — the whole program recognised fresh — is the oracle. Returns true when the merged graph's
- * content is byte-identical to the probe's, so the incremental result may be recorded. False means some
+ * basis and content match the probe, so the incremental result may be recorded. False means some
  * file's resolution moved in a way the extraction surface did not capture (an added module shadowing a
  * directory index, say), so the merged result carries a stale edge whose endpoints both exist — invisible
  * to endpoint validation — and the caller must record the probe instead. This is the safety net that
  * makes the incremental path's final artifact equal to a full scan even under adversarial resolution.
  */
 export function incrementalMatchesOracle(merge: IncrementalMerge, probe: RecognitionResult): boolean {
+  if (merge.result.basisHash !== probe.basisHash) return false;
   const oracle = canonicaliseRecognitionResult(probe);
   const oracleHash = hashCanonicalJson({
     units: oracle.units,

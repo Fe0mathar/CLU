@@ -10,9 +10,17 @@
 const action = (value) => Object.freeze(value);
 
 export const DASHBOARD_ACTIONS = Object.freeze({
-  start: action({ method: 'POST', path: '/api/control/start', mutating: true, payload: 'none', description: 'Begin a snapshot and recognition run.' }),
+  start: action({ method: 'POST', path: '/api/control/start', mutating: true, payload: 'none', description: 'Drive the governed cycle through recognition and screening.' }),
   refresh: action({ method: 'POST', path: '/api/control/refresh', mutating: true, payload: 'none', description: 'Re-derive the sealed frame from durable state.' }),
   syncGit: action({ method: 'POST', path: '/api/control/git-sync', mutating: true, payload: 'none', description: 'Run one explicit local-first Git sync; never coupled to Start or proof.' }),
+  checkCapability: action({ method: 'POST', path: '/api/control/readiness', mutating: true, payload: 'json', description: 'Explicitly check one live capability. AI checks can consume provider usage.' }),
+  runChromeTest: action({ method: 'POST', path: '/api/control/chrome-test', mutating: true, payload: 'json', description: 'Run the scripted Chrome canary for the active saved Project Profile generation.' }),
+  runConsoleTest: action({ method: 'POST', path: '/api/control/console-test', mutating: true, payload: 'json', description: 'Run the scripted PowerShell host test for the active saved Project Profile generation.' }),
+  readReadinessReceipts: action({ method: 'GET', path: '/api/control/readiness', mutating: false, payload: 'none', description: 'Read the previous AI and Git check timestamps for the active installation profile.' }),
+  readLegacyOpenAiKey: action({ method: 'GET', path: '/api/control/legacy-openai-key', mutating: false, payload: 'none', description: 'Check whether the active legacy target has a saved credential.' }),
+  setLegacyOpenAiKey: action({ method: 'POST', path: '/api/control/legacy-openai-key', mutating: true, payload: 'none', description: 'Open the native key prompt for the active legacy target.' }),
+  signInLegacyGitHub: action({ method: 'POST', path: '/api/control/legacy-github-sign-in', mutating: true, payload: 'none', description: 'Open GitHub CLI sign-in for the local legacy dashboard.' }),
+  talkToAgent: action({ method: 'POST', path: '/api/control/agent', mutating: true, payload: 'json', description: 'Ask the Master Agent about the active CLU-E runtime through the configured model gateway.' }),
   publishCatalogue: action({ method: 'POST', path: '/api/catalogues', mutating: true, payload: 'json', description: 'Publish a measurement catalogue to the server library.' }),
   readConfig: action({ method: 'GET', path: '/api/config', mutating: false, payload: 'none', description: 'Read operational configuration health.' }),
   readRun: action({ method: 'GET', path: '/api/run', mutating: false, payload: 'none', description: 'Read current run state.' }),
@@ -26,13 +34,10 @@ export const DASHBOARD_ACTIONS = Object.freeze({
   activateProject: action({ method: 'POST', path: '/api/projects/:projectId/activate', params: ['projectId'], mutating: true, payload: 'request', body: true, description: 'Request an atomic runtime activation of one exact saved generation.' }),
   validateProject: action({ method: 'POST', path: '/api/projects/:projectId/validate', params: ['projectId'], mutating: false, payload: 'request', body: false, description: 'Validate the saved profile generation and live authority basis.' }),
   readProjectReadiness: action({ method: 'GET', path: '/api/projects/:projectId/readiness', params: ['projectId'], mutating: false, payload: 'request', body: false, description: 'Read operation-specific readiness for one exact Project Profile.' }),
-  testProjectHost: action({ method: 'POST', path: '/api/projects/:projectId/test-host', params: ['projectId'], mutating: false, payload: 'request', body: false, description: 'Test PowerShell host handshake and root parity.' }),
   testProjectGit: action({ method: 'POST', path: '/api/projects/:projectId/test-git', params: ['projectId'], mutating: false, payload: 'request', body: false, description: 'Validate local Git repository and publication posture.' }),
   signInProjectGitHub: action({ method: 'POST', path: '/api/projects/:projectId/github-sign-in', params: ['projectId'], mutating: true, payload: 'request', body: false, description: 'Open GitHub CLI sign-in on the host.' }),
   listProjectGitHubRepositories: action({ method: 'GET', path: '/api/projects/:projectId/github-repositories', params: ['projectId'], mutating: false, payload: 'request', body: false, description: 'List repositories accessible to the authenticated GitHub account.' }),
   connectProjectGitHub: action({ method: 'POST', path: '/api/projects/:projectId/github-connect', params: ['projectId'], mutating: true, payload: 'request', body: true, description: 'Verify and register the selected GitHub checkout without synchronizing.' }),
-  testProjectBrowser: action({ method: 'POST', path: '/api/projects/:projectId/test-chrome', params: ['projectId'], mutating: false, payload: 'request', body: false, description: 'Resolve one exact permitted browser target or fail closed.' }),
-  openProjectTestChrome: action({ method: 'POST', path: '/api/projects/:projectId/open-test-chrome', params: ['projectId'], mutating: true, payload: 'request', body: true, description: 'Open and verify the selected project’s dedicated visible Chrome window.' }),
   testProjectGpt: action({ method: 'POST', path: '/api/projects/:projectId/test-gpt', params: ['projectId'], mutating: false, payload: 'request', body: false, description: 'Test exact OpenAI provider/model readiness without exposing secret bytes.' }),
   listProjectGptModels: action({ method: 'GET', path: '/api/projects/:projectId/gpt/models', params: ['projectId'], mutating: false, payload: 'request', body: false, description: 'List model IDs available to the saved Project Profile credential.' }),
   readProjectOpenAiKey: action({ method: 'GET', path: '/api/projects/:projectId/openai-key', params: ['projectId'], mutating: false, payload: 'request', body: false, description: 'Check whether a project-scoped Windows credential is stored.' }),
@@ -118,7 +123,7 @@ export function createActionClient(options) {
     return DASHBOARD_ACTIONS;
   }
 
-  async function invoke(name, input) {
+  async function invoke(name, input, { signal } = {}) {
     const key = String(name);
     const actionSpec = Object.prototype.hasOwnProperty.call(DASHBOARD_ACTIONS, key)
       ? DASHBOARD_ACTIONS[key]
@@ -151,6 +156,7 @@ export function createActionClient(options) {
       const result = await request({
         method: actionSpec.method,
         path: appendQuery(route.path, query),
+        ...(signal === undefined ? {} : { signal }),
         ...(payload === undefined ? {} : { payload }),
       });
       return { ok: true, action: key, result };

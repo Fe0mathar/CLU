@@ -70,6 +70,27 @@ test('P2-CLOSURE-05: read-only replay verifies the chain and refuses edited gove
   }
 });
 
+test('read-only replay preserves legacy events whose undefined payload was omitted in JSON', () => {
+  const { root, events } = tempEvents();
+  try {
+    const { log } = EventLog.open(events);
+    const event = log.append({
+      type: 'test.event',
+      missionVersion: 'MISSION-000001',
+      actor: 'daemon',
+      payload: undefined,
+    });
+    log.close();
+
+    const stored = JSON.parse(readFileSync(join(events, 'events.ndjson'), 'utf8')) as object;
+    assert.equal(Object.hasOwn(stored, 'payload'), false);
+    assert.deepEqual([...EventLog.replayReadOnly(events)], [stored]);
+    assert.deepEqual(EventLog.verifyReadOnly(events), { sequence: event.sequence, hash: event.hash });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('read-only full-chain verification preserves UTF-8 across read chunks', () => {
   const { root, events } = tempEvents();
   try {

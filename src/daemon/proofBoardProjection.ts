@@ -639,7 +639,7 @@ function databaseBoolean(value: number, label: string): boolean {
   return value === 1;
 }
 
-export function readProofBoard(runtime: Runtime, generatedAt: string): ProofBoardView {
+export function readProofBoard(runtime: Runtime, generatedAt: string, cycleId?: string): ProofBoardView {
   const projections = runtime.projections;
   const db = projections.db;
   const targetId = runtime.config.project.id;
@@ -720,10 +720,10 @@ export function readProofBoard(runtime: Runtime, generatedAt: string): ProofBoar
               hypothesis_id AS hypothesisId, snapshot_id AS snapshotId,
               contract_artifact_hash AS contractArtifactHash, frozen_at AS frozenAt
          FROM proof_board_contracts
-        WHERE target_id = ?
+        WHERE target_id = ? AND (? IS NULL OR cycle_id = ?)
         ORDER BY sequence DESC LIMIT ?`,
     )
-    .all(targetId, BOARD_LIMIT) as Array<Record<string, unknown>>;
+    .all(targetId, cycleId ?? null, cycleId ?? null, cycleId === undefined ? BOARD_LIMIT : -1) as Array<Record<string, unknown>>;
   const baselines = db
     .prepare(
       `SELECT event_id AS eventId, sequence, recorded_at AS recordedAt,
@@ -732,18 +732,20 @@ export function readProofBoard(runtime: Runtime, generatedAt: string): ProofBoar
               source_event_id AS sourceEventId, run_artifact_hash AS runArtifactHash,
               reused
          FROM proof_board_baselines
+        WHERE ? IS NULL OR cycle_id = ?
         ORDER BY sequence ASC`,
     )
-    .all() as Array<Record<string, unknown>>;
+    .all(cycleId ?? null, cycleId ?? null) as Array<Record<string, unknown>>;
   const refusals = db
     .prepare(
       `SELECT event_id AS eventId, sequence, recorded_at AS recordedAt,
               mission_version AS missionVersion, cycle_id AS cycleId,
               contract_hash AS contractHash, stage, reason, evidence_json AS evidenceJson
          FROM proof_board_refusals
+        WHERE ? IS NULL OR cycle_id = ?
         ORDER BY sequence ASC`,
     )
-    .all() as Array<Record<string, unknown>>;
+    .all(cycleId ?? null, cycleId ?? null) as Array<Record<string, unknown>>;
   const verdicts = db
     .prepare(
       `SELECT event_id AS eventId, sequence, recorded_at AS recordedAt,
@@ -756,10 +758,10 @@ export function readProofBoard(runtime: Runtime, generatedAt: string): ProofBoar
               verdict_artifact_hash AS verdictArtifactHash,
               great_book_state AS greatBookState, great_book_entry_id AS greatBookEntryId
          FROM proof_board_verdicts
-        WHERE target_id = ?
+        WHERE target_id = ? AND (? IS NULL OR cycle_id = ?)
         ORDER BY sequence ASC`,
     )
-    .all(targetId) as Array<Record<string, unknown>>;
+    .all(targetId, cycleId ?? null, cycleId ?? null) as Array<Record<string, unknown>>;
 
   const contractSchema = z
     .object({
@@ -803,16 +805,16 @@ export function readProofBoard(runtime: Runtime, generatedAt: string): ProofBoar
   const verdictValues = verdicts.map((row) => verdictSchema.parse(row));
   const contractValues = contracts.map((row) => contractSchema.parse(row));
 
+  // Contracts arrive in descending sequence, so the prior row for a cycle bounds this attempt.
+  const nextSequenceByCycle = new Map<string, number>();
   const proofAttempts: ProofAttemptView[] = contractValues.map((contract, index) => {
-    const nextBoundary = contractValues
-      .filter((candidate) => candidate.cycleId === contract.cycleId && candidate.sequence > contract.sequence)
-      .reduce<number | null>((minimum, candidate) =>
-        minimum === null || candidate.sequence < minimum ? candidate.sequence : minimum, null);
+    const nextBoundary = nextSequenceByCycle.get(contract.cycleId);
+    nextSequenceByCycle.set(contract.cycleId, contract.sequence);
     const inAttempt = <T extends { cycleId: string; contractHash: string; sequence: number }>(row: T): boolean =>
       row.cycleId === contract.cycleId &&
       row.contractHash === contract.contractHash &&
       row.sequence > contract.sequence &&
-      (nextBoundary === null || row.sequence < nextBoundary);
+      (nextBoundary === undefined || row.sequence < nextBoundary);
     const attemptBaselines = baselineValues.filter(inAttempt);
     const attemptRefusals = refusalValues.filter(inAttempt);
     const attemptVerdicts = verdictValues.filter(inAttempt);

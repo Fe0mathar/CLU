@@ -18,6 +18,8 @@ import { z } from 'zod';
 
 import { withRuntime, type Runtime } from '../../control/runtime.js';
 import {
+  hasWindowsOpenAiCredentialReference,
+  legacyWindowsOpenAiCredentialReference,
   readWindowsOpenAiCredential,
   windowsOpenAiCredentialReference,
 } from '../../control/projectProfiles/windowsOpenAiCredential.js';
@@ -293,6 +295,10 @@ export interface GatewayRuntimeOptions {
   readonly environment?: NodeJS.ProcessEnv;
   readonly credentialResolver?: GatewayCredentialResolver;
   readonly fetchImpl?: GatewayFetch;
+  /** A caller requiring a live reply must never submit a batch as a substitute. */
+  readonly requireInteractive?: boolean;
+  /** Bind operator context to the exact project/workspace captured by the caller. */
+  readonly expectedRuntimeDigest?: string;
 }
 
 interface RuntimeGatewayBinding {
@@ -303,13 +309,18 @@ interface RuntimeGatewayBinding {
   readonly fallbackPolicy: 'FORBID';
 }
 
-function runtimeGatewayBinding(runtime: Runtime): RuntimeGatewayBinding {
+function runtimeGatewayBinding(runtime: Runtime, environment: NodeJS.ProcessEnv): RuntimeGatewayBinding {
   if (runtime.projectProfile === null) {
+    const name = runtime.config.gateway.api_key_env;
+    const envValue = environment[name];
+    const hasOverride = typeof envValue === 'string' && envValue.trim().length >= 8;
+    const savedReference = legacyWindowsOpenAiCredentialReference(runtime.config.project.root, name);
     return {
       projectId: null,
       enabled: runtime.config.gateway.enabled,
       requestedModel: null,
-      credentialReference: `env:${runtime.config.gateway.api_key_env}`,
+      credentialReference: runtime.config.gateway.enabled && !hasOverride && hasWindowsOpenAiCredentialReference(savedReference)
+        ? savedReference : `env:${name}`,
       fallbackPolicy: 'FORBID',
     };
   }
@@ -327,12 +338,12 @@ function runtimeGatewayBinding(runtime: Runtime): RuntimeGatewayBinding {
   };
 }
 
-function runtimeGatewayPolicy(runtime: Runtime): {
+function runtimeGatewayPolicy(runtime: Runtime, environment = process.env): {
   readonly binding: RuntimeGatewayBinding;
   readonly policies: LoadedGatewayPolicies;
   readonly modelProblem: string | null;
 } {
-  const binding = runtimeGatewayBinding(runtime);
+  const binding = runtimeGatewayBinding(runtime, environment);
   const policies = loadGatewayPolicies(runtime.repoRoot, runtime.config);
   if (binding.projectId === null || !binding.enabled) return { binding, policies, modelProblem: null };
   if (binding.requestedModel === null) {
@@ -357,8 +368,8 @@ function resolveGatewayCredential(
     return typeof value === 'string' && value.trim().length >= 8 ? value.trim() : null;
   }
   if (reference.startsWith('credential-store:')) {
-    const ownWindowsReference = binding.projectId !== null &&
-      reference === windowsOpenAiCredentialReference(binding.projectId);
+    // The legacy binding is constructed only from the server's exact target and credential slot.
+    const ownWindowsReference = binding.projectId === null || reference === windowsOpenAiCredentialReference(binding.projectId);
     const value = resolver !== undefined ? resolver.resolve(reference)
       : ownWindowsReference ? readWindowsOpenAiCredential(reference) : null;
     return typeof value === 'string' && value.trim().length >= 8 ? value.trim() : null;
@@ -488,10 +499,20 @@ function prepareGatewayCall(
     },
     (runtime) => {
       const callId = newCallId();
-      const { binding, policies, modelProblem } = runtimeGatewayPolicy(runtime);
+      if (options.expectedRuntimeDigest !== undefined && options.expectedRuntimeDigest !== hashCanonicalJson([
+        runtime.config.project.root,
+        runtime.workspaceRoot,
+        runtime.projectBinding?.recognition.identity ?? null,
+      ])) {
+        return {
+          state: 'refused', callId, code: 'DASHBOARD_RUNTIME_CHANGED',
+          reason: 'The configured project or workspace changed. Reopen the dashboard and retry.',
+        };
+      }
       const environment = options.environment ?? process.env;
+      const { binding, policies, modelProblem } = runtimeGatewayPolicy(runtime, environment);
       const assessment = assessGatewayPolicy(runtime.config, policies, environment, {
-        checkInstallationCredential: runtime.projectProfile === null,
+        checkInstallationCredential: runtime.projectProfile === null && binding.credentialReference.startsWith('env:'),
       });
       const projectContext = runtimeProjectContext(runtime);
       const policyProblems = assessment.problems;
@@ -569,6 +590,9 @@ function prepareGatewayCall(
         runtime.config.gateway.default_mode as GatewayCallMode,
         spentOrReserved,
       );
+      if (options.requireInteractive === true && mode !== 'interactive') {
+        return refusal(runtime, callId, request, policies, 'INTERACTIVE_REQUIRED', 'Gateway policy does not allow an interactive call for this request.');
+      }
       const discount = mode === 'batch' ? policies.routing.batch_discount_fraction : 0;
       const estimatedUsd = priceForUsage(
         pricing,
@@ -627,6 +651,10 @@ function prepareGatewayCall(
           'API_KEY_MISSING',
           `${binding.credentialReference} is configured but unavailable to the runtime.`,
         );
+      }
+      if (request.input.includes(apiKey) || request.instructions?.includes(apiKey) ||
+          Object.values(request.metadata).some((value) => value.includes(apiKey))) {
+        return refusal(runtime, callId, request, policies, 'CREDENTIAL_IN_REQUEST', 'The request contains the configured gateway credential.');
       }
 
       const requestBody = {
@@ -724,6 +752,17 @@ function prepareGatewayCall(
   );
 }
 
+function requireOpenGatewayCall(runtime: Runtime, callId: string): GatewayCallRecord {
+  const current = readGatewayCall(runtime.projections, callId);
+  if (current === null || (current.state !== 'in_flight' && current.state !== 'batch_pending')) {
+    throw new OpenAiGatewayError(
+      'GATEWAY_CALL_NOT_OPEN',
+      `Gateway call ${callId} is already ${current?.state ?? 'unavailable'}. No duplicate event was recorded.`,
+    );
+  }
+  return current;
+}
+
 function recordFailureInRuntime(
   runtime: Runtime,
   prepared: GatewayPreparedCall,
@@ -733,6 +772,7 @@ function recordFailureInRuntime(
     readonly providerStatus?: string | null;
   } = {},
 ): GatewayInvocationResult {
+  requireOpenGatewayCall(runtime, prepared.callId);
   try {
     assertPreparedProjectContext(runtime, prepared);
   } catch (identityError) {
@@ -830,6 +870,7 @@ function recordCompleted(
       ...(options.projectProfile === undefined ? {} : { projectProfile: options.projectProfile }),
     },
     (runtime) => {
+      requireOpenGatewayCall(runtime, prepared.callId);
       try {
         assertPreparedProjectContext(runtime, prepared);
       } catch (error) {
@@ -857,6 +898,12 @@ function recordCompleted(
         );
       }
       const serialized = canonicalJson(raw);
+      if (response.outputText.includes(prepared.apiKey) || serialized.includes(prepared.apiKey)) {
+        return recordFailureInRuntime(runtime, prepared, new OpenAiGatewayError(
+          'CREDENTIAL_IN_RESPONSE',
+          'The provider reply contained a credential and was refused.',
+        ));
+      }
       runtime.secrets.assertClean(serialized, 'gateway provider response');
       const artifact = runtime.artifacts.putJson(raw, {
         label: `${prepared.callId}-response.json`,
@@ -1039,7 +1086,7 @@ function preparedFromRecord(
   runtime: Runtime,
   record: GatewayCallRecord,
   policies: LoadedGatewayPolicies,
-  apiKey = '',
+  environment: NodeJS.ProcessEnv,
 ): GatewayPreparedCall {
   if (record.projectIdentity !== null) {
     if (runtime.projectIdentity === null || runtime.projectProfile === null) {
@@ -1113,6 +1160,7 @@ function preparedFromRecord(
     );
   }
 
+  const currentBinding = runtimeGatewayBinding(runtime, environment);
   const prepared: GatewayPreparedCall = {
     callId: record.callId,
     missionVersion: record.missionVersion,
@@ -1135,11 +1183,10 @@ function preparedFromRecord(
     credentialReference:
       typeof body['credential_reference'] === 'string'
         ? body['credential_reference']
-        : runtimeGatewayBinding(runtime).credentialReference,
-    apiKey,
+        : currentBinding.credentialReference,
+    apiKey: '',
   };
   assertPreparedProjectContext(runtime, prepared);
-  const currentBinding = runtimeGatewayBinding(runtime);
   if (prepared.credentialReference !== currentBinding.credentialReference) {
     throw new OpenAiGatewayError(
       'PROJECT_IDENTITY_DRIFT',
@@ -1181,7 +1228,8 @@ export async function reconcileGatewayBatch(
       if (record.state !== 'batch_pending' || record.providerBatchId === null) {
         throw new Error(`Gateway call ${callId} is not a pending batch.`);
       }
-      const { binding, policies, modelProblem } = runtimeGatewayPolicy(runtime);
+      const environment = options.environment ?? process.env;
+      const { binding, policies, modelProblem } = runtimeGatewayPolicy(runtime, environment);
       if (modelProblem !== null) throw new OpenAiGatewayError('GATEWAY_MODEL_POLICY_MISMATCH', modelProblem);
       const submittedMs = Date.parse(record.submittedAt);
       const updatedMs = Date.parse(record.updatedAt);
@@ -1192,7 +1240,6 @@ export async function reconcileGatewayBatch(
       const pollIntervalMs = runtime.config.gateway.batch_poll_interval_seconds * 1000;
       const timedOut = atMs - submittedMs >= timeoutMs;
       const pollDue = atMs - updatedMs >= pollIntervalMs;
-      const environment = options.environment ?? process.env;
       const credential = resolveGatewayCredential(
         binding,
         environment,
@@ -1218,7 +1265,7 @@ export async function reconcileGatewayBatch(
       ...(options.repoRoot === undefined ? {} : { repoRoot: options.repoRoot }),
       ...projectProfileRuntimeOption(options),
     },
-    (runtime) => preparedFromRecord(runtime, lookup.record, lookup.policies),
+    (runtime) => preparedFromRecord(runtime, lookup.record, lookup.policies, options.environment ?? process.env),
   );
 
   if (lookup.timedOut) {
@@ -1307,6 +1354,16 @@ export async function reconcileGatewayBatch(
       ...projectProfileRuntimeOption(options),
     },
     (runtime) => {
+      const current = requireOpenGatewayCall(runtime, callId);
+      if (current.updatedAt !== lookup.record.updatedAt || current.providerReceiptArtifactHash !== lookup.record.providerReceiptArtifactHash) {
+        return {
+          state: 'batch_pending',
+          callId,
+          providerBatchId: lookup.providerBatchId,
+          providerStatus: current.providerStatus ?? 'submitted',
+          record: current,
+        };
+      }
       const raw = canonicalJson(result.raw);
       runtime.secrets.assertClean(raw, 'gateway batch poll receipt');
       try {
@@ -1369,10 +1426,10 @@ export async function resumeGatewayProvider(
       ...projectProfileRuntimeOption(options),
     },
     (runtime) => {
-      const { binding, policies, modelProblem } = runtimeGatewayPolicy(runtime);
       const environment = options.environment ?? process.env;
+      const { binding, policies, modelProblem } = runtimeGatewayPolicy(runtime, environment);
       const assessment = assessGatewayPolicy(runtime.config, policies, environment, {
-        checkInstallationCredential: runtime.projectProfile === null,
+        checkInstallationCredential: runtime.projectProfile === null && binding.credentialReference.startsWith('env:'),
       });
       const policyProblems = assessment.problems;
       if (modelProblem !== null) throw new OpenAiGatewayError('GATEWAY_MODEL_POLICY_MISMATCH', modelProblem);
@@ -1491,9 +1548,9 @@ export function readGatewayStatus(
   environment: NodeJS.ProcessEnv = process.env,
   credentialResolver?: GatewayCredentialResolver,
 ): GatewayStatus {
-  const { binding, policies, modelProblem } = runtimeGatewayPolicy(runtime);
+  const { binding, policies, modelProblem } = runtimeGatewayPolicy(runtime, environment);
   const assessment = assessGatewayPolicy(runtime.config, policies, environment, {
-    checkInstallationCredential: runtime.projectProfile === null,
+    checkInstallationCredential: runtime.projectProfile === null && binding.credentialReference.startsWith('env:'),
   });
   const aggregate = readGatewayAggregateFacts(runtime.projections, runtime.config.project.id, at);
   const providerState = readGatewayProviderState(runtime.projections, runtime.config.project.id);

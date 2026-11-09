@@ -1,7 +1,8 @@
 /** Project-scoped Git repository and publication readiness. No network operation occurs here. */
 
 import { spawnSync } from 'node:child_process';
-import { existsSync, statSync } from 'node:fs';
+import { accessSync, constants, existsSync, realpathSync, statSync } from 'node:fs';
+import { delimiter, isAbsolute, join, relative, sep } from 'node:path';
 
 import { assertSamePathIdentity, resolveTargetRootIdentity } from '../../shared/pathIdentity.js';
 import {
@@ -23,6 +24,7 @@ export interface GitCommandResult {
   readonly ok: boolean;
   readonly stdout: string;
   readonly stderr: string;
+  readonly refusalCode?: string;
 }
 
 export type GitCommandRunner = (
@@ -142,7 +144,7 @@ export function inspectProjectGitReadiness(
   const dirty = status.ok ? status.stdout !== '' : null;
 
   if (head === null || dirty === null) {
-    return result('BLOCKED', 'GIT_STATE_UNAVAILABLE', headResult.stderr || status.stderr, base, {
+    return result('BLOCKED', status.refusalCode ?? 'GIT_STATE_UNAVAILABLE', headResult.stderr || status.stderr, base, {
       repositoryTopLevel: top.stdout,
       branch,
       head,
@@ -250,25 +252,143 @@ export const defaultGitRunner: GitCommandRunner = (
   args,
   timeoutMs = 30_000,
 ): GitCommandResult => {
-  const env = { ...process.env };
-  for (const name of Object.keys(env)) {
-    if (name.toUpperCase() === 'OPENAI_API_KEY') delete env[name];
+  const { ok, stdout, stderr } = runGitCommand(root, args, timeoutMs, false);
+  return { ok, stdout, stderr };
+};
+
+/** Read-only runner used by P01. Refuses repository code that Git status could otherwise invoke. */
+export const preflightGitRunner: GitCommandRunner = (root, args, timeoutMs = 30_000) => {
+  if (args[0] === 'status') {
+    const safety = inspectPreflightStatusSafety(root, timeoutMs);
+    if ('refusalCode' in safety) return safety;
+    return runGitCommand(root, [...safety.overrides, ...args, '--ignore-submodules=all'], timeoutMs, true);
   }
-  const child = spawnSync('git', [...args], {
+  return runGitCommand(root, args, timeoutMs, true);
+};
+
+function inspectPreflightStatusSafety(root: string, timeoutMs: number):
+  { readonly overrides: readonly string[] } | (GitCommandResult & { readonly refusalCode: string }) {
+  const refused = (refusalCode: string, stderr: string) => ({ ok: false, stdout: '', stderr, refusalCode });
+  const index = runGitCommand(root, ['ls-files', '--stage', '-z'], timeoutMs, true);
+  if (!index.ok) return refused('GIT_INDEX_UNVERIFIED', 'Git index entries could not be verified.');
+  const trackedPaths = new Set<string>();
+  for (const entry of index.stdout.split('\0').filter(Boolean)) {
+    const tab = entry.indexOf('\t');
+    if (tab < 0 || entry.includes('\uFFFD')) return refused('GIT_INDEX_UNVERIFIED', 'Git index entries could not be decoded.');
+    if (entry.startsWith('160000 ')) {
+      return refused('GIT_SUBMODULES_REQUIRE_REVIEW', 'Submodule worktrees require a separate local inspection.');
+    }
+    trackedPaths.add(entry.slice(tab + 1));
+  }
+
+  const filters = runGitCommand(root, [
+    'config', '--name-only', '--null', '--get-regexp', '^filter\\..*\\.(clean|process)$',
+  ], timeoutMs, true);
+  if (!filters.ok && filters.exitCode === 1 && filters.stderr === '') return { overrides: [] };
+  const keys = filters.stdout.split('\0').filter(Boolean);
+  if (!filters.ok || keys.length === 0 || keys.some((key) => key.includes('\uFFFD') || !/^filter\..+\.(?:clean|process)$/u.test(key))) {
+    return refused('GIT_FILTER_CONFIGURATION_UNVERIFIED', 'Git filter configuration could not be verified.');
+  }
+  const names = new Set(keys.map((key) => key.slice('filter.'.length, key.lastIndexOf('.'))));
+  if (trackedPaths.size > 0) {
+    const paths = [...trackedPaths];
+    const attributes = runGitCommand(root, ['check-attr', '--stdin', '-z', 'filter'], timeoutMs, true, `${paths.join('\0')}\0`);
+    const fields = attributes.stdout.split('\0');
+    if (!attributes.ok || fields.length !== paths.length * 3 + 1 || fields.at(-1) !== '' ||
+        paths.some((path, index) => fields[index * 3] !== path || fields[index * 3 + 1] !== 'filter')) {
+      return refused('GIT_FILTER_CONFIGURATION_UNVERIFIED', 'Tracked-file filter attributes could not be verified.');
+    }
+    if (paths.some((_, index) => names.has(fields[index * 3 + 2] ?? ''))) {
+      return refused('GIT_EXTERNAL_FILTER_CONFIGURED', 'Git status could execute an external filter on a tracked file.');
+    }
+  }
+  // Disable observed drivers in the status process as well, should an attribute change after inspection.
+  return { overrides: [...names].flatMap((name) => [
+    '-c', `filter.${name}.clean=`, '-c', `filter.${name}.process=`, '-c', `filter.${name}.required=true`,
+  ]) };
+}
+
+function runGitCommand(
+  root: string,
+  args: readonly string[],
+  timeoutMs: number,
+  offline: boolean,
+  input?: string,
+): GitCommandResult & { readonly exitCode: number | null } {
+  const env: NodeJS.ProcessEnv = {};
+  for (const [name, value] of Object.entries(process.env)) {
+    const key = name.toUpperCase();
+    if (GIT_HOST_ENV.has(key)) env[process.platform === 'win32' ? key : name] = value;
+  }
+  const tool = locateGit(root, env);
+  if (tool === null) return { ok: false, stdout: '', stderr: 'A host Git executable is required outside the target checkout.', exitCode: null };
+  const child = spawnSync(tool.executable, [
+    '--no-optional-locks', '--no-replace-objects',
+    '-c', 'core.fsmonitor=false', '-c', 'core.hooksPath=/dev/null',
+    '-c', 'submodule.recurse=false', '-c', 'fetch.recurseSubmodules=false', '-c', 'push.recurseSubmodules=no',
+    '-c', 'maintenance.auto=false', '-c', 'gc.auto=0',
+    ...args,
+  ], {
     cwd: root,
-    env,
+    env: {
+      ...env, PATH: tool.path, GIT_ALLOW_PROTOCOL: offline ? '' : 'http:https:ssh:git:file',
+      ...(offline ? { GIT_NO_LAZY_FETCH: '1' } : {}),
+      GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never',
+    },
     shell: false,
     encoding: 'utf8',
     windowsHide: true,
     timeout: timeoutMs,
     maxBuffer: 4 * 1024 * 1024,
+    ...(input === undefined ? {} : { input }),
   });
+  const stdout = String(child.stdout ?? '');
+  const nulSeparated = offline && (args.includes('-z') || args.includes('--null'));
   return {
     ok: child.status === 0 && child.error === undefined,
-    stdout: String(child.stdout ?? '').trim(),
+    stdout: nulSeparated ? stdout : stdout.trim(),
     stderr: String(child.stderr ?? child.error?.message ?? '').trim(),
+    exitCode: child.status,
   };
-};
+}
+
+const GIT_HOST_ENV = new Set([
+  'PATH', 'PATHEXT', 'SYSTEMROOT', 'SYSTEMDRIVE', 'WINDIR', 'COMSPEC', 'TEMP', 'TMP', 'TMPDIR',
+  'LOCALAPPDATA', 'APPDATA', 'PROGRAMDATA', 'PROGRAMFILES', 'PROGRAMFILES(X86)',
+  'USERPROFILE', 'HOME', 'HOMEDRIVE', 'HOMEPATH', 'USERNAME', 'USERDOMAIN', 'USER', 'XDG_CONFIG_HOME',
+  'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY', 'SSL_CERT_FILE', 'SSL_CERT_DIR', 'SSH_AUTH_SOCK',
+  'LANG', 'LC_ALL', 'LC_CTYPE',
+]);
+
+function isWithin(root: string, candidate: string): boolean {
+  const delta = relative(root, candidate);
+  return delta === '' || (delta !== '..' && !delta.startsWith(`..${sep}`) && !isAbsolute(delta));
+}
+
+function locateGit(root: string, env: NodeJS.ProcessEnv): { executable: string; path: string } | null {
+  let target: string;
+  try { target = realpathSync.native(root); } catch { return null; }
+  const executableName = process.platform === 'win32' ? 'git.exe' : 'git';
+  const trustedEntries: string[] = [];
+  let executable: string | null = null;
+  for (const raw of (env['PATH'] ?? '').split(delimiter)) {
+    const entry = raw.trim().replace(/^"(.*)"$/u, '$1');
+    if (!isAbsolute(entry) || (process.platform === 'win32' && !/^[A-Za-z]:[\\/]/u.test(entry))) continue;
+    try {
+      const physical = realpathSync.native(entry);
+      if (isWithin(target, physical) || !statSync(physical).isDirectory()) continue;
+      trustedEntries.push(physical);
+      if (executable !== null) continue;
+      const candidate = realpathSync.native(join(physical, executableName));
+      if (isWithin(target, candidate) || !statSync(candidate).isFile()) continue;
+      accessSync(candidate, constants.X_OK);
+      executable = candidate;
+    } catch {
+      // Skip stale directories and unavailable executables.
+    }
+  }
+  return executable === null ? null : { executable, path: trustedEntries.join(delimiter) };
+}
 
 function result(
   state: ProjectGitReadinessState,

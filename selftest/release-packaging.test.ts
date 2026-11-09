@@ -26,8 +26,12 @@ const localProfileSelector = 'config/project-profiles.yaml';
 const localConfigBackup = 'config/backups/clue.config.v2.1bd8e5d20223.yaml';
 const operatorPaths = [
   '.gitattributes',
+  'AUDIT_AND_UPGRADE.md',
   'CLUE-Windows-Supervisor.bat',
   'CLUE-Windows-WFP-Diagnostic.bat',
+  'CLUE-Windows-WFP-BFE-Lab.bat',
+  'CLUE-Windows-Production-Network-Fault.bat',
+  'CLUE-Windows-Reviewed-Release.bat',
   'templates/project-profiles/governed-document.operator-input.template.json',
   'templates/project-profiles/project-profile.operator-input.template.json',
 ];

@@ -179,7 +179,7 @@ export class ProjectRuntimeManager {
   }
 
   public get activeRuntime(): Runtime | null {
-    return this.activeGeneration?.runtime ?? null;
+    return this.managerState === 'ACTIVE' ? this.activeGeneration?.runtime ?? null : null;
   }
 
   public get activeLeaseCount(): number {
@@ -213,6 +213,7 @@ export class ProjectRuntimeManager {
       runtime = this.openTargetRuntime(record);
       browserSwitch = this.options.browserSessions?.begin(record) ?? null;
       browserSwitch?.commit();
+      this.assertRegistryPointerUnchanged(pointer);
       const next = this.buildActiveGeneration(
         record,
         pointer,
@@ -271,9 +272,14 @@ export class ProjectRuntimeManager {
       }
     }
 
+    const originalRegistry = this.registry.readState();
+    if (previous !== null && originalRegistry.generation !== previous.pointer.registryGeneration) {
+      this.blockContradictoryRegistry('registry changed before the project transition began');
+    }
     this.managerState = 'SWITCHING';
     let stagedRuntime: Runtime | null = null;
-    let pointerMoved = false;
+    let activationAttempted = false;
+    let activatedPointer: ActiveProjectPointer | null = null;
     let targetRecord: ProjectProfileRecord | null = null;
     let browserSwitch: ProjectBrowserSwitchTransaction | null = null;
     let browserCommitted = false;
@@ -288,11 +294,16 @@ export class ProjectRuntimeManager {
       this.inject('after-target-runtime-open', targetRecord);
       this.inject('before-registry-activation', targetRecord);
 
+      activationAttempted = true;
       const pointer = this.registry.activate(request.projectId, {
         actor: request.actor,
         ...(request.reason === undefined ? {} : { reason: request.reason }),
+      }, {
+        generation: targetRecord.generation,
+        projectProfileHash: targetRecord.projectProfileHash,
+        registryGeneration: originalRegistry.generation,
       });
-      pointerMoved = true;
+      activatedPointer = pointer;
       this.assertPointerMatchesRecord(pointer, targetRecord);
       this.inject('after-registry-activation', targetRecord);
       this.inject('before-browser-publication', targetRecord);
@@ -300,6 +311,7 @@ export class ProjectRuntimeManager {
       browserCommitted = browserSwitch !== null;
       this.inject('after-browser-publication', targetRecord);
       this.inject('before-runtime-publication', targetRecord);
+      this.assertRegistryPointerUnchanged(pointer);
 
       const next = this.buildActiveGeneration(
         targetRecord,
@@ -333,40 +345,39 @@ export class ProjectRuntimeManager {
         }
       }
 
-      if (!pointerMoved) {
-        this.activeGeneration = previous;
-        this.managerState = previous === null ? 'INACTIVE' : 'ACTIVE';
-        throw error;
-      }
-
       try {
-        if (previous === null) {
+        if (activatedPointer === null) {
+          // A filesystem or event-log error can occur after the registry journal or pointer
+          // was placed. Settle recovery before deciding whether the old runtime is still safe.
+          if (activationAttempted) this.registry.recover();
+          if (previous !== null) {
+            const current = this.requirePointerFor(previous.record);
+            this.restorePreviousGeneration(previous, current);
+          } else {
+            if (this.registry.activeProjectId() !== originalRegistry.activeProjectId) {
+              throw new Error('registry selected a project during the failed transition');
+            }
+            this.managerState = 'INACTIVE';
+          }
+        } else if (previous === null) {
           // There is no previous coherent target to restore. The durable pointer identifies a
           // fully validated target runtime, so reopen/publish that target rather than inventing an
           // inactive state that contradicts the registry.
           if (targetRecord === null) throw new Error('target record unavailable during recovery');
-          const pointer = this.requirePointerFor(targetRecord);
-          const recoveredRuntime = this.openTargetRuntime(targetRecord);
-          const recoveredBrowser = this.options.browserSessions?.begin(targetRecord) ?? null;
-          recoveredBrowser?.commit();
-          const recovered = this.buildActiveGeneration(
-            targetRecord,
-            pointer,
-            recoveredRuntime,
-            recoveredBrowser?.publication ?? browserAbsent(operationIdentityFromProfileRecord(targetRecord), targetRecord.generation),
-          );
-          this.activeGeneration = recovered;
+          this.assertRegistryPointerUnchanged(activatedPointer);
+          this.activeGeneration = this.recoverFirstGeneration(targetRecord, activatedPointer);
           this.managerState = 'ACTIVE';
-          this.blockedReason = null;
         } else {
+          this.assertRegistryPointerUnchanged(activatedPointer);
           const rollbackPointer = this.registry.activate(previous.record.profile.projectId, {
             actor: 'daemon',
             reason: `automatic rollback after failed activation of ${request.projectId}`,
+          }, {
+            generation: previous.record.generation,
+            projectProfileHash: previous.record.projectProfileHash,
+            registryGeneration: activatedPointer.registryGeneration,
           });
-          this.assertPointerMatchesRecord(rollbackPointer, previous.record);
-          this.activeGeneration = previous;
-          this.managerState = 'ACTIVE';
-          this.blockedReason = null;
+          this.restorePreviousGeneration(previous, rollbackPointer);
         }
       } catch (rollbackError) {
         safeDispose(previous?.runtime ?? null);
@@ -428,13 +439,28 @@ export class ProjectRuntimeManager {
 
   public withLease<T>(
     expectedIdentity: ProjectOperationIdentity | undefined,
+    work: (lease: ProjectRuntimeLease) => PromiseLike<T>,
+  ): Promise<T>;
+  public withLease<T>(
+    expectedIdentity: ProjectOperationIdentity | undefined,
     work: (lease: ProjectRuntimeLease) => T,
-  ): T {
+  ): T;
+  public withLease(
+    expectedIdentity: ProjectOperationIdentity | undefined,
+    work: (lease: ProjectRuntimeLease) => unknown,
+  ): unknown {
     const lease = this.lease(expectedIdentity);
     try {
-      return work(lease);
-    } finally {
+      const result = work(lease);
+      if (result !== null && (typeof result === 'object' || typeof result === 'function') &&
+          'then' in result && typeof result.then === 'function') {
+        return Promise.resolve(result).finally(lease.release);
+      }
       lease.release();
+      return result;
+    } catch (error) {
+      lease.release();
+      throw error;
     }
   }
 
@@ -568,6 +594,56 @@ export class ProjectRuntimeManager {
     }
     this.assertPointerMatchesRecord(pointer, record);
     return pointer;
+  }
+
+  private assertRegistryPointerUnchanged(expected: ActiveProjectPointer): void {
+    const current = this.registry.active();
+    if (current === null || current.registryGeneration !== expected.registryGeneration ||
+        current.projectId !== expected.projectId || current.projectProfileHash !== expected.projectProfileHash ||
+        current.targetRootIdentity !== expected.targetRootIdentity || current.profileGeneration !== expected.profileGeneration) {
+      throw new ProjectRuntimeManagerError(
+        'PROJECT_RUNTIME_POINTER_CONTRADICTION',
+        'registry active pointer changed during runtime publication',
+      );
+    }
+  }
+
+  private restorePreviousGeneration(previous: ActiveGeneration, pointer: ActiveProjectPointer): void {
+    this.assertPointerMatchesRecord(pointer, previous.record);
+    this.activeGeneration = {
+      ...previous,
+      pointer,
+      publication: Object.freeze({
+        ...previous.publication,
+        registryGeneration: pointer.registryGeneration,
+        activatedAt: pointer.activatedAt,
+      }),
+    };
+    this.managerState = 'ACTIVE';
+    this.blockedReason = null;
+  }
+
+  private recoverFirstGeneration(record: ProjectProfileRecord, pointer: ActiveProjectPointer): ActiveGeneration {
+    const runtime = this.openTargetRuntime(record);
+    let browserSwitch: ProjectBrowserSwitchTransaction | null = null;
+    try {
+      browserSwitch = this.options.browserSessions?.begin(record) ?? null;
+      browserSwitch?.commit();
+      this.assertRegistryPointerUnchanged(pointer);
+      return this.buildActiveGeneration(
+        record,
+        pointer,
+        runtime,
+        browserSwitch?.publication ?? browserAbsent(operationIdentityFromProfileRecord(record), record.generation),
+      );
+    } catch (error) {
+      try {
+        browserSwitch?.rollback();
+      } finally {
+        safeDispose(runtime);
+      }
+      throw error;
+    }
   }
 
   /**

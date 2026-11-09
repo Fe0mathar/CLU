@@ -2,7 +2,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -130,6 +130,25 @@ test('read-only or ordinary activation cannot silently claim an unbound legacy w
         error instanceof WorkspaceProjectIdentityError &&
         error.code === 'WORKSPACE_IDENTITY_INITIALIZATION_REFUSED',
     );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('ordinary activation rejects missing or foreign databases before projection schema writes', () => {
+  const root = mkdtempSync(join(tmpdir(), 'clue-workspace-preflight-'));
+  const database = join(root, 'db', 'clue.db');
+  try {
+    const alpha = identity('alpha', 'a');
+    assert.throws(() => new ProjectionStore(database, { workspaceIdentity: { expected: alpha, onMissing: 'reject' } }), { code: 'WORKSPACE_IDENTITY_DATABASE_MISSING' });
+    assert.equal(existsSync(database), false);
+    new ProjectionStore(database, { workspaceIdentity: { expected: alpha, onMissing: 'initialize-new' } }).close();
+    const before = readFileSync(database);
+    assert.throws(() => new ProjectionStore(database, {
+      workspaceIdentity: { expected: identity('beta', 'b'), onMissing: 'reject' },
+      modules: [{ name: 'foreign-write', install: (db) => db.exec('CREATE TABLE foreign_write (id INTEGER)') }],
+    }), { code: 'WORKSPACE_IDENTITY_MISMATCH' });
+    assert.deepEqual(readFileSync(database), before);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

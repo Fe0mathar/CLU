@@ -43,6 +43,7 @@ import { prepareBenchmarkRunSubject, resolveContract, type PerformedRun } from '
 import { hashText } from '../src/shared/ids.js';
 import { PROOF_EVENT_TYPES } from '../src/proof/proofContract.js';
 import { cycleCheck } from '../src/cli/commands/doctorCommands.js';
+import { commandCycleClose } from '../src/cli/commands/cycleCommands.js';
 import {
   cycleClosedSchema,
   cycleInputsLockedSchema,
@@ -326,6 +327,38 @@ function appendClosureVerdict(
   runtime.projections.sync(log);
   return event.id;
 }
+
+test('cycle close resumes from HANDOFF without launching the already-recorded benchmark again', async () => {
+  const root = writeFullFixture(true);
+  try {
+    withRuntime({ withLog: true, repoRoot: root }, (runtime) => {
+      runtime.mission?.bootstrap();
+      const orchestrator = new CycleOrchestrator(runtime);
+      const { cycle, lock } = orchestrator.drive();
+      assert.ok(lock?.master_benchmark, 'the CLI must see a locked benchmark');
+      const registry = new CycleRegistry({
+        log: runtime.requireLog(),
+        projections: runtime.projections,
+        missionVersion: runtime.currentMissionId,
+      });
+      const recorded = runtime.artifacts.putJson({
+        master_benchmark_run: { benchmark_version: '0.1.0' },
+      });
+      registry.advance(cycle.id, 'CLOSING_EVIDENCE', recorded);
+      registry.advance(cycle.id, 'HANDOFF', null);
+    });
+
+    assert.equal(await commandCycleClose(root), 0);
+    withRuntime({ withLog: true, repoRoot: root }, (runtime) => {
+      assert.equal(new CycleOrchestrator(runtime).status(), null);
+      const closed = [...runtime.requireLog().replay()].find(({ type }) => type === CYCLE_EVENT_TYPES.closed);
+      assert.ok(closed);
+      assert.equal(cycleClosedSchema.parse(closed.payload).criteria_met, false);
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true, maxRetries: 3 });
+  }
+});
 
 test('closure tail: the full arc — drive to SCREENED, close honestly, §24 and the handoff match the lock', () => {
   const root = writeFullFixture();

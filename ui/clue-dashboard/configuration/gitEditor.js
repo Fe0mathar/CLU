@@ -1,6 +1,7 @@
 /** Git integration editor. Synchronisation remains an explicit operator action. */
 
-import { badge, escapeHtml, fieldShell, select, textInput } from './viewPrimitives.js';
+import { badge, escapeHtml, fieldShell, renderReadinessReceipt, select, textInput } from './viewPrimitives.js';
+import { renderStartupBindingLink } from './projectSelector.js';
 
 function connectionDetail(check) {
   if (!check) return '';
@@ -9,7 +10,17 @@ function connectionDetail(check) {
 
 export function renderGitEditor(snapshot) {
   const profile = snapshot.draft;
-  if (!profile) return `<section class="cfg-card" data-section="git"><header class="cfg-card-head"><div><span class="cfg-kicker">GIT SYNC</span><h3>Connect a Project Profile to GitHub</h3></div></header><p class="cfg-empty-copy">Select a saved Project Profile to connect its checkout.</p></section>`;
+  const startup = renderStartupBindingLink(snapshot);
+  const legacyGit = snapshot.legacyConnections?.git;
+  const remote = snapshot.legacyConfiguration?.project?.publication?.remote;
+  const legacy = snapshot.legacyConfiguration?.legacyConnectionControls === true ? `<div class="cfg-legacy-connection">
+    <p class="cfg-card-copy">Sign in through GitHub CLI on the Windows host. Reopen the dashboard to validate authentication and access to the registered remote.</p>
+    <button type="button" data-cfg-action="sign-in-legacy-github"${snapshot.legacyConnections?.busy ? ' disabled' : ''}>SIGN IN TO GITHUB FOR LEGACY TARGET</button>
+    <p class="cfg-note">${remote ? 'A remote is registered for the active legacy target.' : 'The active target is local-only. See CONFIG-EDIT.md for the target profile’s remote setting.'}</p>
+    ${legacyGit ? `<p class="cfg-connection-detail" role="status">${escapeHtml(legacyGit.detail)}</p>` : ''}
+    ${renderReadinessReceipt(snapshot, 'git', true)}
+  </div>` : '';
+  if (!profile) return `<section class="cfg-card" data-section="git"><header class="cfg-card-head"><div><span class="cfg-kicker">GIT SYNC</span><h3>GitHub connection</h3></div></header>${startup}${legacy || '<p class="cfg-empty-copy">Select a saved Project Profile to connect its checkout.</p>'}</section>`;
   const git = profile.integrations?.git;
   const check = snapshot.connectionChecks?.git ?? snapshot.validation?.git ?? null;
   const directory = snapshot.connectionChecks?.githubDirectory;
@@ -22,6 +33,7 @@ export function renderGitEditor(snapshot) {
   const account = connection?.account ?? directory?.account;
   return `<section class="cfg-card" data-section="git">
     <header class="cfg-card-head"><div><span class="cfg-kicker">GIT SYNC</span><h3>Connect this Project Profile to GitHub</h3></div>${badge(state === 'CONNECTED' ? 'READY' : state, state)}</header>
+    ${startup}${legacy}${renderReadinessReceipt(snapshot, 'git')}
     <div class="cfg-form-grid">
       ${fieldShell({ label: 'Local checkout path', wide: true, control: `<input value="${escapeHtml(git?.repositoryRoot ?? profile.targetRoot)}" readonly />`, note: 'The selected repository must match this existing checkout.' })}
       ${fieldShell({ label: 'Registered remote', wide: true, control: `<input value="${escapeHtml(git?.remote ?? '')}" readonly />` })}

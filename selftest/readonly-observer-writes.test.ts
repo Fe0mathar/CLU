@@ -37,7 +37,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -193,6 +193,10 @@ test('DEV-P1-39: the artifact refusal is a guard, not an absent staging director
       },
       'a read-only store must refuse even when it could stage the write',
     );
+    const source = join(root, 'fixture.txt');
+    writeFileSync(source, 'external evidence');
+    assert.throws(() => store.putFile(source), { code: 'READ_ONLY' });
+    assert.deepEqual(readdirSync(join(blobs, '.tmp')), []);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

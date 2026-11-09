@@ -48,6 +48,7 @@ import {
   closeSync,
   existsSync,
   fsyncSync,
+  lstatSync,
   mkdirSync,
   openSync,
   readFileSync,
@@ -119,7 +120,7 @@ type ReadAuditEntry = z.infer<typeof readAuditEntrySchema>;
 
 /** One rotated segment, recorded so the full multi-file history stays verifiable. */
 const archiveSegmentSchema = z.object({
-  segment: z.string().min(1),
+  segment: z.string().regex(/^audit-[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}-[0-9]{2}-[0-9]{2}-[0-9]{3}Z(?:-[1-9][0-9]*)?\.ndjson$/u),
   sha256: z.string().min(1),
   bytes: z.number().int().nonnegative(),
   first_id: z.string().nullable(),
@@ -158,7 +159,7 @@ export class PolicyDenialError extends Error {
   }
 }
 
-export type AuditLogErrorCode = 'CHAIN_BROKEN' | 'HASH_MISMATCH' | 'SEGMENT_MISSING' | 'SEGMENT_ALTERED';
+export type AuditLogErrorCode = 'CHAIN_BROKEN' | 'HASH_MISMATCH' | 'MANIFEST_INVALID' | 'SEGMENT_MISSING' | 'SEGMENT_ALTERED';
 
 /** An audit-history integrity failure: the log or its archive has been edited outside CLUE. */
 export class AuditLogError extends Error {
@@ -347,23 +348,29 @@ export class AuditLog {
     if (!existsSync(this.filePath)) return;
     if (statSync(this.filePath).size < this.maxLogBytes) return;
 
+    const manifest = this.readManifest();
     const stamp = nowIso().replace(/[:.]/g, '-');
-    const segmentName = `audit-${stamp}.ndjson`;
-    const segmentPath = join(this.logDir, segmentName);
+    let segmentName = `audit-${stamp}.ndjson`;
+    let segmentPath = join(this.logDir, segmentName);
+    // The runtime holds the event writer lock. Check under that lock before
+    // rename, which can replace an earlier segment on both Windows and POSIX.
+    for (let suffix = 1; lstatSync(segmentPath, { throwIfNoEntry: false }) !== undefined; suffix += 1) {
+      segmentName = `audit-${stamp}-${suffix}.ndjson`;
+      segmentPath = join(this.logDir, segmentName);
+    }
     renameSync(this.filePath, segmentPath);
-    this.recordRotation(segmentName, segmentPath);
+    this.recordRotation(manifest, segmentName, segmentPath);
     // The in-memory head is preserved, so the first record in the new file links to the
     // last record of the rotated segment: the chain spans files unbroken.
   }
 
   /** Adds a rotated segment to the archive manifest so the full history stays verifiable. */
-  private recordRotation(segmentName: string, segmentPath: string): void {
+  private recordRotation(manifest: ArchiveManifest, segmentName: string, segmentPath: string): void {
     const content = readFileSync(segmentPath);
     const lines = content.toString('utf8').split('\n').filter((line) => line.length > 0);
     const firstLine = lines[0];
     const lastLine = lines[lines.length - 1];
 
-    const manifest = this.readManifest();
     manifest.segments.push({
       segment: segmentName,
       sha256: hashBytes(content),
@@ -376,17 +383,22 @@ export class AuditLog {
     this.writeManifest(manifest);
   }
 
-  /** Reads the archive manifest; a missing or corrupt manifest reads as empty. */
+  /** A new archive has no manifest. A present corrupt manifest cannot establish history. */
   public readManifest(): ArchiveManifest {
-    if (!existsSync(this.manifestPath)) return { schema: ARCHIVE_SCHEMA, segments: [] };
+    const file = lstatSync(this.manifestPath, { throwIfNoEntry: false });
+    if (file === undefined) return { schema: ARCHIVE_SCHEMA, segments: [] };
+    if (!file.isFile()) {
+      throw new AuditLogError('MANIFEST_INVALID', 'The audit archive manifest is not a regular file.');
+    }
+    const raw = readFileSync(this.manifestPath, 'utf8');
     try {
       return parseOrThrow(
         archiveManifestSchema,
-        JSON.parse(readFileSync(this.manifestPath, 'utf8')) as unknown,
+        JSON.parse(raw) as unknown,
         'audit archive manifest',
       );
     } catch {
-      return { schema: ARCHIVE_SCHEMA, segments: [] };
+      throw new AuditLogError('MANIFEST_INVALID', 'The audit archive manifest is malformed.');
     }
   }
 
@@ -429,8 +441,12 @@ export class AuditLog {
     const manifest = this.readManifest();
     for (const segment of manifest.segments) {
       const path = join(this.logDir, segment.segment);
-      if (!existsSync(path)) {
+      const file = lstatSync(path, { throwIfNoEntry: false });
+      if (file === undefined) {
         throw new AuditLogError('SEGMENT_MISSING', `Archived audit segment ${segment.segment} is missing`);
+      }
+      if (!file.isFile()) {
+        throw new AuditLogError('SEGMENT_ALTERED', `Archived audit segment ${segment.segment} is not a regular file`);
       }
       const actual = hashBytes(readFileSync(path));
       if (actual !== segment.sha256) {

@@ -14,7 +14,10 @@
  * - credentials remain owned by the host Git credential helper/SSH agent.
  */
 
-import { projectProfileRecordSchema, type ClueConfig, type ProjectProfileRecord } from '../../shared/schemas.js';
+import { randomUUID } from 'node:crypto';
+
+import { gitRemoteSchema, projectProfileRecordSchema, type ClueConfig, type ProjectProfileRecord } from '../../shared/schemas.js';
+import { assertSamePathIdentity, resolveTargetRootIdentity } from '../../shared/pathIdentity.js';
 import { describeTargetPublication } from '../../shared/targetPublication.js';
 import {
   assertProjectOperationIdentity,
@@ -162,10 +165,20 @@ function syncRegisteredRemote(
   runGit: ManualGitCommandRunner,
   expectedBranch?: string,
 ): ManualGitSyncResult {
+  if (!gitRemoteSchema.safeParse(remote).success) {
+    return refusal(requestedAt, 'INVALID_REMOTE', 'The registered remote must be a credential-free Git transport URL or SSH address.');
+  }
   const remoteLabel = safeRemoteLabel(remote);
   const inside = runGit(root, ['rev-parse', '--is-inside-work-tree']);
   if (!inside.ok || inside.stdout !== 'true') {
     return refusal(requestedAt, 'NOT_A_GIT_WORKTREE', inside.stderr || 'Target root is not a Git worktree.', remoteLabel);
+  }
+  const top = runGit(root, ['rev-parse', '--show-toplevel']);
+  try {
+    if (!top.ok || top.stdout === '') throw new Error('Repository top level unavailable.');
+    assertSamePathIdentity(resolveTargetRootIdentity(root), resolveTargetRootIdentity(top.stdout), 'Git sync repository');
+  } catch {
+    return refusal(requestedAt, 'GIT_TOP_LEVEL_MISMATCH', 'The target must be the exact root of the Git checkout.', remoteLabel);
   }
   const dirty = runGit(root, ['status', '--porcelain=v1', '--untracked-files=normal']);
   if (!dirty.ok) return refusal(requestedAt, 'GIT_STATUS_FAILED', dirty.stderr, remoteLabel);
@@ -182,25 +195,48 @@ function syncRegisteredRemote(
   }
   const validBranch = runGit(root, ['check-ref-format', '--branch', branch]);
   if (!validBranch.ok) return refusal(requestedAt, 'INVALID_BRANCH', validBranch.stderr, remoteLabel);
-  const before = runGit(root, ['rev-parse', 'HEAD']);
-  if (!before.ok || before.stdout === '') return refusal(requestedAt, 'HEAD_UNAVAILABLE', before.stderr, remoteLabel);
+  const before = runGit(root, ['rev-parse', '--verify', 'HEAD^{commit}']);
+  if (!before.ok || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(before.stdout)) {
+    return refusal(requestedAt, 'HEAD_UNAVAILABLE', before.stderr, remoteLabel);
+  }
 
-  const remoteRef = `refs/remotes/clue-sync/${branch}`;
+  // Keep the explicitly registered fetch and push endpoints identical. Git still applies
+  // insteadOf to explicit URLs, so check what it resolved before permitting any transport.
+  const transportName = `clue-sync-${randomUUID()}`;
+  const transportConfig = ['-c', `remote.${transportName}.url=${remote}`, '-c', `remote.${transportName}.pushurl=${remote}`];
+  const effective = runGit(root, [...transportConfig, 'remote', '-v']);
+  const endpoints = effective.stdout.split(/\r?\n/u).filter((line) => line.startsWith(`${transportName}\t`));
+  if (!effective.ok || endpoints.length !== 2 ||
+      !endpoints.includes(`${transportName}\t${remote} (fetch)`) ||
+      !endpoints.includes(`${transportName}\t${remote} (push)`)) {
+    return refusal(requestedAt, 'REMOTE_REWRITE_REFUSED', 'Git did not resolve both endpoints to the registered remote.', remoteLabel);
+  }
+
+  const remoteRef = `refs/clue-sync/${transportName}`;
   const fetchResult = runGit(root, [
+    ...transportConfig,
     'fetch',
     '--no-tags',
-    '--prune',
-    remote,
+    '--no-recurse-submodules',
+    '--no-write-fetch-head',
+    '--',
+    transportName,
     `+refs/heads/${branch}:${remoteRef}`,
   ]);
   if (!fetchResult.ok) {
     return {
-      ...refusal(requestedAt, 'FETCH_FAILED', fetchResult.stderr || 'git fetch failed', remoteLabel),
+      ...refusal(requestedAt, 'FETCH_FAILED', 'Git could not fetch the registered branch. Check remote access and branch availability.', remoteLabel),
       branch,
       beforeHead: before.stdout,
     };
   }
-  const relation = runGit(root, ['rev-list', '--left-right', '--count', `HEAD...${remoteRef}`]);
+  const observedRemote = runGit(root, ['rev-parse', '--verify', `${remoteRef}^{commit}`]);
+  const cleaned = runGit(root, ['update-ref', '-d', remoteRef]);
+  if (!cleaned.ok) return refusal(requestedAt, 'SYNC_REF_CLEANUP_FAILED', 'Git could not remove the temporary synchronization reference.', remoteLabel);
+  if (!observedRemote.ok || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(observedRemote.stdout)) {
+    return refusal(requestedAt, 'REMOTE_HEAD_UNAVAILABLE', 'Git could not identify the fetched commit.', remoteLabel);
+  }
+  const relation = runGit(root, ['rev-list', '--left-right', '--count', `${before.stdout}...${observedRemote.stdout}`]);
   if (!relation.ok) {
     return {
       ...refusal(requestedAt, 'RELATION_FAILED', relation.stderr, remoteLabel),
@@ -230,8 +266,21 @@ function syncRegisteredRemote(
 
   let state: ManualGitSyncState = 'unchanged';
   let detail = 'Local and remote branch identities already agree.';
+  const currentBranch = runGit(root, ['symbolic-ref', '--quiet', '--short', 'HEAD']);
+  const currentHead = runGit(root, ['rev-parse', '--verify', 'HEAD^{commit}']);
+  const currentStatus = runGit(root, ['status', '--porcelain=v1', '--untracked-files=normal']);
+  if (!currentBranch.ok || !currentHead.ok || !currentStatus.ok || currentBranch.stdout !== branch ||
+      currentHead.stdout !== before.stdout || currentStatus.stdout !== '') {
+    return {
+      ...refusal(requestedAt, 'LOCAL_STATE_CHANGED', 'Local branch, HEAD, or worktree changed during the synchronization. Retry from a clean checkout.', remoteLabel),
+      branch,
+      beforeHead: before.stdout,
+      ahead,
+      behind,
+    };
+  }
   if (behind > 0) {
-    const merge = runGit(root, ['merge', '--ff-only', remoteRef]);
+    const merge = runGit(root, ['merge', '--ff-only', '--no-autostash', '--no-overwrite-ignore', '--', observedRemote.stdout]);
     if (!merge.ok) {
       return {
         ...refusal(requestedAt, 'FAST_FORWARD_FAILED', merge.stderr, remoteLabel),
@@ -244,10 +293,10 @@ function syncRegisteredRemote(
     state = 'fast_forwarded';
     detail = `Fast-forwarded ${behind} remote commit(s).`;
   } else if (ahead > 0) {
-    const push = runGit(root, ['push', remote, `HEAD:refs/heads/${branch}`]);
+    const push = runGit(root, [...transportConfig, 'push', '--no-follow-tags', '--recurse-submodules=no', '--', transportName, `${before.stdout}:refs/heads/${branch}`]);
     if (!push.ok) {
       return {
-        ...refusal(requestedAt, 'PUSH_FAILED', push.stderr, remoteLabel),
+        ...refusal(requestedAt, 'PUSH_FAILED', 'Git refused the push to the registered branch. Check remote access and whether the remote branch changed.', remoteLabel),
         branch,
         beforeHead: before.stdout,
         ahead,

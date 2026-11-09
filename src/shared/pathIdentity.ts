@@ -1,7 +1,7 @@
 /** Canonical physical filesystem identity for CLU-E Project Profiles. */
 
-import { existsSync, realpathSync, statSync } from 'node:fs';
-import { isAbsolute, relative, resolve, posix, win32 } from 'node:path';
+import { lstatSync, realpathSync, statSync } from 'node:fs';
+import { dirname, isAbsolute, relative, resolve, sep, posix, win32 } from 'node:path';
 
 import { hashCanonicalJson } from './ids.js';
 import { absolutePathForm } from './schemas.js';
@@ -132,25 +132,35 @@ export function resolvePathIdentity(
   }
 
   const absolute = isAbsolute(trimmed) ? resolve(trimmed) : resolve(options.baseDir ?? '', trimmed);
-  const present = existsSync(absolute);
-  if (!present && options.mustExist !== false) {
-    throw new PathIdentityError('PATH_NOT_FOUND', `Path does not exist: ${normalisePathForStorage(absolute)}`, absolute);
-  }
-
-  let canonical = absolute;
+  let canonical: string;
   let kind: ResolvedPathIdentity['kind'] = 'missing';
-  if (present) {
-    try {
+  try {
+    if (pathEntryExists(absolute)) {
       canonical = realpathSync.native(absolute);
       const stats = statSync(canonical);
+      if (!stats.isDirectory() && !stats.isFile()) {
+        throw new PathIdentityError('PATH_KIND_INVALID', `Expected a regular file or directory at ${absolute}.`, absolute);
+      }
       kind = stats.isDirectory() ? 'directory' : 'file';
-    } catch (error) {
-      throw new PathIdentityError(
-        'PATH_UNREADABLE',
-        `Path cannot be resolved: ${normalisePathForStorage(absolute)} (${(error as Error).message})`,
-        absolute,
-      );
+    } else if (options.mustExist !== false) {
+      throw new PathIdentityError('PATH_NOT_FOUND', `Path does not exist: ${normalisePathForStorage(absolute)}`, absolute);
+    } else {
+      // A nonexistent leaf still inherits aliases of its closest existing ancestor.
+      let parent = dirname(absolute);
+      while (!pathEntryExists(parent) && dirname(parent) !== parent) parent = dirname(parent);
+      const canonicalParent = realpathSync.native(parent);
+      if (!statSync(canonicalParent).isDirectory()) {
+        throw new PathIdentityError('PATH_KIND_INVALID', `Expected a directory at ${parent}.`, parent);
+      }
+      canonical = resolve(canonicalParent, relative(parent, absolute));
     }
+  } catch (error) {
+    if (error instanceof PathIdentityError) throw error;
+    throw new PathIdentityError(
+      'PATH_UNREADABLE',
+      `Path cannot be resolved: ${normalisePathForStorage(absolute)} (${(error as Error).message})`,
+      absolute,
+    );
   }
   const expectedKind = options.expectedKind ?? 'either';
   if (kind !== 'missing' && expectedKind !== 'either' && kind !== expectedKind) {
@@ -170,9 +180,19 @@ export function resolvePathIdentity(
     canonicalPath: canonical,
     comparablePath,
     identity: identityFor(comparablePath),
-    exists: present,
+    exists: kind !== 'missing',
     kind,
   };
+}
+
+function pathEntryExists(path: string): boolean {
+  try {
+    lstatSync(path);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    throw error;
+  }
 }
 
 export function asTargetRootIdentity(identity: PathIdentity | string): TargetRootIdentity {
@@ -222,9 +242,9 @@ export function assertSamePathIdentity(
   }
 }
 
-function containsPath(parent: string, child: string): boolean {
+export function containsPath(parent: string, child: string): boolean {
   const relation = relative(parent, child);
-  return relation === '' || (!relation.startsWith('..') && !isAbsolute(relation));
+  return relation === '' || (relation !== '..' && !relation.startsWith(`..${sep}`) && !isAbsolute(relation));
 }
 
 export function assertPathZonesDisjoint(paths: readonly ResolvedPathIdentity[]): void {

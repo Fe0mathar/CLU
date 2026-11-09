@@ -33,7 +33,7 @@ import { mountConfigurationPanel } from './configuration/configurationPanel.js';
 import { createStatusStore } from './state/statusStore.js';
 import { createSelectionBus } from './state/selectionBus.js';
 import { mountQuadrantStatus } from './quadrants/statusPresentation.js';
-import { deriveTelemetry } from './quadrants/q3Gauges.js';
+import { deriveTelemetry, formatObservedUsd, normalizeAiProviderStatus, projectAiGauge } from './quadrants/q3Gauges.js';
 import { q2PanelDecision } from './quadrants/q2Field.js';
 import {
   feedEntries,
@@ -44,12 +44,28 @@ import {
   createQ1ProjectGenerationGuard,
   q1PanelDecision,
 } from './quadrants/q1Navigator.js';
-import { createDensityControl } from './components/densityControl.js';
+import { mountRibbon } from './components/ribbon.js';
+import { mountQ4Terminal } from './quadrants/q4Terminal.js';
 import { createFullscreenContract } from './fullscreen/fullscreenContract.js';
 import { createActionClient } from './configuration/actionContracts.js';
 import { mountProofBoard } from './workspaces/proofBoard.js';
 
 const $ = (id) => document.getElementById(id);
+let projectTransition = false;
+const ribbon = mountRibbon({
+  openConfiguration: openRibbonConfiguration,
+  async checkCapability(capability, { signal } = {}) {
+    if (projectTransition) return { state: 'pending', summary: 'Project activation is in progress.', checks: [] };
+    const invoked = await actionClient.invoke('checkCapability', { capability }, { signal });
+    if (!invoked.ok && typeof invoked.serverDetails?.summary === 'string') return invoked.serverDetails;
+    return requireAction(invoked);
+  },
+});
+const dashboardStreams = { navigator: false, sealed: false };
+function updateRibbonStream(channel, connected) {
+  dashboardStreams[channel] = connected;
+  ribbon.updateStream(dashboardStreams.navigator && dashboardStreams.sealed);
+}
 
 const CLUE_UI_VERSION = 'ULTIMATE-2026.08-Q1-V9-REPOSITORY-OBSERVATORY-R1';
 
@@ -62,7 +78,7 @@ async function fetchJson(url, init) {
   } catch { body = null; }
   if (!response.ok) {
     const detail = body && typeof body === 'object' ? (body.error ?? body) : null;
-    const message = detail?.message ?? (typeof body === 'string' && body.trim() !== '' ? body.trim() : response.statusText || 'request failed');
+    const message = detail?.message ?? detail?.reason ?? detail?.detail ?? (typeof body === 'string' && body.trim() !== '' ? body.trim() : response.statusText || 'request failed');
     const error = new Error(`${response.status} ${message} · ${url}`);
     error.code = detail?.code ?? `HTTP_${response.status}`;
     error.status = response.status;
@@ -275,26 +291,6 @@ body.clue-fullscreen-lock{overflow:hidden!important}
 #q4:fullscreen .clue-event,#q4.clue-soft-fullscreen .clue-event{grid-template-columns:auto 150px 72px minmax(0,1fr) 100px;font-size:11px;min-height:38px}
 #cfg{background:rgba(3,10,18,.96)!important;border-color:rgba(95,181,224,.25)!important;backdrop-filter:blur(18px)}
 #cfg .row{border-bottom:1px solid rgba(88,161,199,.10)}
-.clue-primary-controls{display:inline-flex;align-items:center;gap:5px;min-width:0;white-space:nowrap}
-#start,#gitSync,#toplevelTabs button{border:1px solid rgba(104,192,232,.28);border-radius:8px;background:linear-gradient(180deg,rgba(12,31,48,.88),rgba(3,10,17,.92));color:#bdeeff;box-shadow:inset 0 1px rgba(255,255,255,.05);transition:color .18s ease,border-color .18s ease,background .18s ease,box-shadow .18s ease,transform .18s ease,opacity .18s ease}
-#start:hover,#gitSync:hover,#toplevelTabs button:hover{border-color:rgba(0,163,224,.66);box-shadow:0 0 20px rgba(0,163,224,.12);transform:translateY(-1px)}
-#start:disabled,#gitSync:disabled{opacity:.48;transform:none}
-#rail{min-width:0}#runLine{flex:0 1 210px;min-width:0;max-width:210px}#start{padding:7px 8px;font-size:9.5px}
-#gitSync{position:relative;display:inline-flex;align-items:center;justify-content:center;gap:6px;min-width:104px;padding-inline:8px;color:#d9d4ff;border-color:rgba(143,124,255,.34);background:linear-gradient(180deg,rgba(30,25,61,.88),rgba(8,8,24,.94));font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:10px;letter-spacing:.10em}
-#gitSync:hover{border-color:rgba(143,124,255,.78);box-shadow:0 0 22px rgba(143,124,255,.16)}
-#gitSync .clue-sync-icon{font-size:15px;line-height:1;color:#b9adff;text-shadow:0 0 10px rgba(143,124,255,.55);transition:transform .24s ease,color .18s ease}
-#gitSync[data-sync-state="checking"] .clue-sync-icon,#gitSync[data-sync-state="syncing"] .clue-sync-icon{animation:clue-sync-spin 1.05s linear infinite}
-#gitSync[data-sync-state="blocked"]{color:#ffd997;border-color:rgba(244,175,45,.42);background:linear-gradient(180deg,rgba(54,35,12,.82),rgba(17,11,4,.94))}
-#gitSync[data-sync-state="blocked"] .clue-sync-icon{color:#f4af2d;text-shadow:0 0 10px rgba(244,175,45,.55)}
-#gitSync[data-sync-state="ready"]{color:#aef6c7;border-color:rgba(57,255,136,.36);background:linear-gradient(180deg,rgba(12,48,31,.82),rgba(4,17,11,.94))}
-#gitSync[data-sync-state="ready"] .clue-sync-icon,#gitSync[data-sync-state="complete"] .clue-sync-icon{color:#39ff88;text-shadow:0 0 10px rgba(57,255,136,.55)}
-#gitSync[data-sync-state="failed"]{color:#ffb0ba;border-color:rgba(255,77,94,.46);background:linear-gradient(180deg,rgba(58,13,22,.84),rgba(20,5,9,.94))}
-#gitSync[data-sync-state="failed"] .clue-sync-icon{color:#ff4d5e;text-shadow:0 0 10px rgba(255,77,94,.58)}
-@keyframes clue-sync-spin{to{transform:rotate(360deg)}}
-@media(max-width:1740px){#runLine{display:none}}
-@media(max-width:1420px){#gitSync{min-width:98px;padding-inline:9px}#start{padding-inline:10px}#toplevelTabs button{padding-inline:10px}}
-@media(max-width:1600px){#gitSync{min-width:42px;padding-inline:10px}.clue-sync-label{display:none}}
-@media(max-width:1480px){#gitSync{width:30px;min-width:30px;padding:0}#start{min-width:46px;padding-inline:3px;font-size:0;letter-spacing:0}#start::before{content:"▶";font-size:10px}#start::after{content:"CLU-E";margin-left:4px;font-size:9px;letter-spacing:.06em}}
 .pill{border-radius:999px!important;border:1px solid rgba(103,179,218,.18)!important;background:rgba(1,8,14,.52)!important;letter-spacing:.075em!important}
 .pill.on{color:#8df6b5!important;border-color:rgba(57,255,136,.25)!important}.pill.run{color:#8fe6ff!important;border-color:rgba(0,163,224,.30)!important}.pill.bad{color:#ff9da8!important;border-color:rgba(255,77,94,.30)!important}
 /* Fixed / dynamic dashboard composition ---------------------------------- */
@@ -305,7 +301,7 @@ body.clue-fullscreen-lock{overflow:hidden!important}
   box-shadow:0 9px 28px rgba(0,0,0,.34),inset 0 1px rgba(255,255,255,.05);backdrop-filter:blur(14px) saturate(125%);
   font:700 8.5px/1 ui-monospace,SFMono-Regular,Consolas,monospace;letter-spacing:.085em;white-space:nowrap;
 }
-.clue-layout-switch.is-floating{position:fixed;top:8px;left:50%;transform:translateX(-50%)}
+#cfg .clue-layout-switch{margin:14px clamp(12px,3vw,30px) 0;width:fit-content;max-width:calc(100% - 24px);flex-wrap:wrap;z-index:1}
 .clue-layout-switch-label{color:#6f91a7;letter-spacing:.12em}
 .clue-layout-switch-segments{display:flex;align-items:center;gap:2px;padding:2px;border:1px solid rgba(112,197,235,.18);border-radius:6px;background:rgba(1,7,13,.58)}
 .clue-layout-mode{
@@ -367,7 +363,6 @@ body.clue-layout-dynamic .clue-dynamic-surface>.clue-panel>.clue-resize-handle{d
   border-right:1px solid var(--panel-accent);border-bottom:1px solid var(--panel-accent);box-shadow:3px 3px 9px color-mix(in srgb,var(--panel-accent) 30%,transparent);
 }
 .clue-dynamic-placeholder{visibility:hidden!important;opacity:0!important;pointer-events:none!important;min-width:0!important;min-height:0!important}
-@media (max-width:1100px){.clue-layout-switch-label{display:none}.clue-layout-switch-help{display:none}}
 @media (max-width:900px){.clue-panel-state{max-width:28px;padding-inline:7px}.clue-panel-state span{display:none}.clue-panel-name{display:none}#q4 .clue-event{grid-template-columns:auto 46px minmax(0,1fr)}#q4 .clue-event-channel,#q4 .clue-event-state{display:none}}
 @media (prefers-reduced-motion:reduce){.clue-panel,.clue-tool,.clue-layout-mode,.clue-layout-switch-help{transition:none!important}.clue-panel.clue-pulse::after,.clue-panel-state::before{animation:none!important}}
 `;
@@ -398,7 +393,7 @@ body.clue-layout-dynamic .clue-dynamic-surface>.clue-panel>.clue-resize-handle{d
     const identity = document.createElement('div');
     identity.className = 'clue-panel-identity';
     identity.innerHTML = `<span class="clue-panel-code">${meta.index}</span><span class="clue-panel-name">${meta.title}</span>`;
-    header.insertBefore(identity, header.firstChild);
+    header.replaceChildren(identity);
 
     const tools = document.createElement('div');
     tools.className = 'clue-panel-tools';
@@ -485,7 +480,7 @@ body.clue-layout-dynamic .clue-dynamic-surface>.clue-panel>.clue-resize-handle{d
   function measureDynamicTop() {
     let bottom = 0;
     const rail = $('rail');
-    const candidates = [rail, layout.switchEl].filter(Boolean);
+    const candidates = [rail].filter(Boolean);
     for (const candidate of candidates) {
       const rect = candidate.getBoundingClientRect();
       if (rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.top < Math.min(window.innerHeight, 180)) {
@@ -521,18 +516,7 @@ body.clue-layout-dynamic .clue-dynamic-surface>.clue-panel>.clue-resize-handle{d
       '<button type="button" class="clue-layout-mode" data-mode="fixed">FIXED</button>' +
       '<button type="button" class="clue-layout-mode" data-mode="dynamic">DYNAMIC</button>' +
       '</span><span class="clue-layout-switch-help">DRAG HEADERS · RESIZE EDGES · RED X HIDES</span>';
-    const rail = $('rail');
-    // DEV-P1-17: the rail's right-hand controls are now the tablist, so this inserts before it.
-    // Left pointing at the removed CONFIGURE button it would have found nothing and appended,
-    // putting the layout switch after the tabs — working, and quietly in the wrong place.
-    const railAnchor = $('toplevelTabs');
-    if (rail) {
-      if (railAnchor?.parentNode === rail) rail.insertBefore(root, railAnchor);
-      else rail.appendChild(root);
-    } else {
-      root.classList.add('is-floating');
-      document.body.appendChild(root);
-    }
+    $('cfg')?.prepend(root);
     layout.switchEl = root;
     layout.fixedButton = root.querySelector('[data-mode="fixed"]');
     layout.dynamicButton = root.querySelector('[data-mode="dynamic"]');
@@ -933,10 +917,6 @@ body.clue-layout-dynamic .clue-dynamic-surface>.clue-panel>.clue-resize-handle{d
         void toggleFullscreen(`q${event.key}`);
         return;
       }
-      if (event.altKey && !event.ctrlKey && !event.metaKey && (event.key === 'l' || event.key === 'L')) {
-        event.preventDefault();
-        void setCompositionMode(layout.mode === 'fixed' ? 'dynamic' : 'fixed');
-      }
     });
     updateFullscreenUi();
     updateCompositionUi();
@@ -1026,8 +1006,14 @@ const ConsoleFrameBus = (() => {
   function connect() {
     try {
       source = new EventSource('/api/console-events');
-      source.addEventListener('open', () => ClueInterface.setPanelState('q4', 'connecting', 'SEALED STREAM LIVE'));
-      source.addEventListener('error', () => ClueInterface.setPanelState('q4', 'warning', 'SEALED STREAM RECONNECTING'));
+      source.addEventListener('open', () => {
+        updateRibbonStream('sealed', true);
+        ClueInterface.setPanelState('q4', 'connecting', 'SEALED STREAM LIVE');
+      });
+      source.addEventListener('error', () => {
+        updateRibbonStream('sealed', false);
+        ClueInterface.setPanelState('q4', 'warning', 'SEALED STREAM RECONNECTING');
+      });
       source.addEventListener('message', (event) => {
         try { publish(JSON.parse(event.data)); }
         catch { /* malformed frame ignored; the next sealed frame remains authoritative */ }
@@ -1078,6 +1064,10 @@ const ConsoleFrameBus = (() => {
   connect();
   return {
     subscribe,
+    acceptFetchedFrame: (frame) => {
+      if (!frame?.snapshot || (lastFrame && frame.revision <= lastFrame.revision)) return false;
+      return publish(frame);
+    },
     getLastFrame: () => lastFrame,
     projectIdentity: () => requiredProjectIdentity,
     parkForProjectTransition,
@@ -1099,11 +1089,7 @@ const ConsoleFrameBus = (() => {
       const connected = Boolean(event.detail?.connected);
       const q1decision = q1PanelDecision(connected ? 'connected' : 'reconnecting');
       if (q1status) q1status.textContent = q1decision.streamText;
-      const streamPill = $('streamPill');
-      if (streamPill) {
-        streamPill.textContent = connected ? 'STREAM LIVE' : 'STREAM …';
-        streamPill.className = 'pill ' + (connected ? 'on' : '');
-      }
+      updateRibbonStream('navigator', connected);
       ClueInterface.setPanelState('q1', q1decision.state, q1decision.label);
       if (connected) ClueInterface.pulse('q1');
     });
@@ -2005,7 +1991,7 @@ const ConsoleFrameBus = (() => {
     const SEMANTIC_WARNING_MS = 10_000;
     const DISCOVERY_PULSE_MS = reduceMotion ? 1 : 2200;
     const MODEL_RESCAN_MS = 1300;
-    const DRAW_IDLE_MS = 180;
+    const DRAW_IDLE_MS = 1000;
 
     const FAMILY_PRESENTATION = Object.freeze({
       ecmascript: { label: 'ECMASCRIPT / WEB RUNTIME', accent: '#6677CC', pattern: 'double', shape: 'hex', glyph: 'JS', order: 0 },
@@ -2244,7 +2230,7 @@ const ConsoleFrameBus = (() => {
     state.raf = requestAnimationFrame(tick);
 
     const api = {
-      version: 'Q1-SURF-DIVE-REPOSITORY-NAVIGATOR-R2',
+      version: 'Q1-SURF-DIVE-REPOSITORY-NAVIGATOR-R2-PERF01',
       renderer: 'canvas2d-contract-bridge',
       setMode: (mode) => setMode(mode, { requestCore: true }),
       getMode: () => state.mode,
@@ -5512,23 +5498,20 @@ const ConsoleFrameBus = (() => {
 
         ctx.strokeStyle = 'rgba(238,252,255,.58)';
         ctx.lineWidth = 1.45;
-        ctx.shadowColor = 'rgba(255,255,255,.94)';
-        ctx.shadowBlur = 13;
+        ctx.shadowBlur = 0;
         traceProjectPath(target);
         ctx.stroke();
 
         ctx.strokeStyle = 'rgba(255,255,255,.96)';
         ctx.lineWidth = 0.48;
-        ctx.shadowBlur = 5;
+        ctx.shadowBlur = 0;
         traceProjectPath(target);
         ctx.stroke();
 
         ctx.setLineDash([2.4, 10]);
-        ctx.lineDashOffset = reduceMotion ? 0 : -performance.now() * 0.018;
         ctx.strokeStyle = rgbaHex(definition.accent, 0.34);
         ctx.lineWidth = 0.82;
-        ctx.shadowColor = rgbaHex(definition.accent, 0.72);
-        ctx.shadowBlur = 10;
+        ctx.shadowBlur = 0;
         traceProjectPath(target);
         ctx.stroke();
         ctx.setLineDash([]);
@@ -5557,13 +5540,11 @@ const ConsoleFrameBus = (() => {
           };
           ctx.strokeStyle = 'rgba(255,255,255,.055)';
           ctx.lineWidth = 4.2;
-          ctx.shadowColor = rgbaHex(definition.accent, 0.42);
-          ctx.shadowBlur = 13;
+          ctx.shadowBlur = 0;
           traceEnvironmentPath();
           ctx.stroke();
           ctx.strokeStyle = 'rgba(236,251,255,.42)';
           ctx.lineWidth = 0.78;
-          ctx.shadowBlur = 6;
           traceEnvironmentPath();
           ctx.stroke();
           ctx.strokeStyle = rgbaHex(definition.accent, 0.44);
@@ -5730,7 +5711,6 @@ const ConsoleFrameBus = (() => {
             : `rgba(103,178,210,${0.16 + pulse * 0.08})`;
           ctx.lineWidth = 0.72;
           ctx.setLineDash([12, 7, 2, 7]);
-          ctx.lineDashOffset = reduceMotion ? 0 : -now * 0.015;
           ctx.shadowColor = semantic.capable
             ? 'rgba(244,175,45,.60)'
             : 'rgba(0,163,224,.42)';
@@ -6396,8 +6376,8 @@ const ConsoleFrameBus = (() => {
           ? rgbaHex(family.accent, selected ? 0.56 : 0.20)
           : 'rgba(112,139,156,.17)';
         ctx.lineWidth = selected ? 1.25 : 0.66;
-        ctx.setLineDash(diveCapable ? [2, 8] : [6, 7]);
-        ctx.lineDashOffset = reduceMotion ? 0 : -now * 0.008;
+        // Q1-SURF-PERF-01: dashes are tessellated per segment; keep them for the focused anchor only, static.
+        ctx.setLineDash(selected || hovered ? (diveCapable ? [4, 9] : [6, 7]) : []);
         ctx.stroke();
         ctx.setLineDash([]);
 
@@ -6410,7 +6390,7 @@ const ConsoleFrameBus = (() => {
         );
         ctx.lineWidth = 0.72;
         ctx.shadowColor = rgbaHex(family.accent, 0.44);
-        ctx.shadowBlur = diveCapable ? 7 : 2;
+        ctx.shadowBlur = selected || hovered ? 7 : 0;
         ctx.beginPath();
         ctx.ellipse(point.x, point.y, orbitWidth, orbitHeight, -0.12, 0, TAU);
         ctx.stroke();
@@ -6450,7 +6430,7 @@ const ConsoleFrameBus = (() => {
         ctx.shadowColor = diveCapable
           ? rgbaHex(family.accent, 0.92)
           : 'rgba(86,120,139,.42)';
-        ctx.shadowBlur = selected ? 18 : hovered ? 12 : diveCapable ? 8 : 3;
+        ctx.shadowBlur = selected ? 18 : hovered ? 12 : 0;
         ctx.beginPath();
         ctx.arc(point.x, point.y, radius, 0, TAU);
         ctx.fill();
@@ -6935,7 +6915,7 @@ const ConsoleFrameBus = (() => {
           selected ? '#f4af2d' : family.accent,
           selected ? 0.92 : 0.62,
         );
-        ctx.shadowBlur = selected ? 14 : hovered || searched ? 9 : 3;
+        ctx.shadowBlur = selected ? 14 : hovered || searched ? 9 : 0;
         familyShapePath(point.x, point.y, radius + 2.6, family.shape);
         ctx.stroke();
 
@@ -6947,9 +6927,16 @@ const ConsoleFrameBus = (() => {
           file.key,
         );
 
+        if (!selected && !hovered) {
+          // Q1-SURF-PERF-01: one wider low-alpha fill reads as a glow without a per-node blur layer.
+          ctx.shadowBlur = 0;
+          ctx.fillStyle = rgbaHex(visual.core, 0.22);
+          familyShapePath(point.x, point.y, radius + 2.2, family.shape);
+          ctx.fill();
+        }
         ctx.fillStyle = visual.core;
         ctx.shadowColor = rgbaHex(visual.core, 0.94);
-        ctx.shadowBlur = selected || hovered ? 13 : 6;
+        ctx.shadowBlur = selected || hovered ? 13 : 0;
         familyShapePath(point.x, point.y, radius, family.shape);
         ctx.fill();
 
@@ -6967,7 +6954,7 @@ const ConsoleFrameBus = (() => {
           ctx.textAlign = 'center';
           ctx.textBaseline = 'middle';
           ctx.shadowColor = 'rgba(0,0,0,.9)';
-          ctx.shadowBlur = 2;
+          ctx.shadowBlur = selected || hovered ? 2 : 0;
           ctx.fillText(compact, point.x, point.y + 0.2);
         }
 
@@ -6980,7 +6967,7 @@ const ConsoleFrameBus = (() => {
             ctx.strokeStyle = 'rgba(244,175,45,.72)';
             ctx.lineWidth = selected ? 1.25 : 0.85;
             ctx.shadowColor = 'rgba(244,175,45,.92)';
-            ctx.shadowBlur = selected || hovered ? 8 : 4;
+            ctx.shadowBlur = selected || hovered ? 8 : 0;
             ctx.beginPath();
             ctx.arc(
               point.x,
@@ -7060,6 +7047,9 @@ const ConsoleFrameBus = (() => {
     function drawMicroPattern(x, y, radius, family, seed) {
       ctx.save();
       ctx.translate(x, y);
+      // Q1-SURF-PERF-01: the caller leaves shadowBlur set; every tick became its own blur layer.
+      ctx.shadowBlur = 0;
+      ctx.shadowColor = 'transparent';
       ctx.strokeStyle = rgbaHex(family.accent, 0.82);
       ctx.lineWidth = 0.7;
       const phase = hash01(seed, 'pattern') * TAU;
@@ -7115,8 +7105,9 @@ const ConsoleFrameBus = (() => {
       ctx.shadowColor = flags.selected
         ? 'rgba(244,175,45,.72)'
         : rgbaHex(family.accent, 0.65);
-      ctx.shadowBlur = flags.selected || flags.hovered ? 8 : 2;
+      ctx.shadowBlur = flags.selected || flags.hovered ? 8 : 0;
       ctx.stroke();
+      ctx.shadowBlur = 0;
       ctx.fillStyle = '#e5f6ff';
       ctx.textAlign = 'left';
       ctx.textBaseline = 'middle';
@@ -7436,10 +7427,6 @@ const ConsoleFrameBus = (() => {
 
 /* --------------------------- sealed frames (Q4) --------------------------- */
 
-function short(hash) {
-  return typeof hash === 'string' ? hash.slice(0, 12) + '…' : '—';
-}
-
 function escapeHtml(value) {
   return String(value).replace(/[&<>"']/g, (character) => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
@@ -7454,31 +7441,8 @@ function renderFrame(frame) {
   const snapshot = frame?.snapshot;
   if (!snapshot) return;
 
-  const mission = snapshot.shell?.identity ?? snapshot.shell?.mission;
-  const activeProject = snapshot.configuration?.project?.activeProject ?? null;
-  const activeProjectId = activeProject?.operationIdentity?.projectId ?? null;
-  const activeTargetPill = $('activeTargetPill');
-  if (activeTargetPill) {
-    activeTargetPill.textContent = activeProjectId === null ? 'TARGET —' : `TARGET ${activeProjectId.toUpperCase()}`;
-    activeTargetPill.title = activeProjectId === null
-      ? 'No active Project Profile identity in the sealed frame'
-      : `${activeProjectId} · generation ${activeProject?.profileGeneration ?? '—'} · ${activeProject?.operationIdentity?.projectProfileHash ?? '—'}`;
-    activeTargetPill.className = `pill${activeProjectId === null ? '' : ' on'}`;
-  }
-
-  const missionNode = $('mission');
-  if (missionNode) {
-    const target = snapshot.dashboard?.recognition?.topology?.currentTarget ?? snapshot.seal?.graph?.snapshotId;
-    const prefix = activeProjectId === null ? '' : `ACTIVE TARGET ${activeProjectId.toUpperCase()} · `;
-    missionNode.textContent = `${prefix}${mission?.title ?? '—'} · snapshot ${short(target)}`;
-    missionNode.title = `${prefix}${mission?.title ?? '—'} · snapshot ${target ?? '—'}`;
-  }
-
-  const sealPill = $('sealPill');
-  if (sealPill) {
-    sealPill.textContent = `SEAL ${short(frame.seal?.snapshotHash)} · r${frame.revision ?? '—'}`;
-    sealPill.className = 'pill on';
-  }
+  ribbon.updateFrame(frame);
+  updateRibbonStream('sealed', dashboardStreams.sealed);
 
   const q4 = snapshot.dashboard?.operationalConsole;
   renderWork(q4?.currentWorkContract ?? null);
@@ -7505,7 +7469,7 @@ function renderFeed(events) {
   if (!feed) return;
   feed.setAttribute('aria-live', 'polite');
   if (!Array.isArray(events) || !events.length) {
-    feed.innerHTML = '<div class="empty">No operational traffic has been recorded. Start CLU-E to populate the sealed event stream.</div>';
+    feed.innerHTML = '<div class="empty">No operational traffic has been recorded. Enter /start in the command console to begin a cycle.</div>';
     return;
   }
   // DEV-P1-16: which events, in what order, classified how — decided in quadrants/q4Console.js.
@@ -9573,248 +9537,6 @@ ConsoleFrameBus.subscribe(renderFrame);
   const clamp3 = (v,a,b)=>v<a?a:v>b?b:v;
   const fmtK = (n)=>{ if(!fin3(n)) return '—'; const a=Math.abs(n); if(a>=1e6) return (n/1e6).toFixed(1)+'M'; if(a>=1e4) return (n/1e3).toFixed(1)+'k'; return String(Math.round(n)); };
   const fmtDelta = (v)=>{ if(!fin3(v)) return '—'; const s=v<0?'−':'+'; const a=Math.abs(v); return s+(a>=100?fmtK(a):(a>=10?a.toFixed(0):a.toFixed(1))); };
-  const obj3 = (value) => value !== null && typeof value === 'object' && !Array.isArray(value) ? value : null;
-  const num3 = (value) => {
-    if (value === null || value === undefined || value === '' || typeof value === 'boolean') return null;
-    const number = Number(value);
-    return Number.isFinite(number) && number >= 0 ? number : null;
-  };
-  const str3 = (value) => typeof value === 'string' && value.trim() !== '' ? value.trim() : null;
-  const firstNumber3 = (sources, keys) => {
-    for (const source of sources) {
-      if (!source) continue;
-      for (const key of keys) {
-        if (!Object.prototype.hasOwnProperty.call(source, key)) continue;
-        const value = num3(source[key]);
-        if (value !== null) return value;
-      }
-    }
-    return null;
-  };
-  const firstString3 = (sources, keys) => {
-    for (const source of sources) {
-      if (!source) continue;
-      for (const key of keys) {
-        if (!Object.prototype.hasOwnProperty.call(source, key)) continue;
-        const value = str3(source[key]);
-        if (value !== null) return value;
-      }
-    }
-    return null;
-  };
-  const fmtUsd3 = (value) => {
-    const number = num3(value);
-    if (number === null) return '—';
-    if (number >= 1000) return '$' + number.toLocaleString('en-US', { maximumFractionDigits: 0 });
-    if (number >= 10) return '$' + number.toFixed(2);
-    return '$' + number.toFixed(4).replace(/0+$/u, '').replace(/\.$/u, '');
-  };
-  const sanitizeLegacyAiTelemetry = (area) => {
-    if (!area) return null;
-    const lines = Array.isArray(area.lines)
-      ? area.lines.filter((row) => String(row?.[0] ?? '').toLowerCase() !== 'remaining')
-      : [];
-    const warn = typeof area.warn === 'string' && /Stage D2/u.test(area.warn)
-      ? 'OpenAI provider telemetry is not yet available'
-      : area.warn;
-    return { ...area, lines, warn };
-  };
-
-  /**
-   * Normalizes the backed Status `aiOrchestration` branch plus the provider-facing fields
-   * introduced by the final activation patch. The parser is deliberately tolerant of additive
-   * wire evolution, but conservative about authority: a remaining-token number is shown only
-   * when the provider (or an explicit provider allowance) supplies it. Money is never converted
-   * into a made-up token balance.
-   */
-  function normalizeAiProviderStatus(value) {
-    const ai = obj3(value);
-    if (!ai || Object.prototype.hasOwnProperty.call(ai, 'state')) return null;
-    const latest = obj3(ai.latest);
-    const calls = obj3(ai.calls) || {};
-    const spend = obj3(ai.spendUsd) || {};
-    const billing = obj3(ai.billing) || obj3(ai.providerBilling) || obj3(ai.providerBudget);
-    const rootUsageSources = [obj3(ai.usage), obj3(ai.tokenUsage), obj3(ai.tokens), obj3(ai.providerUsage), ai].filter(Boolean);
-    const latestUsageSources = [obj3(latest?.usage), obj3(latest?.tokenUsage), obj3(latest?.tokens), latest].filter(Boolean);
-    const usageSources = [...rootUsageSources, ...latestUsageSources];
-
-    const inputTokens = firstNumber3(usageSources, [
-      'inputTokens', 'input_tokens', 'promptTokens', 'prompt_tokens',
-    ]);
-    const cachedInputTokens = firstNumber3(usageSources, [
-      'cachedInputTokens', 'cached_input_tokens', 'cachedTokens', 'cached_tokens',
-    ]);
-    const outputTokens = firstNumber3(usageSources, [
-      'outputTokens', 'output_tokens', 'completionTokens', 'completion_tokens',
-    ]);
-    let totalTokens = firstNumber3(usageSources, ['totalTokens', 'total_tokens']);
-    if (totalTokens === null && (inputTokens !== null || outputTokens !== null)) {
-      totalTokens = (inputTokens ?? 0) + (outputTokens ?? 0);
-    }
-    const rootTokenTelemetry = firstNumber3(rootUsageSources, [
-      'totalTokens', 'total_tokens', 'inputTokens', 'input_tokens', 'outputTokens', 'output_tokens',
-    ]) !== null;
-    const latestTokenTelemetry = firstNumber3(latestUsageSources, [
-      'totalTokens', 'total_tokens', 'inputTokens', 'input_tokens', 'outputTokens', 'output_tokens',
-    ]) !== null;
-    const tokenScope = rootTokenTelemetry ? 'observed_total' : latestTokenTelemetry ? 'latest_call' : 'none';
-
-    // Only provider-labelled surfaces may claim a remaining allowance. A generic
-    // `remainingTokens` on the aiOrchestration root could be a CLU-E estimate or local policy
-    // value, so it is deliberately ignored. This keeps OpenAI/provider billing authoritative.
-    const nestedProviderAllowanceSources = [
-      billing, obj3(ai.providerAllowance), obj3(ai.providerQuota),
-    ].filter(Boolean);
-    let remainingTokens = firstNumber3(nestedProviderAllowanceSources, [
-      'providerRemainingTokens', 'provider_remaining_tokens', 'remainingTokens',
-      'remaining_tokens', 'tokenAllowanceRemaining', 'token_allowance_remaining',
-    ]);
-    if (remainingTokens === null) {
-      remainingTokens = firstNumber3([ai], [
-        'providerRemainingTokens', 'provider_remaining_tokens',
-      ]);
-    }
-    let providerTokenLimit = firstNumber3(nestedProviderAllowanceSources, [
-      'providerTokenLimit', 'provider_token_limit', 'providerAllowanceTokens',
-      'provider_allowance_tokens', 'tokenAllowanceLimit', 'token_allowance_limit',
-    ]);
-    if (providerTokenLimit === null) {
-      providerTokenLimit = firstNumber3([ai], [
-        'providerTokenLimit', 'provider_token_limit',
-      ]);
-    }
-    let remainingAuthoritative = remainingTokens !== null;
-    if (remainingTokens === null && providerTokenLimit !== null && totalTokens !== null) {
-      remainingTokens = Math.max(0, providerTokenLimit - totalTokens);
-      remainingAuthoritative = true;
-    }
-
-    let providerRemainingUsd = firstNumber3(nestedProviderAllowanceSources, [
-      'providerRemainingUsd', 'provider_remaining_usd', 'remainingUsd', 'remaining_usd',
-      'creditBalanceUsd', 'credit_balance_usd',
-    ]);
-    if (providerRemainingUsd === null) {
-      providerRemainingUsd = firstNumber3([ai], [
-        'providerRemainingUsd', 'provider_remaining_usd',
-      ]);
-    }
-    const todayActualUsd = firstNumber3([spend, billing], ['todayActual', 'today_actual', 'todayActualUsd', 'today_actual_usd']);
-    const monthActualUsd = firstNumber3([spend, billing], ['monthActual', 'month_actual', 'monthActualUsd', 'month_actual_usd']);
-
-    const evidenceText = [
-      ai.providerState, ai.billingState, ai.pauseReason, ai.pauseCode,
-      ai.providerErrorCode, latest?.errorCode, latest?.errorMessage,
-      billing?.state, billing?.reason, billing?.errorCode,
-    ].filter((entry) => typeof entry === 'string').join(' ');
-    const explicitBudgetExhaustion = [
-      ai.providerBudgetExhausted, ai.budgetExhausted, ai.fundingExhausted,
-      billing?.exhausted, billing?.budgetExhausted,
-    ].some((entry) => entry === true);
-    const providerBudgetExhausted = explicitBudgetExhaustion ||
-      /(?:insufficient[_\s-]*(?:quota|credit|funds)|billing[_\s-]*(?:hard[_\s-]*limit|limit|inactive|exhausted)|credit[_\s-]*(?:balance[_\s-]*)?exhausted|payment[_\s-]*required|provider[_\s-]*(?:budget|funding)[_\s-]*(?:exhausted|unavailable)|hard[_\s-]*limit[_\s-]*(?:reached|exceeded))/iu.test(evidenceText);
-    const providerPaused = providerBudgetExhausted || ai.providerPaused === true || ai.paused === true ||
-      /(?:^|[_\s-])paused(?:$|[_\s-])/iu.test(String(ai.providerState ?? ai.pauseState ?? ''));
-
-    const model = firstString3([ai, latest, obj3(ai.route)], [
-      'model', 'preferredModel', 'preferred_model', 'modelId', 'model_id',
-    ]);
-    const submitted = num3(calls.submitted) ?? 0;
-    const completed = num3(calls.completed) ?? 0;
-    const failed = num3(calls.failed) ?? 0;
-    const refused = num3(calls.refused) ?? 0;
-    const pending = num3(calls.pending) ?? 0;
-    const tokenUsagePercent = providerTokenLimit !== null && providerTokenLimit > 0 && totalTokens !== null
-      ? clamp3((totalTokens / providerTokenLimit) * 100, 0, 100)
-      : null;
-
-    return {
-      provider: str3(ai.provider) || 'openai',
-      configured: ai.configured === true,
-      enabled: ai.enabled === true,
-      ready: ai.operationallyReady === true,
-      providerPaused,
-      providerBudgetExhausted,
-      model,
-      policyProblems: Array.isArray(ai.policyProblems) ? ai.policyProblems.map(String) : [],
-      submitted, completed, failed, refused, pending,
-      inputTokens, cachedInputTokens, outputTokens, totalTokens, tokenScope,
-      remainingTokens, remainingAuthoritative, providerTokenLimit, tokenUsagePercent,
-      providerRemainingUsd, todayActualUsd, monthActualUsd,
-      latestState: firstString3([latest, ai], ['state', 'providerState', 'provider_state']),
-      latestErrorCode: firstString3([latest, ai, billing], ['errorCode', 'error_code', 'providerErrorCode']),
-    };
-  }
-
-  function mergeAiProviderTelemetry(baseArea, providerValue) {
-    const base = sanitizeLegacyAiTelemetry(baseArea);
-    const provider = normalizeAiProviderStatus(providerValue);
-    if (!provider) return base;
-    const baseRaw = obj3(base?.raw) || {};
-    const activity = provider.submitted > 0 || provider.pending > 0 || base?.status === 'LIVE';
-    const raw = {
-      ...baseRaw,
-      successful: Math.max(num3(baseRaw.successful) ?? 0, provider.completed),
-      retries: num3(baseRaw.retries) ?? 0,
-      cache: num3(baseRaw.cache) ?? 0,
-      failed: Math.max(num3(baseRaw.failed) ?? 0, provider.failed + provider.refused),
-      inFlight: Math.max(num3(baseRaw.inFlight) ?? 0, provider.pending),
-      queued: num3(baseRaw.queued) ?? 0,
-      thisCycle: Math.max(num3(baseRaw.thisCycle) ?? 0, provider.submitted),
-      burn: num3(baseRaw.burn) ?? 0,
-      provider,
-    };
-    const modelLabel = provider.model || 'not selected';
-    const tokenUsedLabel = provider.totalTokens === null ? '—' : fmtK(provider.totalTokens);
-    const tokenLeftLabel = provider.remainingAuthoritative ? fmtK(provider.remainingTokens) : 'provider n/a';
-    const lines = [
-      ['provider', provider.provider.toUpperCase()],
-      ['model', modelLabel],
-      ['tokens used', tokenUsedLabel],
-      ['tokens left', tokenLeftLabel],
-      ['calls', `${provider.completed}/${provider.submitted}`],
-      ['observed spend', fmtUsd3(provider.todayActualUsd)],
-    ];
-
-    if (provider.providerBudgetExhausted) {
-      return {
-        value: 100,
-        big: 'LACK OF $',
-        bigUnit: '',
-        status: 'AI PAUSED',
-        critical: true,
-        warn: 'OpenAI billing authority refused further submissions · CLU-E controlled pause',
-        lines,
-        raw,
-      };
-    }
-
-    if (!provider.enabled) {
-      return {
-        value: null,
-        big: 'OFF',
-        bigUnit: '',
-        status: 'DISABLED',
-        critical: false,
-        warn: provider.policyProblems[0] || 'OpenAI gateway installed; activation awaits the governed provider policy',
-        lines,
-        raw,
-      };
-    }
-
-    const status = provider.ready ? (activity ? 'LIVE' : 'READY') : (provider.providerPaused ? 'PAUSED' : 'BLOCKED');
-    const value = provider.tokenUsagePercent ?? base?.value ?? (activity ? clamp3(Math.log10(1 + provider.submitted) * 28, 0, 100) : null);
-    return {
-      value,
-      big: provider.totalTokens !== null ? fmtK(provider.totalTokens) : fmtK(provider.submitted),
-      bigUnit: provider.totalTokens !== null ? 'tok' : 'calls',
-      status,
-      critical: false,
-      warn: provider.ready ? null : (provider.policyProblems[0] || 'OpenAI provider route is not operationally ready'),
-      lines,
-      raw,
-    };
-  }
-
   const excludedMeasureIds = () => {
     try {
       const direct = window.__q2Field?.getExcluded?.();
@@ -10282,11 +10004,12 @@ for(var i=1;i<5;i++){let o=u.xy*f32(i);acc+=textureSample(tx,sm,in.uv+o).rgb*w[i
 
       /* central data hierarchy */
       const bigText=(st.big??'—')+(st.bigUnit?` ${st.bigUnit}`:'');
+      const readable = live || (st.big != null && st.big !== '—');
       ctx.save();ctx.textAlign='center';ctx.textBaseline='middle';
       const bigBase=Math.max(13,r*.205),bigScale=bigText.length>8?clamp3(8/bigText.length,.56,1):1;
-      ctx.font=`750 ${bigBase*bigScale}px ui-monospace,Consolas,monospace`;ctx.fillStyle=live?'#eefbff':'rgba(145,171,188,.54)';
+      ctx.font=`750 ${bigBase*bigScale}px ui-monospace,Consolas,monospace`;ctx.fillStyle=critical?'#ff7180':readable?'#eefbff':'rgba(145,171,188,.54)';
       ctx.shadowColor=live?rgba3(col,.46):'transparent';ctx.shadowBlur=live?9*DPR:0;ctx.fillText(bigText,cx,cy+r*.12);ctx.shadowBlur=0;
-      ctx.font=`700 ${Math.max(6.5,r*.073)}px ui-monospace,Consolas,monospace`;ctx.fillStyle=live?rgba3(col,.86):'rgba(114,143,162,.48)';
+      ctx.font=`700 ${Math.max(6.5,r*.073)}px ui-monospace,Consolas,monospace`;ctx.fillStyle=readable?rgba3(col,.86):'rgba(114,143,162,.72)';
       ctx.fillText(st.status??'UNKNOWN',cx,cy+r*.31);
       ctx.restore();
 
@@ -10365,7 +10088,7 @@ for(var i=1;i<5;i++){let o=u.xy*f32(i);acc+=textureSample(tx,sm,in.uv+o).rgb*w[i
       if(!provider)return;
       const h=aiProviderReadoutHeight(content,provider),y=content.y+content.h-h;
       const cells=[
-        [provider.tokenScope==='latest_call'?'TOK LAST':'TOK USED',provider.totalTokens===null?'—':fmtK(provider.totalTokens)],
+        ['TOK USED',provider.totalTokens===null?'—':fmtK(provider.totalTokens)],
         ['TOK LEFT',provider.remainingAuthoritative?fmtK(provider.remainingTokens):'N/A'],
         ['MODEL',provider.model?String(provider.model).slice(0,18):'—'],
       ];
@@ -10403,7 +10126,7 @@ for(var i=1;i<5;i++){let o=u.xy*f32(i);acc+=textureSample(tx,sm,in.uv+o).rgb*w[i
         drawAiProviderReadout(content,provider);ctx.restore();return;
       }
       if(S.length<2){
-        const emptyText=provider?.enabled?(provider.ready?'READY · awaiting call traffic':'PROVIDER ROUTE BLOCKED'):(provider?'GATEWAY DISABLED':'STANDBY · no call traffic');
+        const emptyText=provider?.enabled?(provider.ready?'CONFIGURED · awaiting call traffic':'PROVIDER ROUTE BLOCKED'):(provider?'GATEWAY DISABLED':g.state?.status === 'UNAVAILABLE'?'GATEWAY TELEMETRY UNAVAILABLE':'AWAITING SEALED TELEMETRY');
         const streamOnly={...content,h:Math.max(1,content.h-footerH)};
         drawSubvisualEmpty(streamOnly,emptyText,rgba3(a.color,.35));
         drawAiProviderReadout(content,provider);ctx.restore();return;
@@ -10475,11 +10198,11 @@ for(var i=1;i<5;i++){let o=u.xy*f32(i);acc+=textureSample(tx,sm,in.uv+o).rgb*w[i
       const content=drawSubvisualHeader(g);
       const raw=g.state&&g.state.raw;
       if(!raw){drawSubvisualEmpty(content,'awaiting cycle telemetry',rgba3(a.color,.35));ctx.restore();return;}
-      const disp=g.phaseDisp||raw.phases.map(p=>p.value);
+      const disp=g.phaseDisp||raw.phases.map(p=>p.value ?? 0);
       const N=5, R=Math.min(content.w,content.h)*0.31;
       const cx=content.x+content.w*0.5,cy=content.y+content.h*0.50+2*DPR;
       const gap=0.16, span=(Math.PI*2 - N*gap)/N, start=-Math.PI/2 + gap/2;
-      let active=-1; for(let i=0;i<N;i++){ if(raw.phases[i].value<100){active=i;break;} }
+      let active=-1; for(let i=0;i<N;i++){ if(raw.phases[i].value!=null&&raw.phases[i].value<100){active=i;break;} }
       const lw=Math.max(3.5,R*0.26)*DPR; ctx.lineCap='round';
       if(!reduceMotion){ ctx.save(); ctx.globalAlpha=.10; ctx.strokeStyle=a.color; ctx.lineWidth=1*DPR;
         const sa=(t*0.0012)%(Math.PI*2); ctx.beginPath(); ctx.arc(cx,cy,R+lw*0.7,sa,sa+0.5); ctx.stroke(); ctx.restore(); }
@@ -10505,11 +10228,11 @@ for(var i=1;i<5;i++){let o=u.xy*f32(i);acc+=textureSample(tx,sm,in.uv+o).rgb*w[i
       ctx.fillText('CYCLE', cx, cy-R*0.44);
       ctx.fillStyle=rgba3(a.color,.95); ctx.shadowColor=rgba3(a.color,.7); ctx.shadowBlur=6*DPR;
       ctx.font=`800 ${Math.max(11,R*0.55)}px ui-monospace,Consolas,monospace`;
-      ctx.fillText(String(raw.cycleNum), cx, cy-R*0.02); ctx.shadowBlur=0;
-      const cur= active<0? 'COMPLETE' : PH_SHORT[raw.phases[active].key];
-      ctx.fillStyle= active<0? 'rgba(57,255,136,.85)':'rgba(255,255,255,.62)';
+      ctx.fillText(String(raw.cycleNum), cx, cy-R*0.02, R*1.6); ctx.shadowBlur=0;
+      const cur=raw.grade?.toUpperCase() ?? (active<0 ? '' : PH_SHORT[raw.phases[active].key]);
+      ctx.fillStyle= raw.grade==='proof-authoritative'? 'rgba(57,255,136,.85)':'rgba(255,255,255,.62)';
       ctx.font=`700 ${Math.max(5.5,R*0.20)}px ui-monospace,Consolas,monospace`;
-      ctx.fillText(cur, cx, cy+R*0.42);
+      ctx.fillText(cur, cx, cy+R*0.42, R*1.55);
       if(raw.next){ ctx.textAlign='center'; ctx.textBaseline='alphabetic';
         ctx.font=`600 ${clamp3(content.h*.085,5.5*DPR,8.5*DPR)}px ui-monospace,Consolas,monospace`;ctx.fillStyle=rgba3(a.color,.42);
         ctx.fillText('▸ '+String(raw.next).slice(0,28), content.x+content.w/2, content.y+content.h-2*DPR); }
@@ -10784,16 +10507,17 @@ for(var i=1;i<5;i++){let o=u.xy*f32(i);acc+=textureSample(tx,sm,in.uv+o).rgb*w[i
         const last=hit.series?.[hit.series.length-1]||{succ:0,cache:0,retry:0,fail:0},r=st.raw||{},p=r.provider||null;
         const providerRows=p?`<br><span class="k">provider</span> ${esc3(String(p.provider||'openai').toUpperCase())} · <span class="k">model</span> ${esc3(p.model||'—')}`+
           `<br><span class="k">tokens</span> used ${p.totalTokens==null?'—':fmtK(p.totalTokens)} · left ${p.remainingAuthoritative?fmtK(p.remainingTokens):'provider n/a'}`+
-          `<br><span class="k">observed spend</span> today ${fmtUsd3(p.todayActualUsd)} · month ${fmtUsd3(p.monthActualUsd)}`+
+          `<br><span class="k">observed spend</span> today ${formatObservedUsd(p.todayActualUsd)} · month ${formatObservedUsd(p.monthActualUsd)}`+
           (p.providerBudgetExhausted?`<br><span style="color:#ff7180;font-weight:800">LACK OF $ · CONTROLLED PAUSE</span>`:''):'';
         tip.innerHTML=`<span class="t">A · AI / CALL STREAM</span> — ${esc3(st.status||'')}`+
           `<br><span class="k">last tick</span> ok +${fmtK(last.succ)} · cache +${fmtK(last.cache)} · retry +${fmtK(last.retry)} · fail +${fmtK(last.fail)}`+
           `<br><span class="k">cumulative</span> ok ${fmtK(r.successful)} · cache ${fmtK(r.cache)} · retry ${fmtK(r.retries)} · fail ${fmtK(r.failed)}`+
-          `<br><span class="k">in-flight</span> ${fmtK(r.inFlight)} · <span class="k">window</span> ${hit.series?.length||0} ticks`+providerRows;
+          `<br><span class="k">in-flight</span> ${fmtK(r.inFlight)} · <span class="k">window</span> ${hit.series?.length||0} ticks`+providerRows+
+          (st.warn?`<br><span class="k">${esc3(st.warn)}</span>`:'');
       }else if(hitPanel&&hit.a.key==='cycle'&&hit.state&&hit.state.raw){
         const rw=hit.state.raw,PL={recognition:'recognition',deep_review:'deep review',proven_improvement:'proven improvement',certification:'certification',test_maturity:'test maturity'};
-        const rows=rw.phases.map(p=>`<span class="k">${PL[p.key]||p.key}</span> ${p.value>=100?'✓ complete':Math.round(p.value)+'%'}`).join('<br>');
-        tip.innerHTML=`<span class="t">B · CYCLE PHASES</span> — cycle ${rw.cycleNum}<br>${rows}${rw.next?`<br><span class="k">next</span> ${esc3(String(rw.next).slice(0,30))}`:''}`;
+        const rows=rw.phases.map(p=>`<span class="k">${PL[p.key]||p.key}</span> ${p.value==null?'—':p.value>=100?'✓ complete':Math.round(p.value)+'%'}`).join('<br>');
+        tip.innerHTML=`<span class="t">B · CYCLE PHASES</span> — ${esc3(rw.cycleNum)} · ${esc3(hit.state.big)}${rw.grade?` · ${esc3(rw.grade)}`:''}<br>${rows}${rw.next?`<br><span class="k">next</span> ${esc3(String(rw.next).slice(0,30))}`:''}`;
       }else if(hitPanel&&hit.a.key==='gain'&&hit.state&&hit.state.raw){
         const rw=hit.state.raw;
         const topc=rw.cells.slice().sort((x,y)=>Math.abs(y.net)-Math.abs(x.net)).slice(0,3).map(c=>`<span class="k">${esc3(c.id)}</span> ${c.net>=0?'+':''}${Math.round(c.net)}`).join('<br>');
@@ -10852,12 +10576,14 @@ for(var i=1;i<5;i++){let o=u.xy*f32(i);acc+=textureSample(tx,sm,in.uv+o).rgb*w[i
       const upd=(g,st)=>{ if(st){
         const signature=telemetrySignalSignature(g,st);
         if(signature!==g.telemetrySignature){g.telemetrySignature=signature;g.signal=1;}
-        g.state=st;g.hasData=st.value!=null;g.target=st.value!=null?st.value:(g.a.dial==='center'?0:0);
-      } };
+      }
+        g.state=st??null;g.hasData=st?.value!=null;g.target=st?.value??0;
+      };
       upd(G[0],T.ai); upd(G[1],T.cycle); upd(G[2],T.gain); upd(G[3],T.health);
       /* A · call-stream series from counter deltas — truth only, never synthesized */
       const st0=G[0].state;
-      if(st0 && st0.raw){
+      if(!st0?.raw){G[0].lastRaw=null;G[0].series.length=0;}
+      else{
         const r=st0.raw, tn=now(), prev=G[0].lastRaw;
         const active = st0.status==='LIVE' || r.successful||r.retries||r.cache||r.failed||r.inFlight;
         if(active){
@@ -10873,7 +10599,7 @@ for(var i=1;i<5;i++){let o=u.xy*f32(i);acc+=textureSample(tx,sm,in.uv+o).rgb*w[i
       }
       /* B · phase-ring animated fill targets (snap in reduced-motion) */
       const cyc=G[1].state && G[1].state.raw;
-      if(cyc){ G[1].phaseTarget=cyc.phases.map(p=>clamp3(p.value,0,100));
+      if(cyc){ G[1].phaseTarget=cyc.phases.map(p=>clamp3(p.value??0,0,100));
         if(!G[1].phaseDisp || G[1].phaseDisp.length!==G[1].phaseTarget.length) G[1].phaseDisp = reduceMotion?[...G[1].phaseTarget]:G[1].phaseTarget.map(()=>0);
         if(reduceMotion) G[1].phaseDisp=[...G[1].phaseTarget]; }
       /* C · cascade reveal (re-grows only when the contribution set changes) */
@@ -10881,7 +10607,6 @@ for(var i=1;i<5;i++){let o=u.xy*f32(i);acc+=textureSample(tx,sm,in.uv+o).rgb*w[i
       if(gr && gr.cells && gr.cells.length){ const key=gr.net+'/'+gr.count;
         if(G[2].lastGainKey!==key){ G[2].gainReveal=reduceMotion?1:0; G[2].lastGainKey=key; } if(G[2].gainReveal==null)G[2].gainReveal=1; }
       else { G[2].gainReveal=1; }
-      const formatState=(g)=>g.state?(g.state.big??'—')+(g.state.bigUnit?' '+g.state.bigUnit:''):'—';
       if (foot) foot.textContent = '';
       const health=G[3].state, cycleState=G[1].state, aiState=G[0].state, aiProvider=aiState?.raw?.provider||null;
       const aiFundingBlocked=aiProvider?.providerBudgetExhausted===true;
@@ -10892,23 +10617,22 @@ for(var i=1;i<5;i++){let o=u.xy*f32(i);acc+=textureSample(tx,sm,in.uv+o).rgb*w[i
       if(signature!==lastPanelSignature){lastPanelSignature=signature;ClueInterface.pulse('q3');}
       if(reduceMotion) draw();
     }
-    let providerAiStatus=null,lastBaseTelemetry=null;
-    function applyMergedTelemetry(){
-      if(!lastBaseTelemetry&&!providerAiStatus)return;
-      const base=lastBaseTelemetry||{ai:null,cycle:null,gain:null,health:null};
-      applyTelemetry({...base,ai:mergeAiProviderTelemetry(base.ai,providerAiStatus)});
-    }
     function setTelemetry(input){
-      let T=null;
-      if(input && (input.ai!==undefined||input.cycle!==undefined||input.gain!==undefined||input.health!==undefined)) T=input;
-      else if(input && input.snapshot) T=deriveTelemetry(input.snapshot, excludedMeasureIds());
-      else if(input && input.dashboard) T=deriveTelemetry(input, excludedMeasureIds());
-      if(T){lastBaseTelemetry={...T,ai:sanitizeLegacyAiTelemetry(T.ai)};applyMergedTelemetry();}
+      if(input && (input.ai!==undefined||input.cycle!==undefined||input.gain!==undefined||input.health!==undefined)) {
+        applyTelemetry(input);
+      } else {
+        const snapshot = input?.snapshot ?? input;
+        if(snapshot?.dashboard) applyTelemetry(deriveTelemetry(snapshot, excludedMeasureIds()));
+      }
     }
-    function setProviderStatus(input){providerAiStatus=obj3(input);applyMergedTelemetry();return normalizeAiProviderStatus(providerAiStatus);}
-    function getProviderStatus(){return normalizeAiProviderStatus(providerAiStatus);}
+    function setProviderStatus(input){
+      const frame = ConsoleFrameBus.getLastFrame();
+      const base = deriveTelemetry(frame?.snapshot, excludedMeasureIds());
+      applyTelemetry({...base, ai:projectAiGauge(input)});
+      return normalizeAiProviderStatus(input);
+    }
+    function getProviderStatus(){return G[0].state?.raw?.provider ?? null;}
     function clearTelemetry(reason='PROJECT SWITCH · AWAITING SEALED FRAME'){
-      providerAiStatus=null;lastBaseTelemetry=null;
       for(const g of G){g.state=null;g.hasData=false;g.target=0;g.telemetrySignature='';g.signal=0;if(Array.isArray(g.series))g.series.length=0;g.lastRaw=null;}
       G[1].phaseTarget=null;G[1].phaseDisp=null;G[2].gainReveal=1;G[2].lastGainKey=null;
       lastPanelSignature='';ClueInterface.setPanelState('q3','connecting',reason);
@@ -10943,14 +10667,15 @@ for(var i=1;i<5;i++){let o=u.xy*f32(i);acc+=textureSample(tx,sm,in.uv+o).rgb*w[i
     body.innerHTML = '';
     body.style.position = 'relative';
     const clusterCore = mountCluster(body);
-    let unsubscribe = () => {},providerTimer=null,providerPollBusy=false,lastProviderError=null;
+    let unsubscribe = () => {},providerPollBusy=false,lastProviderError=null;
     async function refreshProviderStatus(){
       if(providerPollBusy)return clusterCore.getProviderStatus();
       providerPollBusy=true;
       try{
-        const status=await fetchJson('/api/status/current',{cache:'no-store'});
+        const frame = await fetchJson('/api/frame', { cache: 'no-store' });
+        ConsoleFrameBus.acceptFetchedFrame(frame);
         lastProviderError=null;
-        return clusterCore.setProviderStatus(status?.aiOrchestration??null);
+        return clusterCore.getProviderStatus();
       }catch(error){
         lastProviderError=error instanceof Error?error.message:String(error);
         return clusterCore.getProviderStatus();
@@ -10968,7 +10693,6 @@ for(var i=1;i<5;i++){let o=u.xy*f32(i);acc+=textureSample(tx,sm,in.uv+o).rgb*w[i
       providerDiagnostics:()=>({busy:providerPollBusy,lastError:lastProviderError,status:clusterCore.getProviderStatus()}),
       remove() {
         unsubscribe();
-        if(providerTimer!==null)clearInterval(providerTimer);
         q2Body?.removeEventListener('gbf-exclusions-change', onExclusionsChange);
         clusterCore.remove();
       },
@@ -10976,18 +10700,13 @@ for(var i=1;i<5;i++){let o=u.xy*f32(i);acc+=textureSample(tx,sm,in.uv+o).rgb*w[i
     window.__q3Cluster = cluster;
     window.__clueAiProviderTelemetry = {refresh:refreshProviderStatus,get:cluster.providerDiagnostics};
     ClueInterface.setPanelState('q3', 'connecting', 'AWAITING TELEMETRY');
-    void refreshProviderStatus();
-    providerTimer=setInterval(()=>{void refreshProviderStatus();},5000);
-
-    fetchJson('/api/frame').then((frame) => {
-      if (frame?.snapshot) cluster.setTelemetry({ snapshot: frame.snapshot });
-    }).catch((error) => {
-      ClueInterface.setPanelState('q3', 'warning', 'INITIAL FRAME UNAVAILABLE');
-      console.warn('[Q3] initial frame unavailable:', error.message);
-    });
-
     unsubscribe = ConsoleFrameBus.subscribe((frame) => {
       if (frame?.snapshot) cluster.setTelemetry({ snapshot: frame.snapshot });
+    });
+    void refreshProviderStatus().then(() => {
+      if (lastProviderError && !ConsoleFrameBus.getLastFrame()) {
+        ClueInterface.setPanelState('q3', 'warning', 'INITIAL FRAME UNAVAILABLE');
+      }
     });
   } catch (error) {
     ClueInterface.setPanelState('q3', 'unavailable', 'INSTRUMENTS UNAVAILABLE');
@@ -10997,72 +10716,43 @@ for(var i=1;i<5;i++){let o=u.xy*f32(i);acc+=textureSample(tx,sm,in.uv+o).rgb*w[i
 
 /* -------------------------- Start + Configure ---------------------------- */
 
-const startBtn = $('start');
-const runPill = $('runPill');
-const runLine = $('runLine');
 let runPollBusy = false;
 let lastRunSignature = '';
+let lastCycleReceipt = null;
+let runGeneration = 0;
 
 async function pollRun() {
-  if (runPollBusy) return;
+  if (runPollBusy || projectTransition) return;
   runPollBusy = true;
+  const generation = runGeneration;
   try {
-    const run = await fetchJson('/api/run');
+    const run = await fetchJson('/api/run', { cache: 'no-store' });
+    if (generation !== runGeneration) return;
     const state = String(run?.state ?? 'unknown').toLowerCase();
-    const phase = run?.phase ? String(run.phase) : '';
-    if (runPill) {
-      runPill.textContent = state.toUpperCase() + (phase ? ` · ${phase.toUpperCase()}` : '');
-      runPill.className = 'pill ' + (state === 'running' ? 'run' : state === 'failed' ? 'bad' : state === 'completed' ? 'on' : '');
-    }
-    if (runLine) runLine.textContent = run?.lastLine ?? '';
-    if (startBtn) startBtn.disabled = state === 'running';
+    if (state === 'running') ribbon.notice(null);
+    ribbon.updateRun(run);
     document.body.dataset.clueRunState = state;
-    const signature = `${state}|${phase}|${run?.lastLine ?? ''}`;
+    const signature = `${state}|${run?.phase ?? ''}|${run?.lastLine ?? ''}`;
     if (signature !== lastRunSignature) {
       lastRunSignature = signature;
       if (state === 'running') ClueInterface.pulse('q4');
     }
-  } catch (error) {
-    document.body.dataset.clueRunState = 'unreachable';
-    if (runPill) {
-      runPill.textContent = 'CONTROL RECONNECTING';
-      runPill.className = 'pill bad';
+    const receipt = run?.receipts?.at(-1);
+    if (receipt?.finishedAt && receipt.finishedAt !== lastCycleReceipt) {
+      lastCycleReceipt = receipt.finishedAt;
+      terminal.recordReceipt?.({
+        action: 'Cycle drive',
+        state: receipt.timedOut ? 'timeout' : receipt.exitCode === 0 ? 'completed' : 'failed',
+        detail: receipt.lastLine || `Process exit ${receipt.exitCode ?? 'unavailable'}`,
+      });
     }
-    if (runLine && !runLine.textContent) runLine.textContent = 'run control temporarily unavailable';
+  } catch {
+    if (generation !== runGeneration) return;
+    document.body.dataset.clueRunState = 'unreachable';
+    ribbon.updateRun(null);
   } finally {
     runPollBusy = false;
   }
-}
-
-setInterval(pollRun, 1000);
-void pollRun();
-
-if (startBtn) {
-  startBtn.addEventListener('click', async () => {
-    startBtn.disabled = true;
-    if (runLine) runLine.textContent = 'dispatching CLU-E run…';
-    try {
-      // DEV-P1-16: the request goes through the declared 'start' action. The 409 the server
-      // answers when a run is already live arrives as a transport refusal with the status in
-      // its reason — still worth its own message, since it is not a failure.
-      const invoked = await actionClient.invoke('start');
-      if (!invoked.ok) {
-        if (invoked.refused === 'transport-failed' && /\b409\b/.test(invoked.reason)) {
-          if (runLine) runLine.textContent = 'a run is already in progress';
-        } else {
-          throw new Error(invoked.reason);
-        }
-      } else {
-        if (runLine) runLine.textContent = 'run accepted · awaiting sealed telemetry';
-        ClueInterface.pulse('q4');
-      }
-    } catch (error) {
-      if (runLine) runLine.textContent = `start failed · ${error.message}`;
-      startBtn.disabled = false;
-    } finally {
-      void pollRun();
-    }
-  });
 }
 
 /**
@@ -11077,8 +10767,9 @@ if (startBtn) {
  * Named, it is callable by the tab shell on the first selection however that selection was made.
  */
 const cfg = $('cfg');
-let configurationLoaded = false;
 let configurationController = null;
+let configurationLoad = null;
+let configurationFocusRequest = 0;
 
 function projectRecordIdentity(record) {
   if (!record?.profile || !Number.isSafeInteger(record.generation)) return null;
@@ -11090,7 +10781,8 @@ function projectRecordIdentity(record) {
   };
 }
 
-function clearProjectBoundDashboard(nextProjectId, reason = 'PROJECT SWITCH · AWAITING PROJECT-BOUND EVIDENCE') {
+function clearProjectBoundDashboard(reason = 'PROJECT SWITCH · AWAITING PROJECT-BOUND EVIDENCE') {
+  runGeneration += 1;
   try { window.__q2Field?.setProjection?.(null); window.__q2LastView = null; } catch { /* Q2 remains isolated */ }
   try { window.__q3Cluster?.clearTelemetry?.(reason); } catch { /* Q3 remains isolated */ }
   renderWork(null);
@@ -11099,8 +10791,10 @@ function clearProjectBoundDashboard(nextProjectId, reason = 'PROJECT SWITCH · A
   if (q2foot) q2foot.textContent = '';
   ClueInterface.setPanelState('q2', 'connecting', reason);
   ClueInterface.setPanelState('q4', 'connecting', reason);
-  const missionNode = $('mission');
-  if (missionNode) missionNode.textContent = `ACTIVE TARGET ${String(nextProjectId ?? '—').toUpperCase()} · awaiting sealed frame`;
+  ribbon.updateFrame(null);
+  ribbon.updateRun(null);
+  lastCycleReceipt = null;
+  terminal.reset();
 }
 
 function onProjectActivationPending(record, validation) {
@@ -11113,38 +10807,38 @@ function onProjectActivationPending(record, validation) {
     q1?.cancelProjectGenerationActivation?.();
     return false;
   }
-  clearProjectBoundDashboard(identity.projectId);
+  projectTransition = true;
+  clearProjectBoundDashboard();
   return true;
 }
 
 function onProjectActivationCancelled() {
   try { window.__q1V9?.cancelProjectGenerationActivation?.(); } catch { /* Q1 optional */ }
   ConsoleFrameBus.cancelProjectTransition();
-  clearProjectBoundDashboard(ConsoleFrameBus.projectIdentity()?.projectId ?? null, 'PROJECT ACTIVATION CANCELLED · AWAITING REPLAY');
+  projectTransition = false;
+  clearProjectBoundDashboard('PROJECT ACTIVATION CANCELLED · AWAITING REPLAY');
+  void pollRun();
 }
 
 function onActiveProjectChanged({ record, pointer }) {
   ConsoleFrameBus.activateProjectIdentity(pointer);
   const identity = projectRecordIdentity(record);
   window.__clueActiveProject = Object.freeze({ ...pointer });
-  const pill = $('activeTargetPill');
-  if (pill) {
-    pill.textContent = `TARGET ${pointer.projectId.toUpperCase()}`;
-    pill.title = `${pointer.projectId} · generation ${pointer.profileGeneration} · ${pointer.projectProfileHash}`;
-    pill.className = 'pill on';
-  }
   try {
     window.dispatchEvent(new CustomEvent('clue:active-project-changed', {
       detail: Object.freeze({ pointer: { ...pointer }, operationIdentity: identity }),
     }));
   } catch { /* diagnostics only */ }
-  clearProjectBoundDashboard(pointer.projectId);
+  projectTransition = false;
+  clearProjectBoundDashboard();
+  void pollRun();
   try { void clueStatus.refresh(); } catch { /* next poll remains authoritative */ }
 }
 
-async function loadConfiguration() {
+function loadConfiguration() {
   const body = $('cfgBody');
   if (!cfg || !body) return;
+  if (configurationLoad !== null) return configurationLoad;
   if (!configurationController) {
     configurationController = mountConfigurationPanel({
       root: body,
@@ -11155,174 +10849,86 @@ async function loadConfiguration() {
       onActiveProjectChanged,
     });
   }
-  configurationLoaded = true;
-  await configurationController.load();
+  configurationLoad = configurationController.load();
+  return configurationLoad;
 }
 
+async function openRibbonConfiguration(capability, result) {
+  if (!tabShell) return;
+  const request = ++configurationFocusRequest;
+  tabShell.select('configuration');
+  await loadConfiguration();
+  if (request === configurationFocusRequest && tabShell.current() === 'configuration') {
+    configurationController?.focusCapability(capability, result);
+  }
+}
 
-/* ===================== density — DEV-P1-17 ================================
- * The shell owns presentation density (§20.1) as a non-authoritative preference (§3.6):
- * one data attribute, read by CSS, never consulted to add or drop content. The one
- * JavaScript consumer is the resize path — canvases relayout when spacing changes.
- * ======================================================================== */
 /* ================= typed action contracts — DEV-P1-16 =====================
  * §20.1's sixth responsibility. The registry in configuration/actionContracts.js is the list
  * of ways this UI may change the workspace; an undeclared action or a credential-shaped
  * payload is refused before any request is made.
  * ======================================================================== */
 const actionClient = createActionClient({
-  request: ({ method, path, payload }) =>
+  request: ({ method, path, payload, signal }) =>
     fetchJson(path, {
       method,
+      signal,
       ...(payload === undefined
         ? {}
         : { headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) }),
     }),
 });
 
-/* ===================== local-first Git Sync control ========================
- * The control is intentionally independent from START. It never runs automatically, never
- * piggybacks on a cycle or ACCEPT, and refuses before transport when no remote is registered.
- * The final backend patch declares the `syncGit` action; until then the interface remains a
- * visible, fail-closed preview over the mission-bound NO_REMOTE_YET decision.
- * ======================================================================== */
-const gitSyncControl = (() => {
-  if (!startBtn) return null;
-  let wrapper = startBtn.closest('.clue-primary-controls');
-  if (!wrapper) {
-    wrapper = document.createElement('span');
-    wrapper.className = 'clue-primary-controls';
-    startBtn.parentNode?.insertBefore(wrapper, startBtn);
-    wrapper.appendChild(startBtn);
-  }
-  let button = $('gitSync');
-  if (!button) {
-    button = document.createElement('button');
-    button.type = 'button';
-    button.id = 'gitSync';
-    button.innerHTML = '<span class="clue-sync-icon" aria-hidden="true">⇄</span><span class="clue-sync-label">SYNC GIT</span>';
-    wrapper.insertBefore(button, startBtn);
-  }
-  const label = button.querySelector('.clue-sync-label');
-  let publication = null, busy = false, lastError = null, lastResult = null;
-
-  function reflect(state, text = 'SYNC GIT', title = '') {
-    button.dataset.syncState = state;
-    if (label) label.textContent = text;
-    button.disabled = state === 'checking' || state === 'syncing';
-    button.setAttribute('aria-busy', String(state === 'checking' || state === 'syncing'));
-    button.setAttribute('aria-label', `${text}. Git synchronization is manual and never runs with Start CLU-E.`);
-    button.title = title || 'Manual Git synchronization · local-first · never automatic';
-  }
-
-  function remoteRegistered() {
-    return publication?.decision === 'REMOTE_REGISTERED' && typeof publication?.remote === 'string' && publication.remote.trim() !== '';
-  }
-
-  function actionDeclared() {
-    const actions = actionClient.actions();
-    return Object.prototype.hasOwnProperty.call(actions, 'syncGit');
-  }
-
-  async function refresh() {
-    if (busy) return state();
-    reflect('checking', 'SYNC GIT', 'Checking mission-bound remote identity…');
-    try {
-      const config = await fetchJson('/api/config', { cache: 'no-store' });
-      publication = config?.project?.publication ?? null;
-      lastError = null;
-      if (!remoteRegistered()) {
-        reflect('blocked', 'SYNC GIT', 'Local-first mode · no remote configured · click for an explicit refusal');
-      } else if (!actionDeclared()) {
-        reflect('blocked', 'SYNC GIT', 'Remote registered, but governed Git Sync backend is not installed yet');
-      } else {
-        reflect('ready', 'SYNC GIT', 'Manual on-demand synchronization with the registered remote');
-      }
-    } catch (error) {
-      lastError = error instanceof Error ? error.message : String(error);
-      reflect('failed', 'SYNC GIT', `Git Sync readiness unavailable · ${lastError}`);
-    }
-    return state();
-  }
-
-  async function invoke() {
-    if (busy) return state();
-    await refresh();
-    if (!remoteRegistered()) {
-      if (runLine) runLine.textContent = 'Git sync blocked · no remote configured (local-first mode)';
-      reflect('blocked', 'NO REMOTE', 'No remote is registered. Sync is an explicit operator action and nothing was sent.');
-      setTimeout(() => { void refresh(); }, 1800);
-      return state();
-    }
-    if (!actionDeclared()) {
-      if (runLine) runLine.textContent = 'Git sync blocked · governed sync backend pending';
-      reflect('blocked', 'SYNC PENDING', 'The interface is ready; the final backend patch must declare syncGit.');
-      setTimeout(() => { void refresh(); }, 1800);
-      return state();
-    }
-    busy = true;
-    reflect('syncing', 'SYNCING', 'Manual Git synchronization in progress…');
-    if (runLine) runLine.textContent = 'manual Git sync requested…';
-    try {
-      const result = await actionClient.invoke('syncGit');
-      if (!result.ok) throw new Error(result.reason);
-      lastResult = result.result ?? null;
-      lastError = null;
-      reflect('complete', 'SYNCED', 'Git synchronization completed from the explicit operator request');
-      if (runLine) runLine.textContent = 'Git sync complete · local work remains authoritative until recorded otherwise';
-      ClueInterface.pulse('q4');
-      try { await clueStatus.refresh(); } catch { /* Status will refresh on its next read */ }
-    } catch (error) {
-      lastError = error instanceof Error ? error.message : String(error);
-      reflect('failed', 'SYNC FAILED', `Git sync failed · ${lastError}`);
-      if (runLine) runLine.textContent = `Git sync failed · ${lastError}`;
-    } finally {
-      busy = false;
-      setTimeout(() => { void refresh(); }, 2200);
-    }
-    return state();
-  }
-
-  function state() {
-    return {
-      state: button.dataset.syncState || 'unknown',
-      publicationDecision: publication?.decision ?? null,
-      remoteConfigured: remoteRegistered(),
-      actionDeclared: actionDeclared(),
-      automaticSync: false,
-      busy,
-      lastError,
-      lastResult,
-      adjacentToStart: button.nextElementSibling === startBtn,
-    };
-  }
-
-  button.addEventListener('click', () => { void invoke(); });
-  void refresh();
-  setInterval(() => { if (!busy) void refresh(); }, 15000);
-  return { button, refresh, invoke, state };
-})();
-window.__clueGitSyncControl = gitSyncControl;
-
-const densityControl = createDensityControl();
-{
-  const densityButton = $('densityBtn');
-  const reflectDensity = (mode) => {
-    if (densityButton) {
-      densityButton.setAttribute('aria-pressed', String(mode === 'compact'));
-      densityButton.setAttribute(
-        'aria-label',
-        `Presentation density: ${mode}. Activates ${mode === 'compact' ? 'comfortable' : 'compact'}.`,
-      );
-    }
-    // Spacing moved under the canvases; without this they keep drawing at the old size until
-    // the next window resize — correct data, stale geometry.
-    try { window.dispatchEvent(new Event('resize')); } catch { /* non-browser host */ }
-  };
-  if (densityButton) densityButton.addEventListener('click', () => densityControl.toggle());
-  densityControl.subscribe(reflectDensity);
-  reflectDensity(densityControl.current());
+function requireAction(invoked) {
+  if (invoked.ok) return invoked.result;
+  throw new Error(invoked.serverDetails?.reply ?? invoked.serverDetails?.message ?? invoked.reason);
 }
+
+function commandReceipt(action, state, detail) {
+  return { reply: detail, receipt: { action, state, detail } };
+}
+
+const terminal = mountQ4Terminal({
+  root: $('q4'),
+  async start({ signal }) {
+    if (projectTransition) return commandReceipt('Cycle drive', 'refused', 'Project activation is in progress.');
+    const invoked = await actionClient.invoke('start', undefined, { signal });
+    if (!invoked.ok || invoked.result?.started !== true) {
+      const detail = invoked.serverDetails?.message ?? invoked.reason ?? 'Cycle dispatch could not be confirmed.';
+      ribbon.notice(detail, 'failed');
+      return commandReceipt('Cycle drive', 'refused', detail);
+    }
+    ribbon.notice(null);
+    ClueInterface.pulse('q4');
+    void pollRun();
+    return commandReceipt('Cycle drive', 'accepted', 'Cycle drive accepted. Execution updates appear in the operational feed.');
+  },
+  async gitSync({ signal }) {
+    if (projectTransition) return commandReceipt('Git sync', 'refused', 'Project activation is in progress.');
+    const invoked = await actionClient.invoke('syncGit', undefined, { signal });
+    const result = invoked.ok ? invoked.result : invoked.serverDetails;
+    const completed = invoked.ok && result?.code === 'OK' && ['unchanged', 'fast_forwarded', 'pushed'].includes(result.state);
+    const detail = result?.detail ?? invoked.reason ?? 'Git sync did not return a recognized receipt.';
+    if (completed) {
+      ClueInterface.pulse('q4');
+      void clueStatus.refresh();
+    }
+    return commandReceipt('Git sync', completed ? result.state : 'refused', detail);
+  },
+  async status({ signal }) {
+    if (projectTransition) return 'Project activation is in progress.';
+    const run = requireAction(await actionClient.invoke('readRun', undefined, { signal }));
+    return `Run ${run?.state ?? 'unknown'}${run?.phase ? ` · ${run.phase}` : ''}${run?.lastLine ? ` · ${run.lastLine}` : ''}`;
+  },
+  async chat({ message, history, signal }) {
+    if (projectTransition) return { ok: false, reply: 'Project activation is in progress.' };
+    const invoked = await actionClient.invoke('talkToAgent', { message, history }, { signal });
+    if (invoked.ok) return invoked.result;
+    return { ...invoked.serverDetails, ok: false, reply: invoked.serverDetails?.reply ?? invoked.reason };
+  },
+});
+setInterval(pollRun, 1000);
+void pollRun();
 
 /* ================== the quadrant seam — DEV-P1-16 =========================
  * Directory §20.1: one sealed Status store, one selection and cross-highlighting bus, and
@@ -11368,7 +10974,8 @@ const tabShell = (() => {
     ],
     onChange: (id) => {
       // Loaded on first arrival, however the operator got there — click, arrow key or Home/End.
-      if (id === 'configuration' && !configurationLoaded) void loadConfiguration();
+      if (id === 'configuration') void loadConfiguration();
+      else configurationFocusRequest += 1;
     },
   });
 
@@ -11402,9 +11009,9 @@ const CLUE_UI = (() => {
     st.id = 'clue-ov-style';
     st.textContent = `
 body.clue-overlay-lock{overflow:hidden!important}
-.clue-rail-action{border:1px solid rgba(104,192,232,.24);border-radius:8px;background:linear-gradient(180deg,rgba(12,31,48,.86),rgba(3,10,17,.92));color:#aee9ff;box-shadow:inset 0 1px rgba(255,255,255,.045);font:650 9.5px/1 ui-monospace,SFMono-Regular,Consolas,monospace;letter-spacing:.07em;transition:border-color .18s ease,box-shadow .18s ease,transform .18s ease,color .18s ease}
-.clue-rail-action:hover{color:#effcff;border-color:rgba(0,163,224,.66);box-shadow:0 0 20px rgba(0,163,224,.12);transform:translateY(-1px)}
-.clue-rail-action:focus-visible{outline:2px solid #dff8ff;outline-offset:2px}
+.clue-panel-action{border:1px solid rgba(104,192,232,.24);border-radius:8px;background:linear-gradient(180deg,rgba(12,31,48,.86),rgba(3,10,17,.92));color:#aee9ff;box-shadow:inset 0 1px rgba(255,255,255,.045);font:650 9.5px/1 ui-monospace,SFMono-Regular,Consolas,monospace;letter-spacing:.07em;transition:border-color .18s ease,box-shadow .18s ease,transform .18s ease,color .18s ease}
+.clue-panel-action:hover{color:#effcff;border-color:rgba(0,163,224,.66);box-shadow:0 0 20px rgba(0,163,224,.12);transform:translateY(-1px)}
+.clue-panel-action:focus-visible{outline:2px solid #dff8ff;outline-offset:2px}
 .clue-ov{--overlay-accent:var(--clue-cyan);position:fixed;inset:0;z-index:2147482500;display:none;align-items:center;justify-content:center;padding:clamp(10px,2vw,28px);box-sizing:border-box;background:radial-gradient(circle at 50% 18%,color-mix(in srgb,var(--overlay-accent) 9%,transparent),transparent 42rem),rgba(1,5,10,.78);backdrop-filter:blur(15px) saturate(118%)}
 .clue-ov.open{display:flex;animation:clue-ov-enter .20s ease-out}
 @keyframes clue-ov-enter{from{opacity:0}to{opacity:1}}
@@ -11427,26 +11034,24 @@ body.clue-overlay-lock{overflow:hidden!important}
 /* Metrics catalogue */
 .mx-grp{position:sticky;top:52px;z-index:5;margin:0 -13px;padding:8px 14px;border-top:1px solid rgba(103,181,220,.08);border-bottom:1px solid rgba(103,181,220,.14);background:rgba(5,16,27,.96);color:#668399;font:750 9px ui-monospace,Consolas,monospace;letter-spacing:.13em}.mx-e{border:1px solid rgba(103,183,223,.14);border-left-width:3px;border-radius:9px;padding:9px 11px;background:linear-gradient(135deg,rgba(6,22,35,.57),rgba(2,10,17,.44));cursor:pointer;transition:opacity .15s ease,border-color .15s ease,background .15s ease,transform .15s ease}.mx-e:hover{border-color:rgba(116,205,244,.27);background:linear-gradient(135deg,rgba(8,28,43,.69),rgba(3,12,20,.53));transform:translateY(-1px)}.mx-e.excluded{opacity:.46;filter:saturate(.55)}.mx-e.excluded .mx-id{color:#788b99}.mx-r1{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.mx-id{color:#ffd166;font:800 12.5px ui-monospace,Consolas,monospace}.mx-leg{color:#5c788d;font-size:8.5px}.mx-nm{color:#e4f4fe;font:600 10.8px ui-monospace,Consolas,monospace}.mx-fam{font-size:7.8px;letter-spacing:.09em;text-transform:uppercase;margin-left:auto}.mx-def{color:#9bb5c8;font:500 10.5px/1.55 ui-monospace,Consolas,monospace;margin-top:6px}.mx-tog{position:relative;display:inline-block;width:31px;height:17px;flex:0 0 auto;cursor:pointer}.mx-tog input{opacity:0;width:1px;height:1px;position:absolute;margin:0}.mx-sw{position:absolute;inset:0;background:rgba(95,125,153,.31);border:1px solid rgba(110,164,192,.14);border-radius:999px;transition:.15s}.mx-sw::before{content:"";position:absolute;left:2px;top:2px;width:11px;height:11px;border-radius:50%;background:#738b9c;box-shadow:0 1px 4px rgba(0,0,0,.5);transition:.15s}.mx-tog input:checked+.mx-sw{background:rgba(57,255,136,.76);border-color:rgba(57,255,136,.35)}.mx-tog input:checked+.mx-sw::before{transform:translateX(14px);background:#03160b}.mx-tog input:focus-visible+.mx-sw{outline:2px solid #dff8ff;outline-offset:2px}.mx-caret{margin-left:7px;color:#607d92;transition:transform .15s;flex:0 0 auto;font-size:10px}.mx-e.open .mx-caret{transform:rotate(90deg);color:#8fe6ff}.mx-detail{max-height:0;overflow:hidden;transition:max-height .22s ease}.mx-e.open .mx-detail{max-height:820px;margin-top:8px}.mxd-sec{margin:7px 0;padding:7px 9px;border-left:2px solid rgba(0,163,224,.28);border-radius:0 5px 5px 0;background:rgba(2,11,19,.34);color:#bcd7e8;font:500 10.4px/1.62 ui-monospace,Consolas,monospace}.mxd-h{display:block;font-size:7.5px;letter-spacing:.14em;color:#607d92;margin-bottom:3px}.mx-detail ul{margin:2px 0 0;padding-left:16px}.mx-detail li{margin:2px 0;color:#9fb8cc}.mxd-meta{color:#506d82;font-size:8.5px;margin-top:8px;border-top:1px solid rgba(92,161,197,.15);padding-top:7px}
 @media(max-width:760px){.clue-ov{padding:0}.clue-ov-panel{width:100vw;height:100vh;border:0;border-radius:0}.clue-ov-sub{display:none}.clue-ov-bar{flex-wrap:wrap}.clue-ov-bar input{flex-basis:100%}.clue-ov-bar .cnt{flex:1;overflow:hidden;text-overflow:ellipsis}.mx-fam{width:100%;margin-left:39px}.gb-vd{margin-left:0}}
-@media(prefers-reduced-motion:reduce){.clue-ov.open,.clue-ov-loading::before{animation:none}.clue-rail-action,.clue-ov-tool,.gb-e,.mx-e,.mx-sw,.mx-sw::before,.mx-caret,.mx-detail{transition:none!important}}
+@media(prefers-reduced-motion:reduce){.clue-ov.open,.clue-ov-loading::before{animation:none}.clue-panel-action,.clue-ov-tool,.gb-e,.mx-e,.mx-sw,.mx-sw::before,.mx-caret,.mx-detail{transition:none!important}}
 `;
     document.head.appendChild(st);
   }
 
-  function railButton(id, label, title) {
-    const rail = document.getElementById('rail');
-    if (!rail) return null;
+  function panelButton(panelId, id, label, title) {
+    const tools = document.getElementById(panelId)?.querySelector('.clue-panel-tools');
+    if (!tools) return null;
     let button = document.getElementById(id);
     if (button) return button;
     button = document.createElement('button');
     button.type = 'button';
     button.id = id;
-    button.className = 'clue-rail-action';
+    button.className = 'clue-panel-action';
     button.textContent = label;
     button.setAttribute('aria-haspopup', 'dialog');
     if (title) button.title = title;
-    const railAnchor = document.getElementById('toplevelTabs');
-    if (railAnchor?.parentNode === rail) rail.insertBefore(button, railAnchor);
-    else rail.appendChild(button);
+    tools.insertBefore(button, tools.querySelector('.clue-panel-state'));
     return button;
   }
 
@@ -11600,7 +11205,7 @@ body.clue-overlay-lock{overflow:hidden!important}
     return api;
   }
 
-  return { esc, railButton, makeOverlay };
+  return { esc, panelButton, makeOverlay };
 })();
 window.__clueOverlayUi = CLUE_UI;
 
@@ -11614,7 +11219,7 @@ try {
 (function initBookViewer() {
   try {
     const esc = CLUE_UI.esc;
-    const btn = CLUE_UI.railButton('bookBtn', '▤ BOOK', 'Great Book of Efficiency — improvements log');
+    const btn = CLUE_UI.panelButton('q2', 'bookBtn', '▤ BOOK', 'Great Book of Efficiency — improvements log');
     if (!btn) { console.warn('[Book] rail not found'); return; }
     const ov = CLUE_UI.makeOverlay('bookOverlay', 'GREAT BOOK OF EFFICIENCY', 'Proven improvements · detailed evidence log', { accent: '#f4af2d', code: 'BK' });
     window.__clueBook = ov;
@@ -11676,7 +11281,7 @@ try {
 (function initMetricsViewer() {
   try {
     const esc = CLUE_UI.esc;
-    const btn = CLUE_UI.railButton('metricsBtn', '\u229e METRICS', 'Measurement catalogue — the metrics CLU-E evaluates against');
+    const btn = CLUE_UI.panelButton('q2', 'metricsBtn', '\u229e METRICS', 'Measurement catalogue — the metrics CLU-E evaluates against');
     if (!btn) { console.warn('[Metrics] rail not found'); return; }
     const ov = CLUE_UI.makeOverlay('metricsOverlay', 'MEASUREMENT CATALOGUE', 'Canonical measures · intention, evidence, failure patterns and cycle scope', { accent: '#00a3e0', code: 'MX' });
     window.__clueMetricsView = ov;
@@ -12096,7 +11701,7 @@ ${m.definition ? `<div class="mx-def">${esc(m.definition)}</div>` : '<div class=
 (function initBacklogViewer() {
   try {
     const esc = CLUE_UI.esc;
-    const btn = CLUE_UI.railButton('backlogBtn', '\u2691 BACKLOG', 'Recognition backlog — prioritised findings; defer to carry them across cycles');
+    const btn = CLUE_UI.panelButton('q1', 'backlogBtn', '\u2691 BACKLOG', 'Recognition backlog — prioritised findings; defer to carry them across cycles');
     if (!btn) { console.warn('[Backlog] rail not found'); return; }
     const ov = CLUE_UI.makeOverlay('backlogOverlay', 'RECOGNITION BACKLOG', 'Prioritised findings from recognition · defer to exclude from improvement areas', { accent: '#2dd4bf', code: 'BL' });
     window.__clueBacklog = ov;

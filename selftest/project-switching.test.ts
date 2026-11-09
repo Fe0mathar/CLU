@@ -20,7 +20,7 @@ import {
   makeSiblingProjectProfile,
 } from './project-profile-fixture.js';
 
-function setup(t: TestContext, faultPoint?: ProjectRuntimeSwitchFaultPoint) {
+function setup(t: TestContext, faultPoint?: ProjectRuntimeSwitchFaultPoint, onFault?: (registry: ProjectProfileRegistry) => void) {
   const fixture = makeProjectProfileFixture();
   t.after(() => fixture.dispose());
   const registry = new ProjectProfileRegistry(fixture.profiles);
@@ -37,7 +37,8 @@ function setup(t: TestContext, faultPoint?: ProjectRuntimeSwitchFaultPoint) {
           faultInjector: (point, target) => {
             if (!injected && target.profile.projectId === 'beta' && point === faultPoint) {
               injected = true;
-              throw new Error(`injected ${point}`);
+              if (onFault === undefined) throw new Error(`injected ${point}`);
+              onFault(registry);
             }
           },
         }),
@@ -126,6 +127,35 @@ test('all five target identities publish together and switching back reuses dura
   assert.equal(third.inventorySnapshotIdentity, first?.inventorySnapshotIdentity);
   assert.ok(third.runtimeGeneration > second.runtimeGeneration);
 });
+
+test('an asynchronous operation keeps the project lease until settlement', async (t) => {
+  const { manager } = setup(t);
+  manager.start();
+  let settle: () => void = () => {};
+  const pending = new Promise<void>((resolve) => { settle = resolve; });
+  const operation = manager.withLease(undefined, async (lease) => {
+    await pending;
+    return lease.identity.projectId;
+  });
+  assert.equal(manager.activeLeaseCount, 1);
+  assert.throws(() => manager.activate({ projectId: 'beta', actor: 'creator' }), { code: 'PROJECT_RUNTIME_BUSY' });
+  settle();
+  assert.equal(await operation, 'alpha');
+  assert.equal(manager.activeLeaseCount, 0);
+  assert.equal(manager.activate({ projectId: 'beta', actor: 'creator' }).projectId, 'beta');
+});
+
+for (const point of ['before-registry-activation', 'before-runtime-publication'] as const) {
+  test(`a competing project activation at ${point} is preserved`, (t) => {
+    const { fixture, registry, manager } = setup(t, point, (registry) => registry.activate('gamma'));
+    registry.create(makeSiblingProjectProfile(fixture, 'gamma'));
+    manager.start();
+    assert.throws(() => manager.activate({ projectId: 'beta', actor: 'creator' }), { code: 'PROJECT_RUNTIME_ROLLBACK_FAILED' });
+    assert.equal(registry.active()?.projectId, 'gamma');
+    assert.equal(manager.state, 'BLOCKED');
+    assert.equal(manager.activeRuntime, null);
+  });
+}
 
 for (const point of [
   'after-target-profile-load',

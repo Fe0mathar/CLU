@@ -9,6 +9,19 @@ export function escapeHtml(value) {
     .replace(/'/g, '&#39;');
 }
 
+export function renderReadinessReceipt(snapshot, capability, legacy = false) {
+  const active = snapshot.active;
+  const selected = snapshot.selectedRecord;
+  if (!legacy && (snapshot.legacyConfiguration?.legacyConnectionControls === true ||
+    !active || selected?.profile?.projectId !== active.projectId ||
+    selected?.generation !== active.profileGeneration || selected?.projectProfileHash !== active.projectProfileHash)) return '';
+  const receipt = snapshot.readinessReceipts?.[capability];
+  if (!receipt || typeof receipt.checkedAt !== 'string') return '';
+  const date = new Date(receipt.checkedAt);
+  if (!Number.isFinite(date.getTime())) return '';
+  return `<p class="cfg-note">Last check · ${escapeHtml(String(receipt.state).toUpperCase())} · <time datetime="${escapeHtml(date.toISOString())}">${escapeHtml(date.toLocaleString())}</time></p>`;
+}
+
 export function cloneValue(value) {
   if (typeof structuredClone === 'function') return structuredClone(value);
   return JSON.parse(JSON.stringify(value));

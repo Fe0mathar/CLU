@@ -212,6 +212,9 @@ function parseCompletedResponse(
 ): OpenAiCompletedResponse {
   const record = asRecord(body);
   if (record === null) throw new OpenAiGatewayError('PROVIDER_RESPONSE_INVALID', 'OpenAI response is not an object.');
+  if (record['status'] !== undefined && record['status'] !== 'completed') {
+    throw new OpenAiGatewayError('PROVIDER_RESPONSE_NOT_COMPLETED', 'OpenAI response did not complete.');
+  }
   const providerRequestId =
     typeof record['id'] === 'string' && record['id'].length > 0
       ? record['id']
@@ -257,6 +260,7 @@ async function readBoundedBytes(response: Response, maximumBytes: number): Promi
   if (declared !== null) {
     const bytes = Number.parseInt(declared, 10);
     if (Number.isFinite(bytes) && bytes > maximumBytes) {
+      void response.body?.cancel().catch(() => undefined);
       throw new OpenAiGatewayError(
         'PROVIDER_RESPONSE_TOO_LARGE',
         `Provider declared ${bytes} response bytes; limit is ${maximumBytes}.`,
@@ -274,7 +278,7 @@ async function readBoundedBytes(response: Response, maximumBytes: number): Promi
       if (next.done) break;
       total += next.value.byteLength;
       if (total > maximumBytes) {
-        await reader.cancel('response exceeds CLU-E gateway limit');
+        void reader.cancel('response exceeds CLU-E gateway limit').catch(() => undefined);
         throw new OpenAiGatewayError(
           'PROVIDER_RESPONSE_TOO_LARGE',
           `Provider response exceeded ${maximumBytes} bytes.`,
@@ -310,10 +314,10 @@ async function readJson(response: Response, maximumBytes: number): Promise<unkno
   if (text.trim().length === 0) return null;
   try {
     return JSON.parse(text) as unknown;
-  } catch (error) {
+  } catch {
     throw new OpenAiGatewayError(
       'PROVIDER_RESPONSE_INVALID_JSON',
-      `Provider response is not JSON: ${(error as Error).message}`,
+      'Provider response is not valid JSON.',
       { status: response.status },
     );
   }
@@ -334,22 +338,29 @@ async function readText(response: Response, maximumBytes: number): Promise<strin
   }
 }
 
-async function fetchWithTimeout(
+async function fetchWithTimeout<T>(
   fetchImpl: GatewayFetch,
   url: string,
   init: RequestInit,
   timeoutMs: number,
-): Promise<Response> {
+  consume: (response: Response) => Promise<T>,
+): Promise<T> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    return await fetchImpl(url, { ...init, signal: controller.signal });
+    const response = await fetchImpl(url, { ...init, redirect: 'error', signal: controller.signal });
+    if (response.redirected || (response.url !== '' && response.url !== new URL(url).href)) {
+      void response.body?.cancel().catch(() => undefined);
+      throw new OpenAiGatewayError('PROVIDER_REDIRECT_FORBIDDEN', 'OpenAI request left its configured endpoint.');
+    }
+    return await consume(response);
   } catch (error) {
     if (controller.signal.aborted) {
       throw new OpenAiGatewayError('PROVIDER_TIMEOUT', `OpenAI request exceeded ${timeoutMs} ms.`, {
         retryable: true,
       });
     }
+    if (error instanceof OpenAiGatewayError) throw error;
     const safeMessage = redactSecretText(
       error instanceof Error ? error.message : String(error),
     ).text;
@@ -400,22 +411,39 @@ export class OpenAiResponsesAdapter {
     };
   }
 
+  async #request<T>(
+    url: string,
+    init: RequestInit,
+    operation: string,
+    consume: (response: Response, maximumBytes: number) => Promise<T>,
+  ): Promise<T> {
+    return fetchWithTimeout(this.#fetch, url, init, this.#timeoutMs, async (response) => {
+      const limit = this.#routing.api.max_response_bytes;
+      if (response.ok) return consume(response, limit);
+      let body: unknown = null;
+      try {
+        body = await readJson(response, limit);
+      } catch (error) {
+        if (!(error instanceof OpenAiGatewayError) ||
+            (error.code !== 'PROVIDER_RESPONSE_INVALID_JSON' && error.code !== 'PROVIDER_RESPONSE_INVALID_UTF8')) {
+          throw error;
+        }
+      }
+      throw classifyProviderHttpError(response.status, body, `${operation} returned HTTP ${response.status}.`);
+    });
+  }
+
+  #requestJson(url: string, init: RequestInit, operation: string): Promise<unknown> {
+    return this.#request(url, init, operation, readJson);
+  }
+
   /** No-token provider/model health probe used to clear a controlled budget pause. */
   public async probeModel(model: string): Promise<{ readonly id: string }> {
-    const response = await fetchWithTimeout(
-      this.#fetch,
+    const body = await this.#requestJson(
       `${endpoint(this.#routing.api.base_url, this.#routing.api.models_path)}/${encodeURIComponent(model)}`,
       { method: 'GET', headers: this.#headers() },
-      this.#timeoutMs,
+      'OpenAI model probe',
     );
-    const body = await readJson(response, this.#routing.api.max_response_bytes);
-    if (!response.ok) {
-      throw classifyProviderHttpError(
-        response.status,
-        body,
-        `OpenAI model probe returned HTTP ${response.status}.`,
-      );
-    }
     const record = asRecord(body);
     const id = record?.['id'];
     if (typeof id !== 'string' || id !== model) {
@@ -428,32 +456,20 @@ export class OpenAiResponsesAdapter {
   }
 
   public async invokeInteractive(request: OpenAiRequest): Promise<OpenAiCompletedResponse> {
-    const response = await fetchWithTimeout(
-      this.#fetch,
+    return this.#request(
       endpoint(this.#routing.api.base_url, this.#routing.api.responses_path),
       {
         method: 'POST',
         headers: this.#headers(),
         body: JSON.stringify(this.#responseBody(request)),
       },
-      this.#timeoutMs,
+      'OpenAI Responses API',
+      async (response, limit) => parseCompletedResponse(
+        await readJson(response, limit),
+        response.headers.get('x-request-id'),
+        request.model,
+      ),
     );
-    const body = await readJson(response, this.#routing.api.max_response_bytes);
-    if (!response.ok) {
-      throw classifyProviderHttpError(
-        response.status,
-        body,
-        `OpenAI Responses API returned HTTP ${response.status}.`,
-      );
-    }
-    const completed = parseCompletedResponse(body, response.headers.get('x-request-id'));
-    if (completed.model !== request.model) {
-      throw new OpenAiGatewayError(
-        'PROVIDER_MODEL_ID_MISMATCH',
-        `OpenAI response expected model ${request.model}, received ${completed.model}.`,
-      );
-    }
-    return completed;
   }
 
   public async submitBatch(request: OpenAiRequest): Promise<OpenAiBatchSubmission> {
@@ -467,24 +483,14 @@ export class OpenAiResponsesAdapter {
     form.set('purpose', 'batch');
     form.set('file', new Blob([`${line}\n`], { type: 'application/jsonl' }), `${request.callId}.jsonl`);
 
-    const uploadResponse = await fetchWithTimeout(
-      this.#fetch,
+    const uploadBody = await this.#requestJson(
       endpoint(this.#routing.api.base_url, this.#routing.api.files_path),
       { method: 'POST', headers: { Authorization: `Bearer ${this.#apiKey}` }, body: form },
-      this.#timeoutMs,
+      'OpenAI file upload',
     );
-    const uploadBody = await readJson(uploadResponse, this.#routing.api.max_response_bytes);
-    if (!uploadResponse.ok) {
-      throw classifyProviderHttpError(
-        uploadResponse.status,
-        uploadBody,
-        `OpenAI file upload returned HTTP ${uploadResponse.status}.`,
-      );
-    }
     const upload = uploadSchema.parse(uploadBody);
 
-    const batchResponse = await fetchWithTimeout(
-      this.#fetch,
+    const batchBody = await this.#requestJson(
       endpoint(this.#routing.api.base_url, this.#routing.api.batches_path),
       {
         method: 'POST',
@@ -496,16 +502,8 @@ export class OpenAiResponsesAdapter {
           metadata: { clue_call_id: request.callId },
         }),
       },
-      this.#timeoutMs,
+      'OpenAI Batch API',
     );
-    const batchBody = await readJson(batchResponse, this.#routing.api.max_response_bytes);
-    if (!batchResponse.ok) {
-      throw classifyProviderHttpError(
-        batchResponse.status,
-        batchBody,
-        `OpenAI Batch API returned HTTP ${batchResponse.status}.`,
-      );
-    }
     const batch = batchSchema.parse(batchBody);
     return {
       inputFileId: upload.id,
@@ -520,20 +518,11 @@ export class OpenAiResponsesAdapter {
     callId: string,
     expectedModel: string | null = null,
   ): Promise<OpenAiBatchReconciliation> {
-    const batchResponse = await fetchWithTimeout(
-      this.#fetch,
+    const batchBody = await this.#requestJson(
       `${endpoint(this.#routing.api.base_url, this.#routing.api.batches_path)}/${encodeURIComponent(providerBatchId)}`,
       { method: 'GET', headers: this.#headers() },
-      this.#timeoutMs,
+      'OpenAI Batch API',
     );
-    const batchBody = await readJson(batchResponse, this.#routing.api.max_response_bytes);
-    if (!batchResponse.ok) {
-      throw classifyProviderHttpError(
-        batchResponse.status,
-        batchBody,
-        `OpenAI Batch API returned HTTP ${batchResponse.status}.`,
-      );
-    }
     const batch = batchSchema.parse(batchBody);
     if (batch.id !== providerBatchId) {
       throw new OpenAiGatewayError(
@@ -581,31 +570,22 @@ export class OpenAiResponsesAdapter {
         raw: batchBody,
       };
     }
-    const outputResponse = await fetchWithTimeout(
-      this.#fetch,
+    const text = await this.#request(
       `${endpoint(this.#routing.api.base_url, this.#routing.api.files_path)}/${encodeURIComponent(outputFileId)}/content`,
       { method: 'GET', headers: { Authorization: `Bearer ${this.#apiKey}` } },
-      this.#timeoutMs,
+      'OpenAI output download',
+      readText,
     );
-    if (!outputResponse.ok) {
-      const body = await readJson(outputResponse, this.#routing.api.max_response_bytes);
-      throw classifyProviderHttpError(
-        outputResponse.status,
-        body,
-        `OpenAI output download returned HTTP ${outputResponse.status}.`,
-      );
-    }
-    const text = await readText(outputResponse, this.#routing.api.max_response_bytes);
     let selected: z.infer<typeof batchOutputLineSchema> | null = null;
     for (const [index, line] of text.split(/\r?\n/u).entries()) {
       if (line.trim().length === 0) continue;
       let value: unknown;
       try {
         value = JSON.parse(line) as unknown;
-      } catch (error) {
+      } catch {
         throw new OpenAiGatewayError(
           'BATCH_OUTPUT_INVALID_JSONL',
-          `Batch output line ${index + 1} is not JSON: ${(error as Error).message}`,
+          `Batch output line ${index + 1} is not valid JSON.`,
         );
       }
       const parsed = batchOutputLineSchema.parse(value);

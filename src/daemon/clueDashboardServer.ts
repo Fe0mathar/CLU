@@ -9,8 +9,8 @@
  *
  * Read/write discipline. The server itself opens the runtime WITHOUT the event-log
  * writer lock: a live dashboard must never lock out recognition. The one writer is the
- * recognition pipeline, and the control plane here launches it as a CHILD PROCESS
- * (`clue snapshot` then `clue recognize --navigator`), so the single-writer lock is
+ * cycle driver, and the control plane here launches it as a child process
+ * (`clue cycle drive --navigator`), so the single-writer lock is
  * held by exactly the process doing the writing. While the child runs, this server
  * keeps re-deriving the sealed snapshot; SQLite WAL makes the concurrent reads safe,
  * and a read that races a write simply retries on the next tick.
@@ -24,10 +24,11 @@
  */
 
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { createReadStream, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { createReadStream, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { open } from 'node:fs/promises';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { extname, join, relative, resolve, sep } from 'node:path';
+import { isIP } from 'node:net';
+import { extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 import { ConsoleStateService } from './consoleStateService.js';
 import { parseConsoleSnapshot, type ConsoleSnapshot } from '../ui/viewModel.js';
@@ -39,7 +40,21 @@ import { describeTargetPublication } from '../shared/targetPublication.js';
 import { readProofBoard } from './proofBoardProjection.js';
 import { assessP2Closure } from '../closure/p2ClosureAssessment.js';
 import { manualGitSync, manualProjectGitSync } from '../integration/git/manualGitSync.js';
+import { launchGitHubProfileSignIn } from '../integration/git/githubProfileConnection.js';
+import { checkDashboardCmd, checkDashboardReadiness, readinessRequestSchema, type DashboardReadiness, type ReadinessCapability } from './dashboardReadiness.js';
+import { createDashboardChromeTest, type DashboardChromeTestRunner } from './dashboardChromeTest.js';
+import { probeDashboardConsole } from './dashboardConsoleProbe.js';
+import { createDashboardSessionTest, dashboardSessionTestRequestSchema } from './dashboardSessionTest.js';
+import { DASHBOARD_WEBGPU_CANARY_URL, withDashboardWebGpuCanary } from './dashboardWebGpuCanary.js';
+import { runProjectBrowserScenario } from '../experiment/browser/projectBrowserRun.js';
+import { originAllowed as chromeOriginAllowed } from '../experiment/browser/browserAgent.js';
+import { dashboardReadinessScope, readDashboardReadinessReceipts, rememberDashboardReadiness } from './dashboardReadinessReceipt.js';
 import { readGatewayStatus, type GatewayStatus } from '../ai/gateway/modelGateway.js';
+import {
+  hasWindowsOpenAiCredentialReference,
+  legacyWindowsOpenAiCredentialReference,
+  promptLegacyWindowsOpenAiCredential,
+} from '../control/projectProfiles/windowsOpenAiCredential.js';
 import {
   configuredProjectProfilesRoot,
   ProjectProfileRegistry,
@@ -50,6 +65,8 @@ import {
   ProjectProfilesApiService,
 } from './projectProfilesApi.js';
 import type { Actor, ProjectProfileRecord } from '../shared/schemas.js';
+import { hashCanonicalJson } from '../shared/ids.js';
+import { createDashboardAgent, DASHBOARD_AGENT_BODY_LIMIT } from './dashboardAgent.js';
 
 
 /** Controlled-pause gate shared by the start endpoint and its regression test. */
@@ -80,7 +97,11 @@ const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1', '[::1]']);
 
 function isLoopbackHost(host: string): boolean {
   const bare = host.replace(/^\[|\]$/gu, '').toLowerCase();
-  return LOOPBACK_HOSTS.has(bare) || bare.startsWith('127.');
+  return LOOPBACK_HOSTS.has(bare) || (isIP(bare) === 4 && bare.startsWith('127.'));
+}
+
+function httpHost(host: string): string {
+  return isIP(host) === 6 ? `[${host}]` : host;
 }
 
 /**
@@ -94,7 +115,7 @@ function isLoopbackHost(host: string): boolean {
 function hostHeaderMatches(header: string | undefined, host: string, port: number): boolean {
   if (header === undefined) return false;
   const seen = header.toLowerCase();
-  const expected = new Set([`${host.toLowerCase()}:${String(port)}`]);
+  const expected = new Set([`${httpHost(host).toLowerCase()}:${String(port)}`]);
   if (isLoopbackHost(host)) {
     for (const alias of ['127.0.0.1', 'localhost', '[::1]']) {
       expected.add(`${alias}:${String(port)}`);
@@ -115,7 +136,7 @@ function hostHeaderMatches(header: string | undefined, host: string, port: numbe
  */
 function originAllowed(origin: string | undefined, host: string, port: number): boolean {
   if (origin === undefined || origin === 'null') return origin === undefined;
-  const allowed = new Set([`http://${host}:${String(port)}`]);
+  const allowed = new Set([`http://${httpHost(host)}:${String(port)}`]);
   if (isLoopbackHost(host)) {
     for (const alias of ['127.0.0.1', 'localhost', '[::1]']) {
       allowed.add(`http://${alias}:${String(port)}`);
@@ -163,6 +184,10 @@ export interface ClueDashboardOptions {
   readonly profilesRoot?: string;
   /** Atomic live switch seam. Omitted by legacy single-runtime dashboard startup. */
   readonly activateProjectProfile?: (record: ProjectProfileRecord, actor: Actor) => Promise<unknown> | unknown;
+  /** Scenario runner seam for dashboard tests. The default runs the installed WebGPU canary. */
+  readonly chromeTestRun?: DashboardChromeTestRunner;
+  /** Probe seam for dashboard tests. The default verifies the governed PowerShell host. */
+  readonly consoleTestRun?: (runtime: Runtime, record: ProjectProfileRecord) => Promise<DashboardReadiness>;
 }
 
 export interface ClueDashboardHandle {
@@ -240,8 +265,9 @@ export async function startClueDashboard(
   runtime: Runtime,
   options: ClueDashboardOptions,
 ): Promise<ClueDashboardHandle> {
-  const host = options.host ?? '127.0.0.1';
+  const host = (options.host ?? '127.0.0.1').replace(/^\[([^\]]+)\]$/u, '$1');
   const port = options.port ?? 47900;
+  let boundPort = port;
   const refreshMs = options.refreshIntervalMs ?? 1000;
   const authToken = options.authToken;
   // Generous by design: recognition over a large target legitimately takes minutes, and a budget
@@ -292,14 +318,6 @@ export async function startClueDashboard(
       : { activateProject: options.activateProjectProfile }),
   });
 
-  const refreshTimer = setInterval(() => {
-    try {
-      service.refresh();
-    } catch {
-      /* transient read/write race while the recognition child writes; next tick recovers */
-    }
-  }, Math.max(250, refreshMs));
-
   /* ---------------------------- control plane ---------------------------- */
 
   const run: RunState = {
@@ -312,7 +330,47 @@ export async function startClueDashboard(
     receipts: [],
   };
   let child: ChildProcess | null = null;
+  let stopping = false;
+  const activeReadinessChecks = new Set<ReadinessCapability>();
+  const chromeTest = createDashboardChromeTest(
+    options.chromeTestRun ?? ((record, assertRunning) => withDashboardWebGpuCanary(
+      runtime.repoRoot,
+      (scenario) => runProjectBrowserScenario(runtime.repoRoot, record.profile.projectId, scenario, assertRunning),
+      assertRunning,
+    )),
+    () => {
+      if (stopping) throw new Error('The dashboard is shutting down.');
+      if (!dashboardProfileCurrent()) throw new Error('Project settings changed. Restart the dashboard before testing Chrome.');
+    },
+    (text) => runtime.secrets.redact(text),
+  );
+  const consoleTest = createDashboardSessionTest(
+    'Test Console',
+    'Running Test Console. The diagnostic host closes automatically.',
+    async (record, assertRunning) => {
+      const result = await (options.consoleTestRun ?? probeDashboardConsole)(runtime, record);
+      if (result.state !== 'ready') return result;
+      assertRunning();
+      const cmd = await checkDashboardCmd(runtime);
+      return {
+        ...result,
+        checks: [...result.checks, cmd, {
+          label: 'Elevated operations', state: 'unknown', detail: 'This test verifies the governed host at its current privileges.',
+        }],
+      } satisfies DashboardReadiness;
+    },
+    () => {
+      if (stopping) throw new Error('The dashboard is shutting down.');
+      if (!dashboardProfileCurrent()) throw new Error('Project settings changed. Restart the dashboard before testing Console.');
+    },
+    (text) => runtime.secrets.redact(text),
+  );
   const cliEntry = join(runtime.repoRoot, 'dist', 'src', 'cli', 'index.js');
+  const expectedRuntime = hashCanonicalJson([
+    runtime.config.project.root,
+    runtime.workspaceRoot,
+    runtime.projectBinding?.recognition.identity ?? null,
+  ]);
 
   /**
    * Launches one pipeline phase as a child process, under a time budget.
@@ -330,16 +388,16 @@ export async function startClueDashboard(
    * budget" and "the run returned a non-zero exit code" are different facts about different
    * problems, and collapsing them would send an operator to read a log that says nothing.
    */
-  function launchPhase(phase: 'snapshot' | 'recognize', onDone: (code: number) => void): void {
+  function launchCycle(): void {
+    const phase = 'cycle';
     run.phase = phase;
     const startedAt = new Date().toISOString();
     const startedMs = Date.now();
-    const args =
-      phase === 'snapshot' ? [cliEntry, 'snapshot'] : [cliEntry, 'recognize', '--navigator'];
+    const args = [cliEntry, 'cycle', 'drive', '--navigator', '--expect-runtime', expectedRuntime];
     const env = { ...process.env };
-    const gatewayCredential = runtime.config.gateway.api_key_env.toUpperCase();
+    const credentials = new Set(['OPENAI_API_KEY', runtime.config.gateway.api_key_env.toUpperCase()]);
     for (const name of Object.keys(env)) {
-      if (name.toUpperCase() === gatewayCredential || name.toUpperCase() === 'OPENAI_API_KEY') delete env[name];
+      if (credentials.has(name.toUpperCase())) delete env[name];
     }
     const spawned = spawn(process.execPath, args, { cwd: runtime.repoRoot, env });
     child = spawned;
@@ -355,6 +413,10 @@ export async function startClueDashboard(
     };
     spawned.stdout?.on('data', consume);
     spawned.stderr?.on('data', consume);
+    spawned.once('error', (error) => {
+      phaseLastLine = `Cycle process could not start: ${error.message}`;
+      run.lastLine = phaseLastLine;
+    });
 
     const killTimer = setTimeout(() => {
       timedOut = true;
@@ -382,20 +444,29 @@ export async function startClueDashboard(
         timedOut,
         lastLine: phaseLastLine,
       });
+      run.state = timedOut ? 'timeout' : code === 0 ? 'completed' : 'failed';
+      run.exitCode = code;
+      run.finishedAt = finishedAt;
+      run.phase = null;
       if (timedOut) {
-        run.state = 'timeout';
-        run.exitCode = code;
-        run.finishedAt = finishedAt;
-        run.phase = null;
         run.lastLine =
           `${phase} exceeded its ${String(childTimeoutMs)} ms budget and was terminated`;
-        return; // the pipeline does not continue past a phase that never finished
       }
-      onDone(code ?? 1);
+      try { service.refresh(); } catch { /* the next tick retries */ }
     });
   }
 
-  function startPipeline(): { started: boolean; reason?: string } {
+  type StartResult =
+    | { readonly started: true }
+    | { readonly started: false; readonly code: string; readonly reason: string; readonly message: string };
+
+  function startRefused(code: string, reason: string): StartResult {
+    return { started: false, code, reason, message: reason };
+  }
+
+  function startPipeline(): StartResult {
+    if (stopping) return startRefused('DASHBOARD_STOPPING', 'The dashboard is stopping.');
+    if (run.state === 'running') return startRefused('RUN_IN_PROGRESS', 'A cycle drive is already in progress.');
     // Provider billing authority is fail-closed. Finish any already durable write, but refuse
     // a new pipeline before spawning a child while the event-backed controlled pause is active.
     if (runtime.config.gateway.enabled) {
@@ -403,45 +474,57 @@ export async function startClueDashboard(
         const gateway = readGatewayStatus(runtime);
         const pauseReason = gatewayPipelineStartRefusal(gateway);
         if (pauseReason !== null) {
-          return { started: false, reason: `provider-budget-paused: ${pauseReason}` };
+          return startRefused('PROVIDER_BUDGET_PAUSED', pauseReason);
         }
       } catch (error) {
-        return {
-          started: false,
-          reason: `gateway-status-unavailable: ${error instanceof Error ? error.message : String(error)}`,
-        };
+        return startRefused(
+          'GATEWAY_STATUS_UNAVAILABLE',
+          `Gateway status unavailable: ${error instanceof Error ? error.message : String(error)}`,
+        );
       }
     }
-    // Only an in-flight run blocks a new one. `timeout` deliberately does not: the child was
-    // terminated, so nothing is holding the writer lock, and refusing forever would reproduce
-    // the wedge this budget exists to prevent.
-    if (run.state === 'running') return { started: false, reason: 'a run is already in progress' };
     run.state = 'running';
     run.startedAt = new Date().toISOString();
     run.finishedAt = null;
     run.exitCode = null;
     run.lastLine = null;
-    launchPhase('snapshot', (snapshotCode) => {
-      if (snapshotCode !== 0) {
-        run.state = 'failed';
-        run.exitCode = snapshotCode;
-        run.finishedAt = new Date().toISOString();
-        run.phase = null;
-        return;
-      }
-      launchPhase('recognize', (recognizeCode) => {
-        run.state = recognizeCode === 0 ? 'completed' : 'failed';
-        run.exitCode = recognizeCode;
-        run.finishedAt = new Date().toISOString();
-        run.phase = null;
-        try {
-          service.refresh();
-        } catch {
-          /* next tick */
-        }
-      });
-    });
+    run.receipts.length = 0;
+    try {
+      launchCycle();
+    } catch (error) {
+      run.state = 'failed';
+      run.phase = null;
+      run.finishedAt = new Date().toISOString();
+      run.lastLine = error instanceof Error ? error.message : String(error);
+      return startRefused('CYCLE_LAUNCH_FAILED', run.lastLine);
+    }
     return { started: true };
+  }
+
+  const dashboardAgent = createDashboardAgent({
+    gateway: {
+      repoRoot: runtime.repoRoot,
+      expectedRuntimeDigest: expectedRuntime,
+      ...(runtime.projectProfile === null ? {} : { projectProfile: runtime.projectProfile }),
+    },
+    snapshot: () => sink.current?.snapshot ?? null,
+    run: () => run,
+    stopping: () => stopping,
+    start: startPipeline,
+    redact: (text) => runtime.secrets.redact(text),
+  });
+
+  function dashboardProfileCurrent(): boolean {
+    const active = runtime.projectProfile;
+    if (active === null) return true; // Gateway admission independently checks the runtime digest.
+    try {
+      const saved = projectProfilesRegistry.getProfile(active.profile.projectId);
+      const pointer = projectProfilesRegistry.active();
+      return saved.generation === active.generation && saved.projectProfileHash === active.projectProfileHash &&
+        (pointer === null || pointer.projectId === active.profile.projectId);
+    } catch {
+      return false;
+    }
   }
 
   /* ------------------------- config readiness view ------------------------ */
@@ -505,6 +588,9 @@ export async function startClueDashboard(
       workspaceInitialised: existsSync(join(runtime.workspaceRoot, 'db')),
       committedGraphPointer: pointer,
       gatewayControl,
+      chromeTest: isLoopbackHost(host) && dashboardProfileCurrent() ? chromeTest.read(runtime.projectProfile) : null,
+      consoleTest: isLoopbackHost(host) && dashboardProfileCurrent() ? consoleTest.read(runtime.projectProfile) : null,
+      legacyConnectionControls: runtime.projectProfile === null && isLoopbackHost(host),
       projectProfiles: {
         apiVersion: PROJECT_PROFILES_API_VERSION,
         registryRoot: profilesRoot,
@@ -598,7 +684,7 @@ export async function startClueDashboard(
     return catalogues;
   }
 
-  function readRequestBody(request: IncomingMessage): Promise<string> {
+  function readRequestBody(request: IncomingMessage, maxBytes = MAX_CATALOGUE_BYTES): Promise<string> {
     return new Promise((resolveBody, rejectBody) => {
       const chunks: Buffer[] = [];
       let size = 0;
@@ -615,8 +701,10 @@ export async function startClueDashboard(
         if (settled) return; // keep draining the socket without retaining any more bytes
         const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
         size += bytes.length;
-        if (size > MAX_CATALOGUE_BYTES) {
-          rejectOnce(new Error('catalogue exceeds the 2 MB limit'));
+        if (size > maxBytes) {
+          rejectOnce(new Error(maxBytes === MAX_CATALOGUE_BYTES
+            ? 'catalogue exceeds the 2 MB limit'
+            : 'request body exceeds the configured limit'));
           return;
         }
         chunks.push(bytes);
@@ -637,20 +725,36 @@ export async function startClueDashboard(
     { prefix: '/navigator-src/', root: join(runtime.repoRoot, 'ui', 'system-navigator', 'src') },
   ];
 
-  function serveStatic(pathname: string, response: ServerResponse): boolean {
+  function isOutsideRoot(root: string, target: string): boolean {
+    const traversal = relative(root, target);
+    return isAbsolute(traversal) || traversal.startsWith(`..${sep}`) || traversal === '..';
+  }
+
+  function serveStatic(pathname: string, response: ServerResponse, headOnly: boolean): boolean {
     const mapped =
       pathname === '/' ? { prefix: '/ui/', rest: 'index.html' } : matchStatic(pathname);
     if (mapped === null) return false;
     const rootEntry = staticRoots.find((entry) => entry.prefix === mapped.prefix);
     if (rootEntry === undefined) return false;
-    const target = resolve(rootEntry.root, mapped.rest);
-    const traversal = relative(rootEntry.root, target);
-    if (traversal.startsWith(`..${sep}`) || traversal === '..') {
+    let target: string;
+    try {
+      target = resolve(rootEntry.root, decodeURIComponent(mapped.rest));
+    } catch {
+      response.writeHead(400).end('Invalid asset path.');
+      return true;
+    }
+    if (isOutsideRoot(rootEntry.root, target)) {
       response.writeHead(403).end('Forbidden.');
       return true;
     }
     let fileStat;
     try {
+      const realRoot = realpathSync(rootEntry.root);
+      target = realpathSync(target);
+      if (isOutsideRoot(realRoot, target)) {
+        response.writeHead(403).end('Forbidden.');
+        return true;
+      }
       fileStat = statSync(target);
     } catch {
       response.writeHead(404).end('Not found.');
@@ -663,15 +767,22 @@ export async function startClueDashboard(
     response.writeHead(200, {
       'content-type': MIME[extname(target).toLowerCase()] ?? 'application/octet-stream',
       'cache-control': 'no-cache',
+      'x-content-type-options': 'nosniff',
     });
-    createReadStream(target).pipe(response);
+    if (headOnly) {
+      response.end();
+    } else {
+      const stream = createReadStream(target);
+      stream.once('error', () => response.destroy());
+      stream.pipe(response);
+    }
     return true;
   }
 
   function matchStatic(pathname: string): { prefix: string; rest: string } | null {
     for (const entry of staticRoots) {
       if (pathname.startsWith(entry.prefix)) {
-        return { prefix: entry.prefix, rest: decodeURIComponent(pathname.slice(entry.prefix.length)) };
+        return { prefix: entry.prefix, rest: pathname.slice(entry.prefix.length) };
       }
     }
     return null;
@@ -927,12 +1038,12 @@ export async function startClueDashboard(
     };
 
     const hostHeader = request.headers.host;
-    if (!hostHeaderMatches(hostHeader, host, port)) {
+    if (!hostHeaderMatches(hostHeader, host, boundPort)) {
       return deny('Host header does not name this server');
     }
 
     const origin = request.headers.origin;
-    if (!originAllowed(typeof origin === 'string' ? origin : undefined, host, port)) {
+    if (!originAllowed(typeof origin === 'string' ? origin : undefined, host, boundPort)) {
       return deny('cross-origin request');
     }
 
@@ -958,7 +1069,7 @@ export async function startClueDashboard(
   async function handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
     if (refuseIfDisallowed(request, response)) return;
 
-    const url = new URL(request.url ?? '/', `http://${host}:${port}`);
+    const url = new URL(request.url ?? '/', `http://${httpHost(host)}:${boundPort}`);
     const pathname = url.pathname;
 
     if (await handleProjectProfilesApiRequest(request, response, projectProfilesApi, url)) return;
@@ -968,18 +1079,8 @@ export async function startClueDashboard(
       response.end(JSON.stringify(sink.current));
       return;
     }
-    // SC2 §17 — specialized status endpoints. Each returns a projection OF THE SAME sealed
-    // frame revision (never an independent registry read), so the Dashboard, CLI, and these
-    // APIs cannot disagree: one revision, one seal, several views.
-    // DEV-P1-16: this route is the Status Contract's own §17 endpoint and it served the
-    // console projection — a different schema under the contract's name. Any consumer that
-    // read §17 and called it got a `ConsoleSnapshot`, and §20 gate 4 ("the UI, CLI and API
-    // return the same body/hash") could not hold while the API's Status route did not serve
-    // Status. It now projects the sealed Status body through the same composition `clue
-    // status` uses, so the three surfaces describe one workspace identically.
-    //
-    // The console projection did not lose its endpoint: it moved to `/api/console/current`,
-    // which names what it actually is.
+    // Status is a fresh capture through the same composition as `clue status`. The
+    // console-specific endpoints below instead serve the already-published frame revision.
     if (request.method === 'GET' && pathname === '/api/status/current') {
       const { snapshot: status } = projectStatusFromRuntime(runtime, {
         capturedAt: new Date().toISOString(),
@@ -1195,6 +1296,180 @@ export async function startClueDashboard(
       response.end(JSON.stringify({ stored: relative(runtime.repoRoot, file), catalogues: listCatalogues() }));
       return;
     }
+    if (request.method === 'GET' && pathname === '/api/control/readiness') {
+      const receipts = isLoopbackHost(host) && dashboardProfileCurrent()
+        ? readDashboardReadinessReceipts(runtime.workspaceRoot, dashboardReadinessScope(runtime)) : {};
+      response.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+      response.end(JSON.stringify({ receipts }));
+      return;
+    }
+    if (request.method === 'POST' && (pathname === '/api/control/chrome-test' || pathname === '/api/control/console-test')) {
+      const isChrome = pathname === '/api/control/chrome-test';
+      const label = isChrome ? 'Test Chrome' : 'Test Console';
+      const send = (status: number, body: DashboardReadiness): void => {
+        response.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+        response.end(JSON.stringify(body));
+      };
+      if (!isLoopbackHost(host)) {
+        send(403, { state: 'failed', summary: `${label} requires the local dashboard.`, checks: [] });
+        return;
+      }
+      if (request.headers['content-type']?.split(';', 1)[0]?.trim().toLowerCase() !== 'application/json') {
+        send(415, { state: 'failed', summary: `${label} requires a JSON request.`, checks: [] });
+        return;
+      }
+      let raw: string;
+      try {
+        raw = await readRequestBody(request, 512);
+      } catch {
+        send(413, { state: 'failed', summary: `The ${label} request exceeds its size limit.`, checks: [] });
+        return;
+      }
+      let input: unknown;
+      try { input = JSON.parse(raw); } catch { /* Invalid JSON is handled by the schema. */ }
+      const payload = dashboardSessionTestRequestSchema.safeParse(input);
+      if (!payload.success) {
+        send(400, { state: 'failed', summary: `${label} requires one exact saved Project Profile.`, checks: [] });
+        return;
+      }
+      const record = runtime.projectProfile;
+      const expected = payload.data;
+      if (stopping || record === null || !dashboardProfileCurrent() || record.profile.projectId !== expected.projectId ||
+          record.generation !== expected.expectedGeneration || record.projectProfileHash !== expected.expectedProfileHash) {
+        send(409, { state: 'pending', summary: `${label} requires the active saved profile. Restart the dashboard if its settings changed.`, checks: [] });
+        return;
+      }
+      if (!isChrome) {
+        if (record.profile.integrations.powershell.autonomousProfile === 'disabled') {
+          send(409, { state: 'pending', summary: 'This Project Profile disables host shell operations.', checks: [] });
+          return;
+        }
+        send(200, await consoleTest.run(record));
+        return;
+      }
+      const chrome = record.profile.integrations.chrome;
+      const target = DASHBOARD_WEBGPU_CANARY_URL;
+      if (chrome.launchMode !== 'CLUE_MANAGED' || chrome.targetUrl === null ||
+          new URL(chrome.targetUrl).href !== target || !chromeOriginAllowed(target, chrome.allowedOrigins)) {
+        send(409, { state: 'pending', summary: 'Save CLUE_MANAGED with target http://127.0.0.1:5179/ and its allowed origin, then restart the dashboard.', checks: [] });
+        return;
+      }
+      send(200, await chromeTest.run(record));
+      return;
+    }
+    if (request.method === 'POST' && pathname === '/api/control/readiness') {
+      const send = (status: number, body: DashboardReadiness): void => {
+        response.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+        response.end(JSON.stringify(body));
+      };
+      if (!isLoopbackHost(host)) {
+        send(403, { state: 'pending', summary: 'Capability checks require the local CLU-E dashboard.', checks: [] });
+        return;
+      }
+      if (request.headers['content-type']?.split(';', 1)[0]?.trim().toLowerCase() !== 'application/json') {
+        send(415, { state: 'failed', summary: 'A JSON readiness request is required.', checks: [] });
+        return;
+      }
+      let raw: string;
+      try {
+        raw = await readRequestBody(request, 512);
+      } catch {
+        send(413, { state: 'failed', summary: 'The readiness request exceeds its size limit.', checks: [] });
+        return;
+      }
+      let input: unknown;
+      try { input = JSON.parse(raw); } catch { /* Invalid JSON is handled by the schema. */ }
+      const payload = readinessRequestSchema.safeParse(input);
+      if (!payload.success) {
+        send(400, { state: 'failed', summary: 'Select one supported readiness capability.', checks: [] });
+        return;
+      }
+      const { capability } = payload.data;
+      if (activeReadinessChecks.has(capability)) {
+        send(409, { state: 'pending', summary: 'This check is already running.', checks: [] });
+        return;
+      }
+      if (capability === 'ai' && (run.state === 'running' || dashboardAgent.isBusy())) {
+        send(409, { state: 'pending', summary: 'Wait for the active cycle or Master Agent turn before testing AI.', checks: [] });
+        return;
+      }
+      const stale = { state: 'pending', summary: 'Project settings changed. Restart the dashboard before checking this configuration.', checks: [] } as const;
+      if (!dashboardProfileCurrent()) {
+        send(409, stale);
+        return;
+      }
+      if (capability === 'chrome') {
+        send(200, chromeTest.read(runtime.projectProfile));
+        return;
+      }
+      if (capability === 'console') {
+        send(200, consoleTest.read(runtime.projectProfile));
+        return;
+      }
+      activeReadinessChecks.add(capability);
+      try {
+        const result = await checkDashboardReadiness(runtime, capability);
+        if (dashboardProfileCurrent()) {
+          rememberDashboardReadiness(runtime.workspaceRoot, dashboardReadinessScope(runtime), capability, result.state);
+          send(200, result);
+        } else send(409, stale);
+      } catch {
+        send(200, { state: 'failed', summary: 'The capability check could not complete. Review the active project configuration.', checks: [] });
+      } finally {
+        activeReadinessChecks.delete(capability);
+      }
+      return;
+    }
+    if (pathname === '/api/control/legacy-openai-key' || pathname === '/api/control/legacy-github-sign-in') {
+      const send = (status: number, state: string, detail: string): void => {
+        response.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+        response.end(JSON.stringify({ state, detail }));
+      };
+      if (!isLoopbackHost(host) || runtime.projectProfile !== null) {
+        send(403, 'unavailable', 'Use the configuration controls for the active Project Profile.');
+        return;
+      }
+      const project = runtime.config.project;
+      const name = runtime.config.gateway.api_key_env;
+      if (request.method === 'GET' && pathname === '/api/control/legacy-openai-key') {
+        if (typeof process.env[name] === 'string' && (process.env[name]?.trim().length ?? 0) >= 8) {
+          send(200, 'environment', 'The current process has a configured key override.');
+        } else if (hasWindowsOpenAiCredentialReference(legacyWindowsOpenAiCredentialReference(project.root, name))) {
+          send(200, 'stored', 'The OpenAI key is saved in Windows Credential Manager for this target.');
+        } else if (process.platform !== 'win32') {
+          send(200, 'unsupported', 'Persistent key entry requires the interactive Windows dashboard.');
+        } else {
+          send(200, 'missing', 'Save the OpenAI key using the Windows key prompt.');
+        }
+        return;
+      }
+      if (request.method !== 'POST') {
+        send(405, 'unavailable', 'This control requires an explicit operator request.');
+        return;
+      }
+      if ((request.headers['content-length'] !== undefined && request.headers['content-length'] !== '0') ||
+          request.headers['transfer-encoding'] !== undefined) {
+        request.resume();
+        send(400, 'failed', 'This control opens a host prompt and accepts no request body.');
+        return;
+      }
+      if (pathname === '/api/control/legacy-github-sign-in') {
+        const result = await launchGitHubProfileSignIn(project.root);
+        send(200, result.state, result.state === 'SIGN_IN_STARTED'
+          ? 'Complete GitHub sign-in in the Windows window. Reopen the dashboard for its live check.'
+          : result.detail);
+        return;
+      }
+      const result = await promptLegacyWindowsOpenAiCredential(project.root, name, project.id);
+      const details = {
+        stored: 'Key saved in Windows Credential Manager for this target. Reopen the dashboard for its live check.',
+        cancelled: 'Key entry was cancelled.',
+        unsupported: 'Key entry requires the interactive Windows dashboard.',
+        failed: 'Windows could not save the key. Complete any existing key prompt and try again.',
+      };
+      send(200, result.state, details[result.state]);
+      return;
+    }
     if (request.method === 'GET' && pathname === '/api/config') {
       response.writeHead(200, {
         'content-type': 'application/json; charset=utf-8',
@@ -1204,12 +1479,59 @@ export async function startClueDashboard(
       return;
     }
     if (request.method === 'GET' && pathname === '/api/run') {
-      response.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+      response.writeHead(200, {
+        'content-type': 'application/json; charset=utf-8',
+        'cache-control': 'no-store',
+      });
       response.end(JSON.stringify(run));
       return;
     }
+    if (request.method === 'POST' && pathname === '/api/control/agent') {
+      const send = (status: number, body: unknown): void => {
+        response.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+        response.end(JSON.stringify(body));
+      };
+      if (request.headers['content-type']?.split(';', 1)[0]?.trim().toLowerCase() !== 'application/json') {
+        send(415, { code: 'AGENT_CONTENT_TYPE', reply: 'The Master Agent requires a JSON request.' });
+        return;
+      }
+      let raw: string;
+      try {
+        raw = await readRequestBody(request, DASHBOARD_AGENT_BODY_LIMIT);
+      } catch {
+        send(413, { code: 'AGENT_BODY_TOO_LARGE', reply: 'The conversation payload exceeds the 32 KiB limit.' });
+        return;
+      }
+      let payload: unknown;
+      try {
+        payload = JSON.parse(raw);
+      } catch {
+        send(400, { code: 'AGENT_INPUT_INVALID', reply: 'The conversation request is not valid JSON.' });
+        return;
+      }
+      if (activeReadinessChecks.has('ai')) {
+        send(409, { code: 'AI_READINESS_BUSY', reply: 'Wait for the active AI readiness check to finish before messaging the Master Agent.' });
+        return;
+      }
+      const stale = { code: 'DASHBOARD_RUNTIME_CHANGED', reply: 'Project settings changed. Restart the dashboard before continuing the conversation.' };
+      if (!dashboardProfileCurrent()) {
+        send(409, stale);
+        return;
+      }
+      const result = await dashboardAgent.ask(payload, () => !response.destroyed && dashboardProfileCurrent());
+      if (!dashboardProfileCurrent()) {
+        send(409, stale);
+        return;
+      }
+      send(result.status, result.body);
+      return;
+    }
     if (request.method === 'POST' && pathname === '/api/control/start') {
-      const result = startPipeline();
+      const result = dashboardAgent.isBusy()
+        ? startRefused('AGENT_BUSY', 'Wait for the Master Agent to finish its current response before starting a cycle.')
+        : activeReadinessChecks.has('ai')
+          ? startRefused('AI_READINESS_BUSY', 'Wait for the active AI readiness check to finish before starting a cycle.')
+          : startPipeline();
       response.writeHead(result.started ? 202 : 409, {
         'content-type': 'application/json; charset=utf-8',
       });
@@ -1217,15 +1539,15 @@ export async function startClueDashboard(
       return;
     }
     if (request.method === 'POST' && pathname === '/api/control/git-sync') {
-      if (run.state === 'running') {
+      if (run.state === 'running' || dashboardAgent.isBusy() || activeReadinessChecks.has('ai')) {
         response.writeHead(200, {
           'content-type': 'application/json; charset=utf-8',
           'cache-control': 'no-store',
         });
         response.end(JSON.stringify({
           state: 'refused',
-          code: 'PIPELINE_RUNNING',
-          detail: 'Git sync is manual and cannot overlap the CLU-E pipeline.',
+          code: run.state === 'running' ? 'PIPELINE_RUNNING' : dashboardAgent.isBusy() ? 'AGENT_BUSY' : 'AI_READINESS_BUSY',
+          detail: 'Wait for the active cycle, Master Agent response or AI readiness check before syncing Git.',
           governedGitLifecycle: false,
         }));
         return;
@@ -1269,24 +1591,49 @@ export async function startClueDashboard(
     }
 
     if (request.method === 'GET' || request.method === 'HEAD') {
-      if (serveStatic(pathname, response)) return;
+      if (serveStatic(pathname, response, request.method === 'HEAD')) return;
     }
     response.writeHead(request.method === 'GET' ? 404 : 405).end('Not found.');
   }
 
   await new Promise<void>((resolveListen, reject) => {
     server.once('error', reject);
-    server.listen(port, host, () => resolveListen());
+    server.listen(port, host, () => {
+      server.off('error', reject);
+      const address = server.address();
+      if (address !== null && typeof address !== 'string') boundPort = address.port;
+      resolveListen();
+    });
   });
 
+  const refreshTimer = setInterval(() => {
+    try {
+      service.refresh();
+    } catch {
+      /* transient read/write race while the cycle child writes; next tick recovers */
+    }
+  }, Math.max(250, refreshMs));
+
   return {
-    url: `http://${host}:${port}/`,
+    url: `http://${httpHost(host)}:${boundPort}/`,
     stop: async (): Promise<void> => {
+      stopping = true;
       clearInterval(refreshTimer);
       for (const stream of eventStreams) stream.end();
       eventStreams.clear();
-      if (child !== null) child.kill('SIGTERM');
-      await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
+      const serverStopped = new Promise<void>((resolveClose) => server.close(() => resolveClose()));
+      const activeChild = child;
+      if (activeChild !== null) {
+        await new Promise<void>((resolveChildClose) => {
+          const escalation = setTimeout(() => activeChild.kill('SIGKILL'), childKillGraceMs);
+          activeChild.once('close', () => {
+            clearTimeout(escalation);
+            resolveChildClose();
+          });
+          activeChild.kill('SIGTERM');
+        });
+      }
+      await serverStopped;
     },
   };
 }

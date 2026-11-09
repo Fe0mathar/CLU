@@ -1,0 +1,66 @@
+{
+  "patch": "P01 Windows Preflight",
+  "predecessor": {
+    "file": "CLU-E_Patch_Dashboard_Test_Console.zip",
+    "sha256": "2793cfae5cb40936d1a361716879562ff552e0222f534d0dd18c39f8e3202dc1"
+  },
+  "files": [
+    {
+      "path": "selftest/command-authority.test.ts",
+      "operation": "replace",
+      "expectedBeforeSha256": "9c44cce5f740638b093344693faec3648bfcbd06d92ded8b8e6ccbe1cb471924",
+      "afterSha256": "c8b8ba70fe99287a93daa6eed3cf2bd9d1f6dc47ed089620a30544916b55b25b"
+    },
+    {
+      "path": "selftest/project-cli.test.ts",
+      "operation": "replace",
+      "expectedBeforeSha256": "4c38ff8faf95c7157bd38cf76958467fd00f88b32ee4b5be6c17cdb595187921",
+      "afterSha256": "47e096676e807610267fa51883c5642069b1b808a1b5f813c8a4600d83cf51ef"
+    },
+    {
+      "path": "selftest/windows-preflight.test.ts",
+      "operation": "add",
+      "expectedBeforeSha256": null,
+      "afterSha256": "e66a23e65b1fed6649cab590b49aaf53e59d52f6974fbb94d009d0672f8f842b"
+    },
+    {
+      "path": "src/cli/commandAuthority.ts",
+      "operation": "replace",
+      "expectedBeforeSha256": "33127ed9d40414fc9fd258d0335fa88bf5ef2a1286a3aea930309f63ed2e73ea",
+      "afterSha256": "5d828e045819a5f23caa7f6b64e60cb9a8b3eaed08ea9acb462c498efba7c471"
+    },
+    {
+      "path": "src/cli/commands/projectCommands.ts",
+      "operation": "replace",
+      "expectedBeforeSha256": "a76687f32079115178c91d014ec902d069ee288af3a3622f6d5712929e66c2f3",
+      "afterSha256": "23d19ebb7dae51a45dbe16f8258585f8e97753eb5c8eb8178e5abe7c61df9817"
+    },
+    {
+      "path": "src/control/projectProfiles/gitReadiness.ts",
+      "operation": "replace",
+      "expectedBeforeSha256": "e01160c28ea636fdeeec1fd97950ab616e3362fc38ab76e51fa99a604c82b0b0",
+      "afterSha256": "0d6c2005c52bb022f19e30243bdf34012f0ba7996215d8f40fb2289ab6d8198a"
+    },
+    {
+      "path": "src/control/projectProfiles/windowsPreflight.ts",
+      "operation": "add",
+      "expectedBeforeSha256": null,
+      "afterSha256": "66eff5635bf31fbf2d23d5c9807331dc231936b1de6981ba188bc8ef2730a8a6"
+    },
+    {
+      "path": "src/control/runtime.ts",
+      "operation": "replace",
+      "expectedBeforeSha256": "59df07e2092001088c4f65c762dc8cc058ae1a54b859accbd9921d1a10fdabd0",
+      "afterSha256": "f46ef9ad78163b04c83be0f68f61b846545bc3482b8ef65f473cff40405d89c3"
+    },
+    {
+      "path": "CLU-E-P01-Preflight.md",
+      "operation": "add",
+      "expectedBeforeSha256": null,
+      "afterSha256": "7f9a72de95b3f28bd147cb0d33df1c8ee6004ece4c7816a7b279ab4b4c8fe77d"
+    }
+  ],
+  "metadataFiles": [
+    "CLU-E-P01-Manifest.json"
+  ]
+}

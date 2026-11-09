@@ -461,6 +461,8 @@ export interface HostProcess {
   onLine(listener: (line: string) => void): void;
   /** Register the exit handler. Fires once. */
   onExit(listener: (code: number | null) => void): void;
+  /** Close the request stream so a one-shot session can finish normally. */
+  closeInput?(): void;
   /** Terminate the host. Idempotent. */
   kill(): void;
 }
@@ -473,14 +475,14 @@ export type HostSpawn = (executable: string, args: readonly string[]) => HostPro
  * its own {@link HostSpawn} never loads the module, and so this file has no static
  * dependency on Node internals beyond types.
  */
-async function defaultSpawn(executable: string, args: readonly string[]): Promise<HostSpawn> {
+async function defaultSpawn(windowsHide: boolean): Promise<HostSpawn> {
   const { spawn } = await import('node:child_process');
   return (exe, spawnArgs) => {
     const env = { ...process.env };
     for (const name of Object.keys(env)) {
-      if (name.toUpperCase() === 'OPENAI_API_KEY') delete env[name];
+      if (SECRET_ENV_NAMES.includes(name.toUpperCase())) delete env[name];
     }
-    const child = spawn(exe, [...spawnArgs], { env, stdio: ['pipe', 'pipe', 'pipe'] });
+    const child = spawn(exe, [...spawnArgs], { env, stdio: ['pipe', 'pipe', 'pipe'], windowsHide });
     let buffer = '';
     const lineListeners: Array<(line: string) => void> = [];
     const exitListeners: Array<(code: number | null) => void> = [];
@@ -520,13 +522,14 @@ async function defaultSpawn(executable: string, args: readonly string[]): Promis
       onExit(listener: (code: number | null) => void): void {
         exitListeners.push(listener);
       },
+      closeInput(): void {
+        child.stdin.end();
+      },
       kill(): void {
         child.kill();
       },
     };
   };
-  void executable;
-  void args;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -850,8 +853,9 @@ export function checkZoneParity(
   // the host-returned resolved path against its own zone roots, and requires that classification to
   // agree with both the host's label and the required zone. A host that resolves into one zone but
   // labels it another — or names a zone for a path that falls outside it — is caught here.
+  const resolvedPath = normaliseAbsolute(path.data);
   if (classifyZone !== undefined) {
-    const clientZone = classifyZone(path.data);
+    const clientZone = classifyZone(resolvedPath);
     if (clientZone !== zone.data) {
       return new HostClientError(
         'ZONE_PARITY_MISMATCH',
@@ -870,7 +874,7 @@ export function checkZoneParity(
   // path the client authorised. A different path inside the same zone (a symlink or junction pointing
   // elsewhere in the zone, or a host substituting one file for another) would otherwise be accepted as
   // evidence for the wrong file. Both sides are compared in the engine's normalised space.
-  if (decision.resolvedTarget !== null && normaliseAbsolute(path.data) !== decision.resolvedTarget) {
+  if (decision.resolvedTarget !== null && resolvedPath !== decision.resolvedTarget) {
     return new HostClientError(
       'PATH_PARITY_MISMATCH',
       `host resolved ${command} to ${path.data}; the client authorised ${decision.resolvedTarget}. ` +
@@ -964,6 +968,8 @@ export interface HostClientConfig {
   ) => string;
   /** Optional source-faithful mirror of every JSON line sent to and received from the host. */
   readonly operationalConsole?: OperationalConsoleRecorder;
+  /** Suppress Windows host windows for a bounded, dashboard-reported diagnostic session. */
+  readonly quiet?: boolean;
   /** Optional injected spawner for testing. Defaults to `node:child_process`. */
   readonly spawn?: HostSpawn;
   /**
@@ -992,6 +998,8 @@ export class HostClient {
   private readonly config: HostClientConfig;
   private readonly env: Readonly<Record<string, string | undefined>>;
   private process: HostProcess | null = null;
+  private processExit: Promise<number | null> | null = null;
+  private closingProcess: HostProcess | null = null;
   private observer: WindowsHostObserver | null = null;
   private banner: HostBanner | null = null;
   private readonly pending = new Map<string, Pending>();
@@ -1032,7 +1040,7 @@ export class HostClient {
 
     let spawner: HostSpawn;
     try {
-      spawner = this.config.spawn ?? (await defaultSpawn(this.config.executable, []));
+      spawner = this.config.spawn ?? (await defaultSpawn(this.config.quiet === true));
     } catch (cause) {
       return err(
         new HostClientError('NO_SPAWNER', `could not obtain a host spawner: ${String(cause)}`),
@@ -1048,7 +1056,7 @@ export class HostClient {
     // process exits before a single line runs — the host would be silent for a reason that has nothing
     // to do with its logic. Bypass affects only THIS invocation, not the machine policy. Harmless on
     // POSIX, where execution policy is Unrestricted.
-    const args = ['-NoLogo', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', this.config.scriptPath];
+    const args = ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', this.config.scriptPath];
     if (this.config.hostRoots !== undefined) {
       args.push(
         '-CanonicalRoot',
@@ -1075,14 +1083,17 @@ export class HostClient {
     }
     this.process = proc;
     this.crashed = false;
-    if (this.config.spawn === undefined) {
+    if (this.config.spawn === undefined && this.config.quiet !== true) {
       this.observer = openWindowsHostObserver();
       this.observer?.show('PowerShell host launched. Verifying the protocol and root bindings.');
     }
 
     proc.onLine((line) => this.handleLine(line));
-    proc.onExit((code) => {
-      if (this.process === proc) this.handleExit(code);
+    this.processExit = new Promise((resolveExit) => {
+      proc.onExit((code) => {
+        if (this.process === proc && this.closingProcess !== proc) this.handleExit(code);
+        resolveExit(code);
+      });
     });
 
     const helloArgs: HelloArgs = {
@@ -1101,6 +1112,8 @@ export class HostClient {
   public stop(): void {
     const proc = this.process;
     this.process = null;
+    this.processExit = null;
+    this.closingProcess = null;
     if (proc !== null) {
       proc.kill();
       this.observer?.show('Host stop requested.');
@@ -1108,6 +1121,34 @@ export class HostClient {
     this.failAllPending(new HostClientError('HOST_CRASHED', 'host stopped by client'));
     this.observer?.finish();
     this.observer = null;
+  }
+
+  /** Close stdin and wait for the host to acknowledge EOF by exiting with code zero. */
+  public async stopAndWait(): Promise<void> {
+    const proc = this.process;
+    const exit = this.processExit;
+    if (exit === null) return;
+    if (proc === null || proc.closeInput === undefined) {
+      throw new HostClientError('HOST_CRASHED', 'PowerShell host cannot complete a graceful shutdown.');
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    this.closingProcess = proc;
+    try {
+      proc.closeInput();
+      const timeout = new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => {
+          reject(new HostClientError('HOST_TIMEOUT', 'PowerShell host did not exit after closing its input.'));
+        }, 3000).unref();
+      });
+      const code = await Promise.race([exit, timeout]);
+      this.process = null;
+      if (code !== 0) {
+        throw new HostClientError('HOST_CRASHED', `PowerShell host shutdown returned exit code ${String(code)}.`);
+      }
+    } finally {
+      clearTimeout(timer);
+      this.stop();
+    }
   }
 
   /* --------------------------- typed commands --------------------------- */

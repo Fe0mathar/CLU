@@ -25,6 +25,7 @@ import {
 } from '../../shared/projectOperationIdentity.js';
 import type { WorkspaceProjectIdentityInput } from '../../memory/db.js';
 import { assertProjectProfileHash } from './profileHash.js';
+import { assertProjectStatePaths } from './projectPathIsolation.js';
 import { inspectProjectAuthority, type ProjectAuthoritySnapshot } from './projectAuthority.js';
 import { assessAuthorityConflicts, type AuthorityConflictAssessment } from './authorityConflict.js';
 import {
@@ -38,6 +39,7 @@ import {
 
 export type ProjectRuntimeBindingErrorCode =
   | 'PROFILE_TARGET_ROOT_IDENTITY_MISMATCH'
+  | 'PROFILE_STATE_PATH_INVALID'
   | 'PROFILE_DEFAULT_KEY_UNSUPPORTED'
   | 'PROFILE_CREDENTIAL_REFERENCE_UNSUPPORTED';
 
@@ -95,6 +97,15 @@ export function resolveProjectRuntimeBinding(
     );
   }
 
+  try {
+    assertProjectStatePaths(record.profile);
+  } catch (error) {
+    throw new ProjectRuntimeBindingError(
+      'PROFILE_STATE_PATH_INVALID',
+      error instanceof Error ? error.message : String(error),
+    );
+  }
+
   const identity = operationIdentityFromProfileRecord(record);
   const state: ProjectRuntimeStateBinding = {
     databasePath: nativePath(record.profile.state.databasePath),
@@ -136,7 +147,9 @@ function configFromProfile(base: ClueConfig, record: ProjectProfileRecord): Clue
   const publication = publicationDecision(record);
   const documentRoots = authorityDocumentRoots(record);
   const browserExecutable = resolveInheritedPath(
-    profile.integrations.chrome.executable,
+    profile.integrations.chrome.executable.defaultKey === 'chrome.executable'
+      ? { ...profile.integrations.chrome.executable, defaultKey: 'browser.executable' }
+      : profile.integrations.chrome.executable,
     'browser.executable',
     base.browser.executable,
   );

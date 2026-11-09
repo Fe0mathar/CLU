@@ -34,12 +34,15 @@
  */
 
 import { readFileSync } from 'node:fs';
-import { relative } from 'node:path';
+import { dirname, relative } from 'node:path';
 
 import ts from 'typescript';
 
 import { hashBytes, hashCanonicalJson, hashText, normalisePath, type Sha256 } from '../../shared/ids.js';
 import type { ProjectRecognitionIdentity } from '../../shared/projectRecognitionIdentity.js';
+import { absolutePathForm } from '../../shared/schemas.js';
+import { ALWAYS_EXCLUDED } from './snapshot.js';
+import { decodeSourceByteRange, sourceTextLayout, type SourceTextLayout } from './sourceEncoding.js';
 
 /**
  * The logical-id algorithm version. Bumped whenever the grammar changes, and recorded in the
@@ -72,8 +75,7 @@ export type UnitKind =
 /**
  * Where a unit lives, precisely enough to re-read it.
  *
- * Byte offsets are UTF-8 and match the snapshot's view of the same file, so a unit and
- * a document claim can be cited in the same units of measurement.
+ * Byte offsets match the captured file, including the encoding prefix when present.
  */
 export interface UnitAnchor {
   readonly path: string;
@@ -328,7 +330,8 @@ export interface RecognizeOptions {
   readonly snapshotId?: string;
   /**
    * The snapshot's file hashes (module path -> raw-byte hash), DEV-P0-03. When supplied, recognition
-   * re-hashes each compiled file's bytes and refuses (RecognitionParityError) unless every one matches;
+   * hashes each compiled file's bytes as they are read and refuses (RecognitionParityError) unless
+   * every project input matches;
    * the basis then records `snapshotParityVerified: true`. Omitting them records the snapshot id as an
    * unverified claim (`snapshotParityVerified: false`), which a recorder can reject.
    */
@@ -361,6 +364,11 @@ export interface SnapshotParityViolation {
   readonly reason: 'not-in-snapshot' | 'hash-mismatch' | 'unreadable';
 }
 
+interface CompilerSourceRead extends SourceTextLayout {
+  readonly text: string;
+  readonly hash: Sha256;
+}
+
 /**
  * Thrown when a recognition is asked to bind to a snapshot but the bytes the compiler read do not
  * match that snapshot (DEV-P0-03). A result that records a snapshot id it never checked is not
@@ -382,7 +390,7 @@ export class RecognitionParityError extends Error {
 /* ------------------------------------------------------------------------- */
 
 /**
- * Maps TypeScript character positions to UTF-8 byte offsets.
+ * Maps TypeScript character positions to byte offsets in the file it read.
  *
  * The compiler counts UTF-16 code units; snapshots, documents, and patches count bytes.
  * Mixing the two produces anchors that look right and point a few bytes early on any
@@ -396,18 +404,20 @@ class ByteMapper {
   private readonly text: string;
   private readonly lineStarts: readonly number[];
   private readonly lineByteStarts: number[];
+  private readonly utf16: boolean;
 
-  public constructor(sourceFile: ts.SourceFile) {
+  public constructor(sourceFile: ts.SourceFile, sourceRead: CompilerSourceRead) {
     this.text = sourceFile.text;
     this.lineStarts = sourceFile.getLineStarts();
     this.lineByteStarts = new Array<number>(this.lineStarts.length).fill(0);
+    this.utf16 = sourceRead.encoding !== 'utf8';
 
-    let byteOffset = 0;
+    let byteOffset = sourceRead.bomBytes;
     for (let line = 0; line < this.lineStarts.length; line += 1) {
       this.lineByteStarts[line] = byteOffset;
       const start = this.lineStarts[line] ?? 0;
       const end = this.lineStarts[line + 1] ?? this.text.length;
-      byteOffset += Buffer.byteLength(this.text.slice(start, end), 'utf8');
+      byteOffset += this.byteLength(start, end);
     }
   }
 
@@ -427,7 +437,11 @@ class ByteMapper {
     const line = this.lineOf(position);
     const lineStart = this.lineStarts[line] ?? 0;
     const lineByteStart = this.lineByteStarts[line] ?? 0;
-    return lineByteStart + Buffer.byteLength(this.text.slice(lineStart, position), 'utf8');
+    return lineByteStart + this.byteLength(lineStart, position);
+  }
+
+  private byteLength(start: number, end: number): number {
+    return this.utf16 ? (end - start) * 2 : Buffer.byteLength(this.text.slice(start, end), 'utf8');
   }
 }
 
@@ -443,43 +457,30 @@ class ByteMapper {
  * resolution than the build is measuring a program that does not exist.
  */
 /**
- * The files where the compiled program diverges from the snapshot (DEV-P0-03). Each project file the
- * program compiled is re-read as raw bytes and hashed the same way the snapshot captured it, so this
- * detects a working tree that has moved on from the snapshot, a file the snapshot never captured, or a
- * file that has become unreadable — the exact ways a claimed binding could be untrue.
+ * Compare the entire compiler input to the snapshot, including files used for dependency
+ * resolution during a restricted extraction. The digest comes from the compiler's read.
  */
 function snapshotParityViolations(
-  projectFiles: readonly ts.SourceFile[],
-  projectRoot: string,
+  projectFiles: readonly ProgramFile[],
   snapshotFiles: ReadonlyMap<string, string>,
 ): SnapshotParityViolation[] {
   const violations: SnapshotParityViolation[] = [];
-  for (const sourceFile of projectFiles) {
-    const modulePath = toModulePath(projectRoot, sourceFile.fileName);
-    const expected = snapshotFiles.get(modulePath);
+  for (const file of projectFiles) {
+    const expected = snapshotFiles.get(file.path);
     if (expected === undefined) {
-      violations.push({ path: modulePath, reason: 'not-in-snapshot' });
-      continue;
+      violations.push({ path: file.path, reason: 'not-in-snapshot' });
+    } else if (file.hash !== expected) {
+      violations.push({ path: file.path, reason: 'hash-mismatch' });
     }
-    let actual: string;
-    try {
-      actual = hashBytes(readFileSync(sourceFile.fileName));
-    } catch {
-      violations.push({ path: modulePath, reason: 'unreadable' });
-      continue;
-    }
-    if (actual !== expected) violations.push({ path: modulePath, reason: 'hash-mismatch' });
   }
   return violations;
 }
 
 export function recognize(options: RecognizeOptions): RecognitionResult {
   const started = Date.now();
-  const { program, parsed } = buildProgram(options);
-  const checker = program.getTypeChecker();
-
   const projectRoot = options.projectRoot;
-  const exclude = new Set(options.exclude ?? []);
+  const exclude = new Set([...ALWAYS_EXCLUDED, ...(options.exclude ?? [])]);
+  const { program, parsed, configText, compilerRead, readViolations } = buildProgram(options, exclude);
   const restrictTo =
     options.restrictTo === undefined ? null : new Set(options.restrictTo.map(normalisePath));
 
@@ -488,11 +489,23 @@ export function recognize(options: RecognizeOptions): RecognitionResult {
   const unresolved: UnresolvedReference[] = [];
 
   const sourceFiles = program.getSourceFiles();
-  const projectFiles = sourceFiles.filter((sourceFile) => {
-    if (!isProjectFile(sourceFile, projectRoot, exclude)) return false;
-    const modulePath = toModulePath(projectRoot, sourceFile.fileName);
-    return restrictTo === null || restrictTo.has(modulePath);
-  });
+  const compilerFiles = sourceFiles.filter((sourceFile) => isProjectFile(sourceFile, projectRoot, exclude))
+    .map((sourceFile) => {
+      const path = toModulePath(projectRoot, sourceFile.fileName);
+      const read = compilerRead(path);
+      if (read === undefined || read.text !== sourceFile.text) {
+        throw new RecognitionParityError(`Compiler input could not be verified for ${path}`, [
+          { path, reason: 'unreadable' },
+        ]);
+      }
+      return { sourceFile, path, read };
+    });
+  const programFiles = compilerFiles
+    .map(({ path, read }) => ({ path, hash: read.hash }))
+    .sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+  const projectFiles = restrictTo === null
+    ? compilerFiles
+    : compilerFiles.filter(({ path }) => restrictTo.has(path));
 
   // DEV-P0-03: snapshot/program parity is verified BEFORE anything is recorded. Recording a snapshot
   // id the recogniser never checked would be a claim, not a binding — so if this recognition names a
@@ -504,7 +517,7 @@ export function recognize(options: RecognizeOptions): RecognitionResult {
   // unverified snapshot id as proof of binding. Carrying an id is a claim; a passed check is a binding.
   let snapshotParityVerified = false;
   if (options.snapshotFiles !== undefined) {
-    const violations = snapshotParityViolations(projectFiles, projectRoot, options.snapshotFiles);
+    const violations = [...readViolations.values(), ...snapshotParityViolations(programFiles, options.snapshotFiles)];
     if (violations.length > 0) {
       throw new RecognitionParityError(
         `recognised program does not match snapshot ${options.snapshotId ?? '(unnamed)'}: ${violations.length} file(s) diverge`,
@@ -513,13 +526,13 @@ export function recognize(options: RecognizeOptions): RecognitionResult {
     }
     snapshotParityVerified = true;
   }
+  const checker = program.getTypeChecker();
 
   observe(options.observer, 'scan-start', (observer) => {
     observer.onScanStart?.({ total: projectFiles.length });
   });
 
-  for (const [index, sourceFile] of projectFiles.entries()) {
-    const modulePath = toModulePath(projectRoot, sourceFile.fileName);
+  for (const [index, { sourceFile, path: modulePath, read }] of projectFiles.entries()) {
 
     observe(options.observer, 'file-start', (observer) => {
       observer.onFileStart?.({ path: modulePath, index, total: projectFiles.length });
@@ -531,6 +544,7 @@ export function recognize(options: RecognizeOptions): RecognitionResult {
 
     recogniseFile({
       sourceFile,
+      sourceRead: read,
       modulePath,
       projectRoot,
       exclude,
@@ -562,10 +576,8 @@ export function recognize(options: RecognizeOptions): RecognitionResult {
   }
 
   const compilerOptionsHash = hashText(JSON.stringify(sortObject(parsed.options as object)));
-  // The raw tsconfig bytes, bound separately from the resolved options: two configs can resolve to
-  // the same effective options yet differ textually (comments, extends chains), and the basis should
-  // record exactly which file governed the run.
-  const tsconfigHash = hashText(ts.sys.readFile(options.tsconfigPath) ?? '');
+  // Bind the actual configuration text separately from the resolved compiler options.
+  const tsconfigHash = hashText(configText);
 
   // Identity invariant: identity-v4 assigns every semantic unit a unique logical id. If two
   // units ever share one, a downstream key would silently merge distinct declarations, so
@@ -601,17 +613,6 @@ export function recognize(options: RecognizeOptions): RecognitionResult {
     }
     resolvedEdges = kept;
   }
-
-  // Recognition basis: bind the exact analysed program. programFilesHash covers every
-  // project file in the ts.Program — not only the extracted subset — so the result names
-  // the precise set of bytes recognition drew its conclusions from.
-  const programFiles = sourceFiles
-    .filter((sourceFile) => isProjectFile(sourceFile, projectRoot, exclude))
-    .map((sourceFile) => ({
-      path: toModulePath(projectRoot, sourceFile.fileName),
-      hash: hashText(sourceFile.text),
-    }))
-    .sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
 
   const basis: RecognitionBasis = {
     identityAlgorithm: RECOGNITION_IDENTITY_ALGORITHM,
@@ -682,11 +683,15 @@ function observe(
   }
 }
 
-function buildProgram(options: RecognizeOptions): {
+function buildProgram(options: RecognizeOptions, exclude: ReadonlySet<string>): {
   program: ts.Program;
   parsed: ts.ParsedCommandLine;
+  configText: string;
+  compilerRead: (modulePath: string) => CompilerSourceRead | undefined;
+  readViolations: ReadonlyMap<string, SnapshotParityViolation>;
 } {
-  const configFile = ts.readConfigFile(options.tsconfigPath, ts.sys.readFile);
+  const configText = ts.sys.readFile(options.tsconfigPath);
+  const configFile = ts.readConfigFile(options.tsconfigPath, () => configText);
   if (configFile.error !== undefined) {
     throw new RecognizerError(
       'CONFIG_UNREADABLE',
@@ -697,7 +702,7 @@ function buildProgram(options: RecognizeOptions): {
   const parsed = ts.parseJsonConfigFileContent(
     configFile.config,
     ts.sys,
-    options.projectRoot,
+    dirname(options.tsconfigPath),
     undefined,
     options.tsconfigPath,
   );
@@ -716,10 +721,52 @@ function buildProgram(options: RecognizeOptions): {
     throw new RecognizerError('NO_INPUTS', `${options.tsconfigPath} matched no input files`);
   }
 
-  return {
-    program: ts.createProgram({ rootNames: parsed.fileNames, options: parsed.options }),
-    parsed,
+  const host = ts.createCompilerHost(parsed.options);
+  const defaultRead = host.readFile;
+  const reads = new Map<string, CompilerSourceRead>();
+  const readViolations = new Map<string, SnapshotParityViolation>();
+  const snapshotFiles = options.snapshotFiles;
+  if (snapshotFiles !== undefined) {
+    const getSourceFile = host.getSourceFile;
+    host.getSourceFile = (fileName, ...args) => {
+      const path = toModulePath(options.projectRoot, fileName);
+      if (isProjectModulePath(path, exclude) && !snapshotFiles.has(path) && host.fileExists(fileName)) {
+        readViolations.set(path, { path, reason: 'not-in-snapshot' });
+        return undefined;
+      }
+      return getSourceFile(fileName, ...args);
+    };
+  }
+  host.readFile = (fileName) => {
+    const modulePath = toModulePath(options.projectRoot, fileName);
+    if (!isProjectModulePath(modulePath, exclude)) return defaultRead(fileName);
+    const key = host.getCanonicalFileName(modulePath);
+    const existing = reads.get(key);
+    if (existing !== undefined) return existing.text;
+    try {
+      const read = readCompilerSource(fileName);
+      reads.set(key, read);
+      return read.text;
+    } catch {
+      if (snapshotFiles?.has(modulePath) === true) {
+        readViolations.set(modulePath, { path: modulePath, reason: 'unreadable' });
+      }
+      return undefined;
+    }
   };
+  return {
+    program: ts.createProgram({ rootNames: parsed.fileNames, options: parsed.options, host }),
+    parsed,
+    configText: configText ?? '',
+    compilerRead: (modulePath) => reads.get(host.getCanonicalFileName(modulePath)),
+    readViolations,
+  };
+}
+
+function readCompilerSource(path: string): CompilerSourceRead {
+  const bytes = readFileSync(path);
+  const layout = sourceTextLayout(bytes);
+  return { ...layout, hash: hashBytes(bytes), text: decodeSourceByteRange(bytes, layout) };
 }
 
 function flattenDiagnostic(diagnostic: ts.Diagnostic): string {
@@ -732,6 +779,7 @@ function flattenDiagnostic(diagnostic: ts.Diagnostic): string {
 
 interface FileContext {
   readonly sourceFile: ts.SourceFile;
+  readonly sourceRead: CompilerSourceRead;
   readonly modulePath: string;
   readonly projectRoot: string;
   readonly exclude: ReadonlySet<string>;
@@ -742,7 +790,7 @@ interface FileContext {
 }
 
 function recogniseFile(context: FileContext): void {
-  const mapper = new ByteMapper(context.sourceFile);
+  const mapper = new ByteMapper(context.sourceFile, context.sourceRead);
   const moduleId = context.modulePath;
 
   context.units.push({
@@ -756,7 +804,7 @@ function recogniseFile(context: FileContext): void {
     anchor: anchorOfRange(context.modulePath, mapper, 0, context.sourceFile.end),
     parentLogicalId: null,
     lineCount: context.sourceFile.getLineStarts().length,
-    byteLength: Buffer.byteLength(context.sourceFile.text, 'utf8'),
+    byteLength: mapper.byteOf(context.sourceFile.end) - mapper.byteOf(0),
     isAsync: false,
     parameterCount: null,
   });
@@ -1610,10 +1658,13 @@ function isProjectFile(
   projectRoot: string,
   exclude: ReadonlySet<string>,
 ): boolean {
-  const modulePath = toModulePath(projectRoot, sourceFile.fileName);
-  if (modulePath.startsWith('../') || modulePath.startsWith('/')) return false;
-  if (modulePath.includes('node_modules/')) return false;
+  return isProjectModulePath(toModulePath(projectRoot, sourceFile.fileName), exclude);
+}
 
+function isProjectModulePath(modulePath: string, exclude: ReadonlySet<string>): boolean {
+  if (modulePath === '..' || modulePath.startsWith('../') || absolutePathForm(modulePath) !== null) {
+    return false;
+  }
   for (const configured of exclude) {
     const rule = normalisePath(configured).replace(/^\.\//u, '').replace(/\/$/u, '');
     if (rule === '') continue;

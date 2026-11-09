@@ -413,12 +413,12 @@ function injectProofBoardStyles() {
 }
 
 export function mountProofBoard({ overlayUi, fetchJson, interfaceApi = null }) {
-  if (!overlayUi || typeof overlayUi.railButton !== 'function' || typeof overlayUi.makeOverlay !== 'function') {
+  if (!overlayUi || typeof overlayUi.panelButton !== 'function' || typeof overlayUi.makeOverlay !== 'function') {
     throw new Error('Proof Board requires the shared overlay UI');
   }
   if (typeof fetchJson !== 'function') throw new Error('Proof Board requires fetchJson');
   injectProofBoardStyles();
-  const button = overlayUi.railButton('proofBoardBtn', '⊢ PROOF', 'Recorded benchmark runs and durable proof verdicts');
+  const button = overlayUi.panelButton('q4', 'proofBoardBtn', '⊢ PROOF', 'Recorded benchmark runs and durable proof verdicts');
   if (!button) throw new Error('Proof Board could not attach to the mission rail');
   const overlay = overlayUi.makeOverlay(
     'proofBoardOverlay',

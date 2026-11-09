@@ -29,6 +29,8 @@ import {
 } from '../../control/benchmarkRun.js';
 import { CycleOrchestrator } from '../../cycle/cycleOrchestrator.js';
 import { readCurrentCycle } from '../../cycle/cycleRegistry.js';
+import { hashCanonicalJson } from '../../shared/ids.js';
+import { resolveNavigatorPath } from './recognizeCommands.js';
 import { printChecks, short, write, type Check } from '../output/formatter.js';
 import { guarded as guardedWith } from './shared.js';
 
@@ -75,10 +77,19 @@ function commandCycleStatus(): number {
 /* clue cycle drive                                                           */
 /* ------------------------------------------------------------------------- */
 
-function commandCycleDrive(): number {
+function commandCycleDrive(options: { navigator?: boolean; expectRuntime?: string }): number {
   return withRuntime({ withLog: true, verifyLog: 'tail' }, (runtime) => {
+    if (options.expectRuntime !== undefined && options.expectRuntime !== hashCanonicalJson([
+      runtime.config.project.root,
+      runtime.workspaceRoot,
+      runtime.projectBinding?.recognition.identity ?? null,
+    ])) {
+      throw new Error('Active project or workspace changed after the dashboard started. Restart the dashboard before driving a cycle.');
+    }
     const orchestrator = new CycleOrchestrator(runtime);
-    const result = orchestrator.drive();
+    const result = orchestrator.drive(resolveNavigatorPath(
+      options.navigator === true, undefined, runtime.repoRoot, runtime.workspaceRoot,
+    ));
     if (result.performed.length === 0) {
       write(`Cycle ${result.cycle.id} already at ${result.cycle.stage}; nothing to drive.`);
       return 0;
@@ -127,17 +138,21 @@ function commandCycleResume(): number {
 /* clue cycle close                                                           */
 /* ------------------------------------------------------------------------- */
 
-async function commandCycleClose(): Promise<number> {
+export async function commandCycleClose(repoRoot = findRepoRoot()): Promise<number> {
   // Phase 0 — read what closing requires; this lock window opens and closes here.
   let cycleId: string;
   let lockedBenchmark: { readonly path: string; readonly sha256: string } | null;
   let missionVersion: string;
   try {
-    ({ cycleId, lockedBenchmark, missionVersion } = withRuntime({ withLog: true, verifyLog: 'tail' }, (runtime) => {
+    ({ cycleId, lockedBenchmark, missionVersion } = withRuntime({ repoRoot, withLog: true, verifyLog: 'tail' }, (runtime) => {
       const orchestrator = new CycleOrchestrator(runtime);
       const cycle = orchestrator.status();
       if (cycle === null) throw new Error('No cycle in progress to close.');
-      return { cycleId: cycle.id, lockedBenchmark: orchestrator.lockedBenchmarkOf(cycle.id), missionVersion: runtime.currentMissionId() };
+      return {
+        cycleId: cycle.id,
+        lockedBenchmark: cycle.stage === 'SCREENED' ? orchestrator.lockedBenchmarkOf(cycle.id) : null,
+        missionVersion: runtime.currentMissionId(),
+      };
     }));
   } catch (error) {
     write(error instanceof Error ? error.message : String(error));
@@ -148,7 +163,6 @@ async function commandCycleClose(): Promise<number> {
   // they take the writer lock per act (the B4 inversion, shared via benchmarkRun.ts).
   let performed: PerformedRun | null = null;
   if (lockedBenchmark !== null) {
-    const repoRoot = findRepoRoot();
     const config = loadConfig(repoRoot);
     const verified = verifyLockedContract(config.project.root, lockedBenchmark);
     if ('error' in verified) {
@@ -173,8 +187,12 @@ async function commandCycleClose(): Promise<number> {
   // Phase 2 — locked: the walk records the run (or the stated absence) and closes.
   const closingRun = performed;
   return runGuarded(() =>
-    withRuntime({ withLog: true, verifyLog: 'tail' }, (runtime) => {
-      const result = new CycleOrchestrator(runtime).close(closingRun);
+    withRuntime({ repoRoot, withLog: true, verifyLog: 'tail' }, (runtime) => {
+      const orchestrator = new CycleOrchestrator(runtime);
+      if (orchestrator.status()?.id !== cycleId || runtime.currentMissionId() !== missionVersion) {
+        throw new Error(`Cycle ${cycleId} or its mission changed while preparing closure. Rerun \`clue cycle close\` for the current cycle.`);
+      }
+      const result = orchestrator.close(closingRun);
       printChecks(
         result.performed.map((step) => ({
           level: 'ok' as const,
@@ -202,8 +220,10 @@ export function registerCycleCommands(program: Command): void {
   cycle
     .command('drive')
     .description('advance the cycle to SCREENED through lock, snapshot, recognition and screening')
-    .action(() => {
-      process.exitCode = runGuarded(() => commandCycleDrive());
+    .option('--navigator', 'publish the recognition stream to the workspace Navigator')
+    .option('--expect-runtime <hash>', 'refuse if the project and workspace binding differ from the caller')
+    .action((options: { navigator?: boolean; expectRuntime?: string }) => {
+      process.exitCode = runGuarded(() => commandCycleDrive(options));
     });
   cycle
     .command('suspend')

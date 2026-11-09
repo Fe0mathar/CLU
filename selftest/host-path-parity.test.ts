@@ -134,6 +134,16 @@ test('a host-resolved path the client classifies into the authorised zone is acc
   assert.equal(ok, null, 'agreement across decision, host label, and independent classification passes');
 });
 
+test('the zone classifier receives the normalized Windows host path', () => {
+  const classifyWindows = (path: string): PathZone => path.startsWith('f:/clu/workspace/') ? 'workspace' : 'external';
+  const target = decision('workspace', 'F:/CLU/Workspace/Report.json');
+  assert.equal(checkZoneParity(stat, target, response('F:\\CLU\\Workspace\\Report.json', 'workspace'), classifyWindows), null);
+  assert.equal(
+    checkZoneParity(stat, target, response('F:\\CLU\\Target\\Report.json', 'workspace'), classifyWindows)?.code,
+    'ZONE_PARITY_MISMATCH',
+  );
+});
+
 /* ========================================================================= */
 /* DEV-P0-11 — browser-profile operations get zone parity via an explicit zone */
 /* ========================================================================= */

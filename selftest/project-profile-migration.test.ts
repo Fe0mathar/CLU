@@ -13,7 +13,9 @@ import { tmpdir } from 'node:os';
 
 import { stringify as stringifyYaml } from 'yaml';
 
-import { hashBytes } from '../src/shared/ids.js';
+import { hashBytes, requireSha256 } from '../src/shared/ids.js';
+import { openRuntime } from '../src/control/runtime.js';
+import { adoptLegacyWorkspaceForProfile } from '../src/control/projectProfiles/projectActivation.js';
 import { ProfileEventLog } from '../src/control/projectProfiles/profileEventLog.js';
 import {
   ProjectProfileMigrationError,
@@ -264,6 +266,40 @@ test('PP-08: explicit migration preserves workspace history and records exact le
 
     const serialized = JSON.stringify(result.registered);
     assert.doesNotMatch(serialized, /sk-|raw-secret|"apiKey"/iu);
+  });
+});
+
+test('PP-08: a migrated runtime reopens legacy events and artifact bytes after ownership adoption', () => {
+  withRoot((root) => {
+    const fixture = makeLegacyFixture(root);
+    writeFileSync(join(root, 'config', 'policies', 'patching.yaml'), 'protected_surfaces: []\n', 'utf8');
+    writeFileSync(join(fixture.targetRoot, 'tsconfig.json'), '{}\n', 'utf8');
+    const legacy = openRuntime({ repoRoot: root, withLog: true });
+    let hash: ReturnType<typeof requireSha256>;
+    try {
+      hash = requireSha256(legacy.artifacts.putText('legacy benchmark evidence').hash, 'legacy artifact');
+      const log = legacy.requireLog();
+      log.append({ type: 'fixture.legacy', actor: 'daemon', missionVersion: 'MISSION-000001', payload: { hash } });
+      legacy.projections.sync(log);
+    } finally {
+      legacy.dispose();
+    }
+
+    const registry = registryFor(fixture);
+    const { registered } = migrateLegacyActiveTarget({ repoRoot: root, registry, now: () => FIXED_TIME });
+    const oldPath = { ...registered.profile, state: { ...registered.profile.state, artifactStoreRoot: join(fixture.workspaceRoot, 'artifacts') } };
+    assert.throws(() => adoptLegacyWorkspaceForProfile({ ...registered, profile: oldPath }), /must preserve its legacy artifact store/u);
+    const owner = adoptLegacyWorkspaceForProfile(registered);
+    assert.equal(owner.legacyIndexedEvents, 1);
+
+    const migrated = openRuntime({ repoRoot: root, withLog: false, readOnly: true, projectProfile: registered });
+    try {
+      assert.equal(migrated.artifacts.getText(hash), 'legacy benchmark evidence');
+      assert.equal(migrated.projections.status().indexedEvents, 1);
+      migrated.requireFreshProjections();
+    } finally {
+      migrated.dispose();
+    }
   });
 });
 

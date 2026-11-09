@@ -1,6 +1,6 @@
 /** ADR-0017 — manual, local-first Git sync is explicit and fail-closed. */
 
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -9,7 +9,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { manualGitSync } from '../src/integration/git/manualGitSync.js';
-import { projectConfigSchema, type ClueConfig } from '../src/shared/schemas.js';
+import { gitRemoteSchema, projectConfigSchema, type ClueConfig } from '../src/shared/schemas.js';
 
 function git(cwd: string, ...args: string[]): string {
   const result = spawnSync('git', args, {
@@ -73,6 +73,19 @@ test('ADR-0017: NO_REMOTE_YET refuses manual Git sync without requiring a reposi
   }
 });
 
+test('registered remotes reject executable helpers, embedded credentials and hidden URL data', () => {
+  for (const remote of [
+    'ext://execute-helper', 'custom://example.org/repo.git', '-git@host:repo',
+    'https://token@example.org/repo', 'ssh://git:password@example.org/repo',
+    'https://example.org/repo?token=value', 'https://example.org/repo#secret', 'git@host:repo\nextra',
+  ]) {
+    assert.equal(gitRemoteSchema.safeParse(remote).success, false, remote);
+  }
+  for (const remote of ['https://example.org/repo.git', 'ssh://git@example.org/repo', 'git@host:repo', 'file:///some/repo.git']) {
+    assert.equal(gitRemoteSchema.safeParse(remote).success, true, remote);
+  }
+});
+
 test('ADR-0017: explicit sync is unchanged, ahead-only push, behind-only fast-forward, and refuses dirty/diverged state', (t) => {
   const available = spawnSync('git', ['--version'], { encoding: 'utf8' });
   if (available.status !== 0) {
@@ -97,6 +110,22 @@ test('ADR-0017: explicit sync is unchanged, ahead-only push, behind-only fast-fo
     git(local, 'push', remoteUrl, 'HEAD:refs/heads/main');
 
     const configured = project(local, remoteUrl);
+    const nested = join(local, 'nested');
+    mkdirSync(nested);
+    assert.equal(manualGitSync(project(nested, remoteUrl)).code, 'GIT_TOP_LEVEL_MISMATCH');
+    git(local, 'config', 'url.file:///unregistered-repository.insteadOf', remoteUrl);
+    assert.equal(manualGitSync(configured).code, 'REMOTE_REWRITE_REFUSED');
+    git(local, 'config', '--unset', 'url.file:///unregistered-repository.insteadOf');
+
+    const redirected = process.env['GIT_DIR'];
+    process.env['GIT_DIR'] = join(root, 'nonexistent-repository');
+    try {
+      assert.equal(manualGitSync(configured).state, 'unchanged', 'inherited Git context cannot redirect the checkout');
+    } finally {
+      if (redirected === undefined) delete process.env['GIT_DIR'];
+      else process.env['GIT_DIR'] = redirected;
+    }
+
     const unchanged = manualGitSync(configured, '2026-08-14T09:01:00.000Z');
     assert.equal(unchanged.state, 'unchanged');
     assert.equal(unchanged.code, 'OK');
@@ -118,6 +147,12 @@ test('ADR-0017: explicit sync is unchanged, ahead-only push, behind-only fast-fo
     git(peer, 'add', 'remote.txt');
     git(peer, 'commit', '-m', 'remote ahead');
     git(peer, 'push', 'origin', 'main');
+
+    appendFileSync(join(local, '.git', 'info', 'exclude'), '\nremote.txt\n');
+    writeFileSync(join(local, 'remote.txt'), 'ignored local work\n', 'utf8');
+    assert.equal(manualGitSync(configured).code, 'FAST_FORWARD_FAILED');
+    assert.equal(readFileSync(join(local, 'remote.txt'), 'utf8'), 'ignored local work\n');
+    rmSync(join(local, 'remote.txt'));
 
     const fastForwarded = manualGitSync(configured, '2026-08-14T09:03:00.000Z');
     assert.equal(fastForwarded.state, 'fast_forwarded');
@@ -144,6 +179,7 @@ test('ADR-0017: explicit sync is unchanged, ahead-only push, behind-only fast-fo
     assert.equal(diverged.code, 'DIVERGED');
     assert.equal(diverged.ahead, 1);
     assert.equal(diverged.behind, 1);
+    assert.equal(git(local, 'for-each-ref', 'refs/clue-sync/'), '');
   } finally {
     rmSync(root, { recursive: true, force: true, maxRetries: 3 });
   }

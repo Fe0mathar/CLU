@@ -29,8 +29,9 @@ test('DEV-P1-17: there is one tablist, and it holds exactly two tabs', () => {
   const buttons = tablist.match(/<button/g) ?? [];
   // "Exactly two top-level tabs" is the obligation, and the markup is where a third would appear.
   assert.equal(buttons.length, 2);
-  assert.match(tablist, /id="tabDashboard"/);
-  assert.match(tablist, /id="tabConfiguration"/);
+  assert.match(tablist, /id="tabDashboard" aria-label="Dashboard"/);
+  assert.match(tablist, /id="tabConfiguration" aria-label="Configuration"/);
+  assert.equal((tablist.match(/<svg /g) ?? []).length, 2);
   assert.match(tablist, /aria-label="Top level views"/);
 });
 
@@ -117,16 +118,11 @@ test('DEV-P1-16: all four quadrant kernels are wired, and none is reimplemented 
   assert.doesNotMatch(app, /excludedCount \? 'warning' : 'idle'/);
 });
 
-test('DEV-P1-17: density is wired — attribute-driven spacing, and the rail control announces itself', () => {
-  assert.match(app, /from '\.\/components\/densityControl\.js'/);
-  assert.match(html, /id="densityBtn"/);
-  // The whole mechanism is CSS variables keyed on the root attribute. The 52px rail constant
-  // moves through the variable so both densities keep the grid viewport-filling.
-  assert.match(html, /\[data-density="compact"\] \{ --rail-h: 40px;/);
+test('the ribbon omits density and the grid and configuration share its height', () => {
+  assert.doesNotMatch(html, /id="densityBtn"/);
+  assert.doesNotMatch(html, /\[data-density="compact"\]/);
   assert.match(html, /#grid \{ height: calc\(100% - var\(--rail-h\)\); gap: var\(--grid-gap\); padding: var\(--grid-pad\); \}/);
   assert.match(html, /#cfg \{ top: var\(--rail-h\); \}/);
-  // The one JS consumer is geometry: canvases relayout. Nothing reads the mode to choose content.
-  assert.match(app, /window\.dispatchEvent\(new Event\('resize'\)\)/);
 });
 
 test('DEV-P1-16: fullscreen is delegated to the contract, and the private mirror is gone', () => {
@@ -142,7 +138,7 @@ test('DEV-P1-16: fullscreen is delegated to the contract, and the private mirror
 
 test('DEV-P1-16: actions go through the declared registry, never raw fetch', () => {
   assert.match(app, /from '\.\/configuration\/actionContracts\.js'/);
-  assert.match(app, /actionClient\.invoke\('start'\)/);
+  assert.match(app, /actionClient\.invoke\('start', undefined, \{ signal \}\)/);
   assert.match(app, /actionClient\.invoke\('publishCatalogue'/);
   assert.doesNotMatch(app, /fetch\('\/api\/control\/start'/);
   assert.doesNotMatch(app, /fetch\('\/api\/catalogues', \{ method: 'POST'/);
@@ -160,8 +156,9 @@ test('DEV-P1-16: exactly one stream is opened, not two', () => {
 test('DEV-P1-17: Configuration loads on first arrival, however the operator got there', () => {
   // The drawer loaded its body as a side effect of a click toggle, so an operator arriving by
   // keyboard never loaded it, and the loader ran on odd clicks only.
-  assert.match(app, /async function loadConfiguration\(\)/);
-  assert.match(app, /if \(id === 'configuration' && !configurationLoaded\) void loadConfiguration\(\);/);
+  assert.match(app, /function loadConfiguration\(\)/);
+  assert.match(app, /if \(configurationLoad !== null\) return configurationLoad/);
+  assert.match(app, /if \(id === 'configuration'\) void loadConfiguration\(\);/);
   assert.doesNotMatch(app, /cfg\.classList\.toggle\('open'\)/);
 });
 
@@ -170,7 +167,7 @@ test('P2-B6: the Proof Board is mounted through the shared overlay seam', () => 
   assert.match(app, /import \{ mountProofBoard \} from '\.\/workspaces\/proofBoard\.js';/);
   assert.match(app, /mountProofBoard\(\{ overlayUi: CLUE_UI, fetchJson, interfaceApi: ClueInterface \}\)/);
   assert.match(app, /ULTIMATE-2026\.08-Q1-V9-REPOSITORY-OBSERVATORY-R1/);
-  assert.match(proofBoard, /railButton\('proofBoardBtn'/);
+  assert.match(proofBoard, /panelButton\('q4', 'proofBoardBtn'/);
   assert.match(proofBoard, /makeOverlay\(\s*'proofBoardOverlay'/);
 });
 

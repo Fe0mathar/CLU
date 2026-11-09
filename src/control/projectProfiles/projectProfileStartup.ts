@@ -107,6 +107,7 @@ export interface ProjectProfileCutoverOptions {
   readonly registry: ProjectProfileRegistry;
   readonly projectId: string;
   readonly confirmation: string;
+  readonly expectedRegistryGeneration?: number;
   readonly actor?: Actor;
   readonly now?: () => string;
   readonly verifyWorkspace?: (record: ProjectProfileRecord) => void;
@@ -324,7 +325,13 @@ export function enableProjectProfileStartup(
     pointer = options.registry.activate(record.profile.projectId, {
       actor: options.actor ?? 'creator',
       reason: 'CONFIGURATION_V3_CUTOVER',
-    }, record);
+    }, {
+      generation: record.generation,
+      projectProfileHash: record.projectProfileHash,
+      ...(options.expectedRegistryGeneration === undefined
+        ? {}
+        : { registryGeneration: options.expectedRegistryGeneration }),
+    });
     if (!pointerMatchesRecord(pointer, record)) {
       throw new ProjectProfileStartupError('STARTUP_POINTER_STALE', 'Cutover activated a different Project Profile generation.');
     }

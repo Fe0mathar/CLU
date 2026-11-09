@@ -99,17 +99,17 @@ function appendBenchmark(log: EventLog) {
   });
 }
 
-function appendContract(log: EventLog, hypothesisId: string) {
+function appendContract(log: EventLog, hypothesisId: string, cycleId = 'CYCLE-000014') {
   return log.append({
     type: PROOF_EVENT_TYPES.contractFrozen,
     actor: 'cli',
     missionVersion: 'MISSION-000014',
-    subjectId: 'CYCLE-000014',
+    subjectId: cycleId,
     payload: {
       target_id: 'clu',
       contract_hash: H('e'),
       hypothesis_id: hypothesisId,
-      cycle_id: 'CYCLE-000014',
+      cycle_id: cycleId,
       snapshot_id: H('f'),
       contract_artifact: artifact('1', 'proof contract'),
       frozen_at: AT,
@@ -229,6 +229,27 @@ test('P2-B6: a newer freeze starts a clean attempt boundary and cannot inherit t
     assert.equal(board.proofAttempts[1]?.verdict?.disposition, 'ACCEPT');
     assert.equal(board.summary.openAttempts, 1);
     assert.equal(board.summary.accepts, 1);
+  } finally {
+    fixture.close();
+  }
+});
+
+test('closure scope retains a closed cycle proof beyond the dashboard history limit', () => {
+  const fixture = stack();
+  try {
+    const benchmark = appendBenchmark(fixture.log);
+    appendContract(fixture.log, 'HYP-B6-000001');
+    appendBaseline(fixture.log, benchmark.id);
+    const verdict = appendVerdict(fixture.log);
+    for (let index = 0; index < 100; index += 1) {
+      appendContract(fixture.log, `HYP-NEW-${index}`, 'CYCLE-000015');
+    }
+    fixture.projections.sync(fixture.log);
+
+    assert.equal(readProofBoard(fixture.runtime, AT).summary.accepts, 0);
+    const closureBoard = readProofBoard(fixture.runtime, AT, 'CYCLE-000014');
+    assert.equal(closureBoard.summary.proofAttempts, 1);
+    assert.equal(closureBoard.proofAttempts[0]?.verdict?.eventId, verdict.id);
   } finally {
     fixture.close();
   }

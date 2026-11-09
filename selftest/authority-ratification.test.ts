@@ -225,6 +225,12 @@ test('DEV-P2-05: parsePackSeal accepts the grammar and names each malformation',
 
   const duplicate = parsePackSeal(`${a}  same.md\n${b}  same.md\n`);
   assert.ok('error' in duplicate && duplicate.error.includes('duplicate'));
+  const caseAlias = parsePackSeal(`${a}  same.md\n${b}  SAME.md\n`);
+  assert.ok('error' in caseAlias && caseAlias.error.includes('duplicate'));
+  for (const path of ['../outside.md', '/absolute.md', 'C:/outside.md', 'dir\\outside.md']) {
+    const traversal = parsePackSeal(`${a}  ${path}\n`);
+    assert.ok('error' in traversal && traversal.error.includes('non-portable'));
+  }
 
   const empty = parsePackSeal('\n\n');
   assert.ok('error' in empty && empty.error.includes('declares no files'));

@@ -216,9 +216,13 @@ export class ArtifactStore {
    */
   public putFile(sourcePath: string, options: PutOptions = {}): ArtifactRef {
     this.assertOptionalIdentity(options.operationIdentity, 'artifact putFile');
+    this.assertWritable();
     const captured = this.captureStable(sourcePath);
-    if (placeFileNoReplaceSync(captured.tempPath, this.pathFor(captured.hash)) === 'placed') {
-      this.markReadOnly(this.pathFor(captured.hash));
+    try {
+      this.placeOrDiscard(captured.hash, captured.tempPath);
+    } catch (error) {
+      rmSync(captured.tempPath, { force: true });
+      throw error;
     }
     return this.makeRef(captured.hash, captured.bytes, options);
   }
@@ -353,30 +357,7 @@ export class ArtifactStore {
    * a content-addressed store, and the reason repeated evidence is free.
    */
   private commit(hash: Sha256, writer: (tempPath: string) => void): void {
-    // DEV-P1-39: refuse before anything else, including the already-present short-circuit below.
-    //
-    // Until now a read-only store refused only as a side effect: the constructor skipped creating
-    // `blobs/.tmp`, and a write failed later because the staging path did not exist. The outcome
-    // was right and the mechanism was incidental — `selftest/readonly-observer-writes.test.ts`
-    // showed that creating that directory by any other route made a read-only store accept a
-    // write, with the flag untouched and every assertion still green.
-    //
-    // The check belongs here rather than in each public method because every write in this class
-    // funnels through `commit`: `putBytes`, `putText`, `putJson` and `putFile` all reach the disk
-    // by this one path, so one guard covers them and any future sibling by construction.
-    //
-    // It is placed above the `existsSync` short-circuit deliberately. Returning quietly when the
-    // blob happens to be present already would make the refusal depend on store contents: the same
-    // call would throw or succeed according to what someone else had stored earlier, which is a
-    // worse contract than either answer given consistently.
-    if (this.readOnly) {
-      throw new ArtifactStoreError(
-        'READ_ONLY',
-        'This artifact store is attached read-only; storing evidence requires the event-log writer.',
-        hash,
-      );
-    }
-
+    this.assertWritable(hash);
     if (existsSync(this.pathFor(hash))) return;
 
     const tempPath = this.makeTempPath();
@@ -387,6 +368,16 @@ export class ArtifactStore {
     } catch (error) {
       rmSync(tempPath, { force: true });
       throw error;
+    }
+  }
+
+  private assertWritable(hash: Sha256 | null = null): void {
+    if (this.readOnly) {
+      throw new ArtifactStoreError(
+        'READ_ONLY',
+        'This artifact store is attached read-only; storing evidence requires the event-log writer.',
+        hash,
+      );
     }
   }
 

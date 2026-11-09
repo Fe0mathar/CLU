@@ -45,6 +45,8 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import { get as httpGet } from 'node:http';
+import { setTimeout as delay } from 'node:timers/promises';
 
 import {
   assertProjectOperationIdentity,
@@ -76,6 +78,50 @@ const SOURCE_MAP_CONTENT_TYPES = [
 
 /** Ceiling on a fetched source map. Large real maps exist; unbounded ones are not maps. */
 const MAX_SOURCE_MAP_BYTES = 32 * 1024 * 1024;
+const MAX_DEVTOOLS_TARGET_BYTES = 4 * 1024 * 1024;
+const DEVTOOLS_RETRY_CODES = new Set(['ECONNREFUSED', 'ECONNRESET', 'EPIPE']);
+
+function networkErrorCode(error: unknown): string | null {
+  if (error instanceof Error && 'code' in error && typeof error.code === 'string' &&
+      /^[A-Z][A-Z0-9_]{1,63}$/u.test(error.code)) return error.code;
+  return null;
+}
+
+function readDevToolsTargetList(endpoint: URL, signal: AbortSignal): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    // Use one dedicated socket rather than the process-wide fetch pool or a proxy.
+    const request = httpGet(endpoint, {
+      agent: false, signal, headers: { Accept: 'application/json' },
+    }, (response) => {
+      const endpointLabel = `DevTools /json/list at ${endpoint.host}`;
+      response.on('error', reject);
+      if (response.statusCode !== 200) {
+        reject(new BrowserAgentError('ENDPOINT_UNREACHABLE', `${endpointLabel} returned HTTP ${String(response.statusCode)}.`));
+        response.destroy();
+        return;
+      }
+      let length = 0;
+      const chunks: Buffer[] = [];
+      response.on('data', (chunk: Buffer) => {
+        length += chunk.length;
+        if (length > MAX_DEVTOOLS_TARGET_BYTES) {
+          reject(new BrowserAgentError('ENDPOINT_UNREACHABLE', `${endpointLabel} exceeded the response limit.`));
+          response.destroy();
+          return;
+        }
+        chunks.push(chunk);
+      });
+      response.on('end', () => {
+        try {
+          resolve(JSON.parse(Buffer.concat(chunks, length).toString('utf8')) as unknown);
+        } catch {
+          reject(new BrowserAgentError('ENDPOINT_UNREACHABLE', `${endpointLabel} returned invalid JSON.`));
+        }
+      });
+    });
+    request.on('error', reject);
+  });
+}
 
 /* ------------------------------------------------------------------------- */
 /* Platform surface                                                           */
@@ -170,6 +216,34 @@ export interface AttachOptions {
   readonly requestTimeoutMs?: number;
   /** Optional source-faithful mirror of every exact CDP request and response. */
   readonly operationalConsole?: OperationalConsoleRecorder;
+}
+
+export interface GovernedBrowserExecution {
+  readonly projectIdentity: ProjectOperationIdentity;
+  readonly profileGeneration: number;
+  readonly browserSessionId: string;
+  readonly targetPageId: string;
+  /** Require the live main-frame document at this exact URL. */
+  readonly targetUrl?: string;
+}
+
+const browserKeys = {
+  Enter: 13, Escape: 27, Tab: 9, Backspace: 8, Delete: 46,
+  ArrowUp: 38, ArrowDown: 40, ArrowLeft: 37, ArrowRight: 39,
+  Home: 36, End: 35, PageUp: 33, PageDown: 34, Space: 32,
+} as const;
+
+export type GovernedBrowserControl =
+  | { readonly type: 'reload' }
+  | { readonly type: 'move' | 'click'; readonly x: number; readonly y: number }
+  | { readonly type: 'wheel'; readonly x: number; readonly y: number; readonly deltaX: number; readonly deltaY: number }
+  | { readonly type: 'text'; readonly text: string }
+  | { readonly type: 'key'; readonly key: keyof typeof browserKeys }
+  | { readonly type: 'screenshot' };
+
+export interface BrowserScreenshot {
+  readonly data: string;
+  readonly mimeType: 'image/jpeg';
 }
 
 export interface EnvironmentFingerprint {
@@ -526,12 +600,51 @@ interface ScriptRecord {
 }
 
 const DEFAULT_TIMEOUT_MS = 15_000;
+const MAX_SCREENSHOT_BASE64_BYTES = 4 * 1024 * 1024;
+const MAX_INPUT_COORDINATE = 16_384;
+const MAX_WHEEL_DELTA = 10_000;
+const MAX_INSERTED_TEXT_BYTES = 4_096;
+
+interface FrameIdentity {
+  readonly frameId: string;
+  readonly loaderId: string;
+  readonly frameUrl: string;
+}
+
+function frameIdentityOf(value: unknown): FrameIdentity | null {
+  if (typeof value !== 'object' || value === null) return null;
+  const frame = value as Record<string, unknown>;
+  const frameId = readString(frame, 'id');
+  const loaderId = readString(frame, 'loaderId');
+  const url = readString(frame, 'url');
+  if (!frameId || !loaderId || !url) return null;
+  const fragment = readString(frame, 'urlFragment');
+  return { frameId, loaderId, frameUrl: url.includes('#') ? url : url + (fragment ?? '') };
+}
+
+function allowedPageUrl(value: string, allowedOrigins: readonly string[]): string {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new BrowserAgentError('ORIGIN_REFUSED', 'The governed page does not have a valid URL.');
+  }
+  if (url.username || url.password || !originAllowed(url.href, allowedOrigins)) {
+    throw new BrowserAgentError('ORIGIN_REFUSED', 'The governed page is outside the allowed HTTP(S) origins.');
+  }
+  return url.href;
+}
+
+function finiteInRange(value: number, min: number, max: number): boolean {
+  return Number.isFinite(value) && value >= min && value <= max;
+}
 
 export class BrowserAgent {
   private readonly connection: CdpConnection;
   private readonly listeners = new Set<ConsoleListener>();
   private readonly scripts = new Map<string, ScriptRecord>();
   private readonly sourceMaps = new Map<string, string | null>();
+  private readonly defaultContexts = new Map<string, { id: number; uniqueId: string }>();
   public readonly target: TargetInfo;
 
   /**
@@ -649,9 +762,17 @@ export class BrowserAgent {
         'chromeInstanceId must not be empty.',
       );
     }
+    const projectIdentity = options.projectIdentity === undefined
+      ? null
+      : canonicalProjectOperationIdentity(options.projectIdentity);
 
     const host = options.host ?? '127.0.0.1';
     const timeoutMs = options.requestTimeoutMs ?? DEFAULT_TIMEOUT_MS;
+    if (governedIdentityFieldCount > 0 &&
+        (!['127.0.0.1', 'localhost', '[::1]'].includes(host) ||
+         !Number.isSafeInteger(options.port) || options.port < 1 || options.port > 65_535)) {
+      throw new BrowserAgentError('ORIGIN_REFUSED', 'A governed debugger must use an exact loopback host and valid port.');
+    }
     const targets = await BrowserAgent.listTargets(host, options.port, timeoutMs);
 
     const pages = targets.filter(
@@ -703,6 +824,17 @@ export class BrowserAgent {
       throw new BrowserAgentError('ORIGIN_REFUSED', 'The selected target is outside the allowed origins');
     }
 
+    if (governedIdentityFieldCount > 0) {
+      const discovered = allowed.find((target) => target.id === chosen?.id);
+      if (discovered === undefined || discovered.url !== chosen.url ||
+          discovered.webSocketDebuggerUrl !== chosen.webSocketDebuggerUrl ||
+          !/^[a-z0-9_-]{1,128}$/iu.test(chosen.id) ||
+          chosen.webSocketDebuggerUrl !== new URL(`ws://${host}:${String(options.port)}/devtools/page/${chosen.id}`).href) {
+        throw new BrowserAgentError('ORIGIN_REFUSED', 'The debugger socket does not match the governed loopback page endpoint.');
+      }
+      allowedPageUrl(chosen.url, options.allowedOrigins);
+    }
+
     const connection = await CdpConnection.open(
       chosen.webSocketDebuggerUrl,
       timeoutMs,
@@ -714,14 +846,17 @@ export class BrowserAgent {
       options.allowedOrigins,
       `${host}:${String(options.port)}`,
       timeoutMs,
-      options.projectIdentity === undefined
-        ? null
-        : canonicalProjectOperationIdentity(options.projectIdentity),
+      projectIdentity,
       options.profileGeneration ?? null,
       options.chromeInstanceId ?? null,
     );
-    await agent.enableDomains();
-    return agent;
+    try {
+      await agent.enableDomains();
+      return agent;
+    } catch (error) {
+      agent.close();
+      throw error;
+    }
   }
 
   /** Enumerates targets without attaching. Useful for `clue doctor`. */
@@ -730,26 +865,32 @@ export class BrowserAgent {
     port: number,
     timeoutMs = DEFAULT_TIMEOUT_MS,
   ): Promise<TargetInfo[]> {
-    let response: Response;
+    if (!Number.isSafeInteger(port) || port < 1 || port > 65_535) {
+      throw new BrowserAgentError('ENDPOINT_UNREACHABLE', 'The DevTools host or port is invalid.');
+    }
+    const endpoint = URL.parse(`http://${host}:${port}/json/list`);
+    if (!endpoint || endpoint.username || endpoint.password || endpoint.pathname !== '/json/list' ||
+        endpoint.search || endpoint.hash || Number(endpoint.port || 80) !== port) {
+      throw new BrowserAgentError('ENDPOINT_UNREACHABLE', 'The DevTools host or port is invalid.');
+    }
+    const signal = AbortSignal.timeout(timeoutMs);
+    let raw: unknown;
     try {
-      response = await fetch(`http://${host}:${port}/json/list`, {
-        signal: AbortSignal.timeout(timeoutMs),
-      });
-      if (response.ok === false) {
-        throw new BrowserAgentError(
-          'ENDPOINT_UNREACHABLE',
-          `DevTools endpoint ${host}:${port} returned HTTP ${response.status}.`,
-        );
+      try {
+        raw = await readDevToolsTargetList(endpoint, signal);
+      } catch (error) {
+        if (signal.aborted || !DEVTOOLS_RETRY_CODES.has(networkErrorCode(error) ?? '')) throw error;
+        await delay(150, undefined, { signal });
+        raw = await readDevToolsTargetList(endpoint, signal);
       }
     } catch (error) {
       if (error instanceof BrowserAgentError) throw error;
+      const detail = signal.aborted ? `timed out after ${timeoutMs} ms` : `failed (${networkErrorCode(error) ?? 'unknown socket error'})`;
       throw new BrowserAgentError(
         'ENDPOINT_UNREACHABLE',
-        `No DevTools endpoint at ${host}:${port} — ${(error as Error).message}`,
+        `DevTools /json/list at ${host}:${port} ${detail}.`,
       );
     }
-
-    const raw: unknown = await response.json();
     if (!Array.isArray(raw)) return [];
 
     return raw
@@ -804,6 +945,30 @@ export class BrowserAgent {
       const entry = exceptionToEntry(params);
       if (entry !== null) this.emit(entry);
     });
+    this.connection.on('Runtime.executionContextCreated', (params) => {
+      const value = params['context'];
+      if (typeof value !== 'object' || value === null) return;
+      const context = value as Record<string, unknown>;
+      const metadata = context['auxData'];
+      if (typeof metadata !== 'object' || metadata === null) return;
+      const aux = metadata as Record<string, unknown>;
+      const frameId = readString(aux, 'frameId');
+      const id = readNumber(context, 'id');
+      const uniqueId = readString(context, 'uniqueId');
+      if (aux['isDefault'] === true && frameId && id !== null && uniqueId) {
+        this.defaultContexts.set(frameId, { id, uniqueId });
+      }
+    });
+    this.connection.on('Runtime.executionContextDestroyed', (params) => {
+      const id = readNumber(params, 'executionContextId');
+      const uniqueId = readString(params, 'executionContextUniqueId');
+      for (const [frameId, context] of this.defaultContexts) {
+        if (uniqueId === null ? context.id === id : context.uniqueId === uniqueId) {
+          this.defaultContexts.delete(frameId);
+        }
+      }
+    });
+    this.connection.on('Runtime.executionContextsCleared', () => this.defaultContexts.clear());
 
     // DEV-P1-24: navigation identity. Main frame only — a subframe navigating is an ad or
     // a widget reloading, and letting it overwrite the loader would attribute the page's
@@ -813,11 +978,7 @@ export class BrowserAgent {
       if (typeof frame !== 'object' || frame === null) return;
       const record = frame as Record<string, unknown>;
       if (readString(record, 'parentId') !== null) return;
-      this.navigation = {
-        frameId: readString(record, 'id'),
-        loaderId: readString(record, 'loaderId'),
-        frameUrl: readString(record, 'url'),
-      };
+      this.navigation = frameIdentityOf(record) ?? { frameId: null, loaderId: null, frameUrl: null };
     });
 
     // Page is enabled for `frameNavigated` alone, on the same terms as the others: it
@@ -861,19 +1022,7 @@ export class BrowserAgent {
       };
     }
 
-    const tree = await this.connection.send('Page.getFrameTree').catch(() => null);
-    const frameTree = tree === null ? null : tree['frameTree'];
-    if (typeof frameTree === 'object' && frameTree !== null) {
-      const frame = (frameTree as Record<string, unknown>)['frame'];
-      if (typeof frame === 'object' && frame !== null) {
-        const record = frame as Record<string, unknown>;
-        this.navigation = {
-          frameId: readString(record, 'id'),
-          loaderId: readString(record, 'loaderId'),
-          frameUrl: readString(record, 'url'),
-        };
-      }
-    }
+    await this.readMainFrame().catch(() => null);
   }
 
   private emit(entry: RawConsoleEntry): void {
@@ -996,10 +1145,15 @@ export class BrowserAgent {
    */
   public async evaluate(expression: string): Promise<unknown> {
     this.assertExecutionActive();
+    return this.evaluateExpression(expression);
+  }
+
+  private async evaluateExpression(expression: string, uniqueContextId?: string): Promise<unknown> {
     const result = await this.connection.send('Runtime.evaluate', {
       expression,
       returnByValue: true,
       awaitPromise: true,
+      ...(uniqueContextId === undefined ? {} : { uniqueContextId, timeout: this.requestTimeoutMs }),
     });
 
     const details = result['exceptionDetails'];
@@ -1019,13 +1173,29 @@ export class BrowserAgent {
    */
   public async evaluateGoverned(
     expression: string,
-    expected: {
-      readonly projectIdentity: ProjectOperationIdentity;
-      readonly profileGeneration: number;
-      readonly browserSessionId: string;
-      readonly targetPageId: string;
-    },
+    expected: GovernedBrowserExecution,
   ): Promise<unknown> {
+    this.assertGovernedExecution(expected);
+    if (expected.targetUrl === undefined) return this.evaluate(expression);
+
+    const frame = await this.requireExactFrame(expected.targetUrl);
+    const context = this.defaultContexts.get(frame.frameId);
+    if (context === undefined) {
+      throw new BrowserAgentError('TARGET_DISCONNECTED', 'The governed page has no pinned main-world execution context.');
+    }
+    // Pin the main world across renderer swaps, and check same-document URL changes in
+    // that world immediately before running the caller's expression.
+    const source = `(() => {
+      if (globalThis.location.href !== ${JSON.stringify(frame.frameUrl)}) throw new Error('Governed target URL changed');
+      return (\n${expression}\n);
+    })()`;
+    const result = await this.evaluateExpression(source, context.uniqueId);
+    await this.requireExactFrame(expected.targetUrl, frame);
+    return result;
+  }
+
+  private assertGovernedExecution(expected: GovernedBrowserExecution): void {
+    this.assertExecutionActive();
     if (this.projectIdentity === null) {
       throw new BrowserAgentError(
         'PROJECT_IDENTITY_MISMATCH',
@@ -1062,7 +1232,154 @@ export class BrowserAgent {
         `Governed target ${expected.targetPageId} is not the attached target ${this.target.id}.`,
       );
     }
-    return this.evaluate(expression);
+  }
+
+  private async readMainFrame(): Promise<FrameIdentity> {
+    const result = await this.connection.send('Page.getFrameTree');
+    const tree = result['frameTree'];
+    const frame = frameIdentityOf(
+      typeof tree === 'object' && tree !== null ? (tree as Record<string, unknown>)['frame'] : null,
+    );
+    if (frame === null) {
+      throw new BrowserAgentError('TARGET_DISCONNECTED', 'Chrome did not return the main-frame document identity.');
+    }
+    this.navigation = frame;
+    return frame;
+  }
+
+  private async requireExactFrame(targetUrl: string, previous?: FrameIdentity): Promise<FrameIdentity> {
+    this.assertExecutionActive();
+    const expected = allowedPageUrl(targetUrl, this.allowedOrigins);
+    const frame = await this.readMainFrame();
+    if (allowedPageUrl(frame.frameUrl, this.allowedOrigins) !== expected ||
+        allowedPageUrl(this.target.url, this.allowedOrigins) !== expected) {
+      throw new BrowserAgentError('ORIGIN_REFUSED', 'The live document does not match the governed target URL.');
+    }
+    if (previous !== undefined && (frame.frameId !== previous.frameId || frame.loaderId !== previous.loaderId)) {
+      throw new BrowserAgentError('TARGET_DISCONNECTED', 'The governed document changed during the browser operation.');
+    }
+    this.assertExecutionActive();
+    return frame;
+  }
+
+  /** Named browser operations only. Every operation is bound to the exact live page. */
+  public async controlGoverned(
+    action: GovernedBrowserControl,
+    expected: GovernedBrowserExecution & { readonly targetUrl: string },
+  ): Promise<BrowserScreenshot | void> {
+    this.assertGovernedExecution(expected);
+    const frame = await this.requireExactFrame(expected.targetUrl);
+    let screenshot: BrowserScreenshot | undefined;
+    switch (action.type) {
+      case 'reload':
+        await this.reloadGoverned(expected, frame);
+        return;
+      case 'move':
+      case 'click':
+      case 'wheel':
+        await this.controlPointer(action, expected.targetUrl, frame);
+        break;
+      case 'text':
+        if (typeof action.text !== 'string' || Buffer.byteLength(action.text, 'utf8') > MAX_INSERTED_TEXT_BYTES) {
+          throw new BrowserAgentError('PROTOCOL_ERROR', 'Text input exceeds the browser control limit.');
+        }
+        await this.connection.send('Input.insertText', { text: action.text });
+        break;
+      case 'key':
+        await this.controlKey(action.key, expected.targetUrl, frame);
+        break;
+      case 'screenshot':
+        screenshot = await this.captureViewport();
+        break;
+      default:
+        throw new BrowserAgentError('PROTOCOL_ERROR', 'Unsupported named browser control.');
+    }
+    await this.requireExactFrame(expected.targetUrl, frame);
+    return screenshot;
+  }
+
+  private async reloadGoverned(
+    expected: GovernedBrowserExecution & { readonly targetUrl: string },
+    original: FrameIdentity,
+  ): Promise<void> {
+    await this.connection.send('Page.reload', { ignoreCache: true, loaderId: original.loaderId });
+    const deadline = Date.now() + this.requestTimeoutMs;
+    while (Date.now() < deadline) {
+      const current = await this.requireExactFrame(expected.targetUrl);
+      if (current.frameId !== original.frameId) {
+        throw new BrowserAgentError('TARGET_DISCONNECTED', 'The governed frame changed during reload.');
+      }
+      if (current.loaderId !== original.loaderId && this.defaultContexts.has(current.frameId) &&
+          await this.evaluateGoverned('document.readyState', expected) === 'complete') return;
+      await delay(50);
+    }
+    throw new BrowserAgentError('TIMEOUT', 'The governed page did not finish reloading within the browser deadline.');
+  }
+
+  private async controlPointer(
+    action: Extract<GovernedBrowserControl, { readonly x: number }>,
+    targetUrl: string,
+    frame: FrameIdentity,
+  ): Promise<void> {
+    const { x, y } = action;
+    if (!finiteInRange(x, 0, MAX_INPUT_COORDINATE) || !finiteInRange(y, 0, MAX_INPUT_COORDINATE)) {
+      throw new BrowserAgentError('PROTOCOL_ERROR', 'Pointer coordinates are outside the browser control bounds.');
+    }
+    if (action.type === 'wheel' &&
+        (!finiteInRange(action.deltaX, -MAX_WHEEL_DELTA, MAX_WHEEL_DELTA) ||
+         !finiteInRange(action.deltaY, -MAX_WHEEL_DELTA, MAX_WHEEL_DELTA))) {
+      throw new BrowserAgentError('PROTOCOL_ERROR', 'Wheel delta is outside the browser control bounds.');
+    }
+    const layout = await this.connection.send('Page.getLayoutMetrics');
+    const viewport = layout['cssVisualViewport'];
+    const dimensions = typeof viewport === 'object' && viewport !== null ? viewport as Record<string, unknown> : null;
+    const width = readNumber(dimensions, 'clientWidth');
+    const height = readNumber(dimensions, 'clientHeight');
+    if (width === null || height === null || x >= width || y >= height) {
+      throw new BrowserAgentError('PROTOCOL_ERROR', 'Pointer coordinates must be inside the active CSS viewport.');
+    }
+    await this.requireExactFrame(targetUrl, frame);
+    if (action.type === 'move') {
+      await this.connection.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y, buttons: 0 });
+    } else if (action.type === 'wheel') {
+      await this.connection.send('Input.dispatchMouseEvent', {
+        type: 'mouseWheel', x, y, deltaX: action.deltaX, deltaY: action.deltaY,
+      });
+    } else {
+      const click = { x, y, button: 'left', clickCount: 1 };
+      await this.connection.send('Input.dispatchMouseEvent', { ...click, type: 'mousePressed', buttons: 1 });
+      await this.requireExactFrame(targetUrl, frame);
+      await this.connection.send('Input.dispatchMouseEvent', { ...click, type: 'mouseReleased', buttons: 0 });
+    }
+  }
+
+  private async controlKey(
+    key: keyof typeof browserKeys,
+    targetUrl: string,
+    frame: FrameIdentity,
+  ): Promise<void> {
+    if (!Object.hasOwn(browserKeys, key)) {
+      throw new BrowserAgentError('PROTOCOL_ERROR', 'Key is outside the browser control allowlist.');
+    }
+    const event = { code: key, key: key === 'Space' ? ' ' : key, windowsVirtualKeyCode: browserKeys[key] };
+    const text = key === 'Space' ? ' ' : key === 'Enter' ? '\r' : null;
+    await this.connection.send('Input.dispatchKeyEvent', {
+      ...event, type: text === null ? 'rawKeyDown' : 'keyDown', ...(text === null ? {} : { text }),
+    });
+    await this.requireExactFrame(targetUrl, frame);
+    await this.connection.send('Input.dispatchKeyEvent', { ...event, type: 'keyUp' });
+  }
+
+  private async captureViewport(): Promise<BrowserScreenshot> {
+    const response = await this.connection.send('Page.captureScreenshot', {
+      format: 'jpeg', quality: 55, fromSurface: true, captureBeyondViewport: false,
+    });
+    const data = readString(response, 'data');
+    if (data === null || data.length > MAX_SCREENSHOT_BASE64_BYTES || data.length % 4 !== 0 ||
+        !data.startsWith('/9j/') || !/^[a-z0-9+/]+={0,2}$/iu.test(data)) {
+      throw new BrowserAgentError('PROTOCOL_ERROR', 'Chrome returned an invalid or oversized JPEG screenshot.');
+    }
+    return { data, mimeType: 'image/jpeg' };
   }
 
   /** Whether a debug surface exists, without assuming it does. */

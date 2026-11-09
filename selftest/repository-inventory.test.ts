@@ -3,6 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  chmodSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -142,6 +143,25 @@ test('Q1 SURF: location identity survives edits while version identity and lifec
   }
 });
 
+test('Q1 SURF: mode changes are modified and foreign inventory pointers are ignored', {
+  skip: process.platform === 'win32' ? 'POSIX executable mode' : false,
+}, () => {
+  const root = fixture();
+  try {
+    const pointer = toRepositoryInventoryPointer(capture(root));
+    chmodSync(join(root, 'src/a.ts'), 0o755);
+    const changed = capture(root, pointer).files.find((file) => file.path === 'src/a.ts');
+    assert.equal(changed?.inventoryState, 'modified');
+    assert.equal(changed?.contentHash, pointer.files.find((file) => file.path === 'src/a.ts')?.contentHash);
+    unlinkSync(join(root, 'README.md'));
+    const unrelated = capture(root, { ...pointer, repositoryId: 'another-project' });
+    assert.equal(unrelated.files.find((file) => file.path === 'src/a.ts')?.inventoryState, 'committed');
+    assert.deepEqual(unrelated.removedFiles, []);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('Q1 SURF: semantic recognition enriches existing physical records and creates file-level relations', () => {
   const root = fixture();
   try {
@@ -187,6 +207,24 @@ test('Q1 SURF: the current-inventory pointer is durable and parseable', () => {
     assert.equal(parsed.snapshotId, inventory.snapshotId);
     assert.equal(parsed.files.length, inventory.files.filter((file) => !file.excluded).length);
     assert.match(readFileSync(path, 'utf8'), /"inventoryHash"/u);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('Q1 SURF: semantic enrichment requires the exact inventoried file version', () => {
+  const root = fixture();
+  try {
+    const inventory = capture(root);
+    write(root, 'src/a.ts', 'export function a(): number { return 77; }\n');
+    const result = recognize({ projectRoot: root, tsconfigPath: join(root, 'tsconfig.json') });
+    const enrichment = enrichRepositoryInventory(inventory, result);
+    const a = enrichment.files.find((file) => file.path === 'src/a.ts');
+    const b = enrichment.files.find((file) => file.path === 'src/b.ts');
+    assert.equal(a?.recognitionState, 'failed');
+    assert.deepEqual(a?.semanticMembershipIds, []);
+    assert.equal(b?.recognitionState, 'recognized');
+    assert.deepEqual(enrichment.edges, []);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

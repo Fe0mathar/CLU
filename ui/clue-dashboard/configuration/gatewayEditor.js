@@ -1,6 +1,7 @@
 /** GPT/OpenAI exact-model and credential-reference editor. */
 
-import { badge, checkbox, escapeHtml, fieldShell, select } from './viewPrimitives.js';
+import { badge, checkbox, escapeHtml, fieldShell, renderReadinessReceipt, select } from './viewPrimitives.js';
+import { renderStartupBindingLink } from './projectSelector.js';
 
 export const CREDENTIAL_REFERENCE_PATTERN = /^(?:env:[A-Z][A-Z0-9_]{0,63}|credential-store:[A-Za-z0-9][A-Za-z0-9._:/-]{0,191})$/u;
 
@@ -59,7 +60,15 @@ export function credentialReferenceState(credential) {
 
 export function renderGatewayEditor(snapshot) {
   const profile = snapshot.draft;
-  if (!profile) return `<section class="cfg-card" data-section="gpt-gateway"><header class="cfg-card-head"><div><span class="cfg-kicker">GPT API KEY</span><h3>OpenAI credentials for a Project Profile</h3></div></header><p class="cfg-empty-copy">Select a saved Project Profile to configure its key.</p></section>`;
+  const startup = renderStartupBindingLink(snapshot);
+  const legacyKey = snapshot.legacyConnections?.ai;
+  const legacy = snapshot.legacyConfiguration?.legacyConnectionControls === true ? `<div class="cfg-legacy-connection">
+    <p class="cfg-card-copy">Save the active legacy target’s OpenAI key using the native Windows prompt. Reopen the dashboard to validate the connection.</p>
+    <button type="button" data-cfg-action="set-legacy-openai-key"${snapshot.legacyConnections?.busy ? ' disabled' : ''}>SET / REPLACE LEGACY TARGET API KEY</button>
+    ${legacyKey ? `<p class="cfg-connection-detail" role="status">${escapeHtml(legacyKey.detail)}</p>` : ''}
+    ${renderReadinessReceipt(snapshot, 'ai', true)}
+  </div>` : '';
+  if (!profile) return `<section class="cfg-card" data-section="gpt-gateway"><header class="cfg-card-head"><div><span class="cfg-kicker">GPT API KEY</span><h3>OpenAI credentials</h3></div></header>${startup}${legacy || '<p class="cfg-empty-copy">Select a saved Project Profile to configure its key.</p>'}</section>`;
   const gateway = profile.integrations?.gpt;
   const credential = credentialReferenceState(gateway?.credential);
   const check = snapshot.dirty ? null : snapshot.connectionChecks?.gateway;
@@ -78,6 +87,7 @@ export function renderGatewayEditor(snapshot) {
     : MODEL_LIST_MESSAGES[catalogue?.state] ?? 'Load the models available to the saved profile’s credential.';
   return `<section class="cfg-card" data-section="gpt-gateway">
     <header class="cfg-card-head"><div><span class="cfg-kicker">GPT API KEY</span><h3>OpenAI credentials for this Project Profile</h3></div>${badge(invalidReference ? 'INVALID' : state)}</header>
+    ${startup}${legacy}${renderReadinessReceipt(snapshot, 'ai')}
     <p class="cfg-card-copy">Set or replace the key in a masked Windows prompt. The browser receives the outcome only. Save any unsaved profile edits before opening the prompt.</p>
     ${snapshot.phase === 'waiting-for-windows-key-prompt' ? '<p class="cfg-connection-detail">Complete the Windows API key dialog or cancel it to return here.</p>' : ''}
     <div class="cfg-action-row"><button type="button" data-cfg-action="set-openai-key"${disabled ? ' disabled' : ''}>SET / REPLACE API KEY</button><button type="button" data-cfg-action="check-openai-key"${disabled ? ' disabled' : ''}>CHECK SAVED KEY</button></div>

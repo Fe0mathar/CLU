@@ -122,7 +122,7 @@ test('PP-34: browser ambiguity and wrong-origin refusals are rendered by name', 
     snapshot.connectionChecks.browser = { state, ready: false, code, detail: `${code} detail` };
     const html = renderBrowserEditor(snapshot);
     assert.match(html, new RegExp(code));
-    assert.match(html, /TEST CONNECTION/);
+    assert.match(html, /TEST CHROME/);
   }
 });
 

@@ -16,11 +16,13 @@ import {
   disableProjectProfileStartup,
   enableProjectProfileStartup,
   loadActiveProjectProfileForStartup,
+  loadProjectProfileStartup,
   migrateLegacyActiveTarget,
   projectProfileCutoverConfirmation,
   ProjectProfileRegistry,
 } from '../../control/projectProfiles/index.js';
 import { bootstrapProjectWorkspace } from '../../control/projectProfiles/projectWorkspaceBootstrap.js';
+import { runWindowsPreflight } from '../../control/projectProfiles/windowsPreflight.js';
 import {
   deleteConfirmation,
   ProjectProfilesApiService,
@@ -29,6 +31,8 @@ import {
 import { assertNoSecretMaterial } from '../../shared/secretSafety.js';
 import { projectProfileSchema, type ProjectProfileRecord } from '../../shared/schemas.js';
 import { write } from '../output/formatter.js';
+import { prepareDashboardStartup, verifyProjectStartupWorkspace } from '../dashboardStartup.js';
+import { commandProjectBrowserRun, type BrowserRunOptions } from '../projectBrowserRun.js';
 
 interface ProjectGroupOptions {
   readonly repoRoot?: string;
@@ -71,6 +75,18 @@ export function registerProjectCommands(program: Command): void {
         },
       });
       return 0;
+    });
+  });
+
+  project.command('preflight').description('report Windows local-proof prerequisites for the active startup profile').action(() => {
+    process.exitCode = guarded(() => {
+      const options = project.opts<ProjectGroupOptions>();
+      if (options.profilesRoot !== undefined) {
+        throw new Error('Project preflight uses the saved startup registry. Remove --profiles-root.');
+      }
+      const report = runWindowsPreflight(findRepoRoot(options.repoRoot));
+      output(report);
+      return report.status === 'READY_FOR_LOCAL_PROOF_PREFLIGHT' ? 0 : 1;
     });
   });
 
@@ -239,6 +255,25 @@ export function registerProjectCommands(program: Command): void {
     });
 
   project
+    .command('browser-run')
+    .description('launch dedicated Chrome and execute one reviewed WebGPU scenario with durable evidence')
+    .argument('<project-id>')
+    .requiredOption('--scenario <file>', 'reviewed JSON scenario')
+    .requiredOption('--sha256 <digest>', 'exact SHA-256 of the reviewed scenario file')
+    .requiredOption('--build-id <id>', 'expected build identity reported by the served app')
+    .option('--phase <name>', 'canary, baseline or candidate', 'canary')
+    .option('--baseline <execution-id>', 'baseline evidence to compare with a candidate run')
+    .action(async (projectId: string, options: BrowserRunOptions) => {
+      process.exitCode = await guardedAsync(() => {
+        const groupOptions = project.opts<ProjectGroupOptions>();
+        if (groupOptions.profilesRoot !== undefined) {
+          throw new Error('Browser scenarios use the active startup registry. Omit --profiles-root.');
+        }
+        return commandProjectBrowserRun(findRepoRoot(groupOptions.repoRoot), projectId, options);
+      });
+    });
+
+  project
     .command('test-chrome')
     .description('attach to the configured debug endpoint and verify one exact allowed page target')
     .argument('<project-id>')
@@ -322,6 +357,19 @@ export function registerProjectCommands(program: Command): void {
     });
 
   project
+    .command('prepare-dashboard')
+    .description('prompt to bind dashboard startup to the exact saved active profile')
+    .action(async () => {
+      process.exitCode = await guardedAsync(async () => {
+        const options = project.opts<ProjectGroupOptions>();
+        const repoRoot = findRepoRoot(options.repoRoot);
+        if (loadProjectProfileStartup(repoRoot) !== null) return 0;
+        const context = projectContext(options);
+        return prepareDashboardStartup(context.repoRoot, context.registry);
+      });
+    });
+
+  project
     .command('cutover-v3')
     .description('enable profile-bound startup for a validated, initialized workspace')
     .argument('<project-id>')
@@ -341,17 +389,7 @@ export function registerProjectCommands(program: Command): void {
           verifyWorkspace: (candidate) => {
             const validation = validateProjectProfileRecord(candidate);
             if (!validation.valid) throw new Error(`Run project validate ${candidate.profile.projectId} and resolve the validation issues before cutover.`);
-            const runtime = openProjectRuntime(candidate, {
-              repoRoot: context.repoRoot,
-              withLog: false,
-              readOnly: true,
-            });
-            try {
-              runtime.requireMission();
-              runtime.requireFreshProjections();
-            } finally {
-              runtime.dispose();
-            }
+            verifyProjectStartupWorkspace(context.repoRoot, candidate);
           },
         }));
         return 0;

@@ -136,8 +136,26 @@ export function removeFileDurably(path: string): void {
  * the operator must investigate rather than risk two profile writers.
  */
 export function withExclusiveFileLock<T>(lockPath: string, action: () => T): T {
+  const release = acquireExclusiveFileLock(lockPath);
+  try {
+    return action();
+  } finally {
+    release();
+  }
+}
+
+/** The caller owns the lock until release, including across awaited operations. */
+export function acquireExclusiveFileLock(lockPath: string): () => void {
   mkdirSync(dirname(lockPath), { recursive: true });
   let fd: number;
+  const release = (): void => {
+    try {
+      closeSync(fd);
+    } finally {
+      rmSync(lockPath, { force: true });
+      fsyncDir(dirname(lockPath));
+    }
+  };
   try {
     fd = openSync(lockPath, 'wx', 0o600);
   } catch (error) {
@@ -162,14 +180,10 @@ export function withExclusiveFileLock<T>(lockPath: string, action: () => T): T {
     );
     writeAllSync(fd, lockRecord, 0);
     fsyncSync(fd);
-    return action();
-  } finally {
-    try {
-      closeSync(fd);
-    } finally {
-      rmSync(lockPath, { force: true });
-      fsyncDir(dirname(lockPath));
-    }
+    return release;
+  } catch (error) {
+    release();
+    throw error;
   }
 }
 

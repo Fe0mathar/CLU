@@ -7,16 +7,13 @@
  * a blocker with an exact action; it is never promoted to PASS by narrative.
  */
 
-import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { AUTHORITY_EVENT_TYPES } from '../control/mission.js';
-import { resolveDocumentationPack } from '../control/documentationPack.js';
+import { AUTHORITY_EVENT_TYPES, verifyInstalledPackAgainstSeal } from '../control/mission.js';
 import type { Runtime } from '../control/runtime.js';
 import { CYCLE_EVENT_TYPES } from '../cycle/cycleRegistry.js';
 import { readProofBoard, type ProofBoardView } from '../daemon/proofBoardProjection.js';
 import { EventLog } from '../memory/eventLog.js';
-import { hashBytes } from '../shared/ids.js';
 import {
   P2_CLOSURE_POLICY_PATH as CLOSURE_POLICY_PATH,
   P2_OPENAI_MODEL,
@@ -216,8 +213,8 @@ export function decideP2Closure(
     blockers.push(blocker(
       'P2-RATIFICATION',
       'governance',
-      'The current configured documentation-pack seal is not covered by the latest Creator ratification.',
-      'Run `clue docs ratify` and type the state-bound phrase.',
+      'The installed documentation pack does not verify against the latest Creator ratification.',
+      'Use `clue doctor` to check the installed pack. Repair any drift, then ratify the current pack when required.',
     ));
   }
   const successorEpoch = facts.currentMissionVersionId === null
@@ -282,6 +279,7 @@ export function proofFactsForLatestClosure(
   board: ProofBoardView,
   lastCycleId: string | null,
   minimumSequenceExclusive = -1,
+  maximumSequenceExclusive = Number.POSITIVE_INFINITY,
 ): Pick<P2ClosureFacts, 'currentMissionVersionId' | 'lastCycleId' | 'proofAttempts' | 'verdicts' | 'accepts' | 'greatBookEntries'> {
   const currentMissionVersionId = board.missionVersionId;
   const closureAttempts = lastCycleId === null
@@ -291,10 +289,16 @@ export function proofFactsForLatestClosure(
         currentMissionVersionId !== null &&
         attempt.missionVersion === currentMissionVersionId &&
         attempt.contract.sequence > minimumSequenceExclusive &&
-        (attempt.verdict === null || attempt.verdict.sequence > minimumSequenceExclusive),
+        attempt.contract.sequence < maximumSequenceExclusive,
       );
   const closureVerdicts = closureAttempts
-    .map((attempt) => attempt.verdict)
+    .map(({ contract, verdict }) =>
+      verdict !== null &&
+      verdict.sequence > contract.sequence &&
+      verdict.sequence < maximumSequenceExclusive
+        ? verdict
+        : null,
+    )
     .filter((verdict): verdict is NonNullable<typeof verdict> => verdict !== null);
   const closureAccepts = closureVerdicts.filter((verdict) => verdict.disposition === 'ACCEPT');
   return {
@@ -340,6 +344,7 @@ export function collectP2ClosureFacts(
     governance.epochCurrent && governance.epochSequence !== null
       ? governance.epochSequence
       : Number.MAX_SAFE_INTEGER,
+    latestClosure?.sequence,
   );
   const statusClosure = cycle?.lastClosure ?? null;
   const statusCycleAgreement =
@@ -401,10 +406,6 @@ export function assessP2Closure(
 ): P2ClosureAssessment {
   const { policy, sha256 } = readP2ClosurePolicy(runtime.repoRoot);
   const status = projectStatusFromRuntime(runtime, { capturedAt: generatedAt }).snapshot;
-  const board = readProofBoard(runtime, generatedAt);
-  const documentationPack = resolveDocumentationPack(runtime.repoRoot);
-  const liveSealPath = join(runtime.repoRoot, ...documentationPack.sealFile.split('/'));
-  const liveSealHash = existsSync(liveSealPath) ? hashBytes(readFileSync(liveSealPath)) : null;
   let latestRatification: {
     readonly eventId: string;
     readonly sequence: number;
@@ -412,6 +413,10 @@ export function assessP2Closure(
     readonly sealPath: string;
     readonly manifestPath: string;
     readonly sealSha256: string;
+    readonly manifestSha256: string;
+    readonly constitutionPath: string;
+    readonly constitutionSha256: string;
+    readonly declaredFileCount: number;
   } | null = null;
   let latestEpoch: {
     readonly sequence: number;
@@ -427,10 +432,11 @@ export function assessP2Closure(
     readonly grade: string;
     readonly criteriaMet: boolean;
   } | null = null;
-  for (const record of EventLog.replayReadOnly(join(runtime.workspaceRoot, 'events'))) {
+  const eventsRoot = runtime.projectState?.eventLogRoot ?? join(runtime.workspaceRoot, 'events');
+  for (const record of EventLog.replayReadOnly(eventsRoot)) {
     if (record.type === AUTHORITY_EVENT_TYPES.packRatified) {
       const parsed = packRatificationSchema.safeParse(record.payload);
-      if (!parsed.success) {
+      if (!parsed.success || record.actor !== 'creator' || record.subject_id !== record.mission_version) {
         throw new Error(`governance event ${record.id} has an invalid ratification payload`);
       }
       latestRatification = {
@@ -440,10 +446,16 @@ export function assessP2Closure(
         sealPath: parsed.data.seal_path,
         manifestPath: parsed.data.manifest_path,
         sealSha256: parsed.data.seal_sha256,
+        manifestSha256: parsed.data.manifest_sha256,
+        constitutionPath: parsed.data.constitution_path,
+        constitutionSha256: parsed.data.constitution_sha256,
+        declaredFileCount: parsed.data.declared_file_count,
       };
     } else if (record.type === AUTHORITY_EVENT_TYPES.epochSealed) {
       const parsed = epochSealSchema.safeParse(record.payload);
-      if (!parsed.success) {
+      if (!parsed.success || record.actor !== 'creator' || record.subject_id !== record.mission_version ||
+          parsed.data.legacy_head_sequence !== record.sequence - 1 ||
+          parsed.data.legacy_head_hash !== record.previous_hash) {
         throw new Error(`governance event ${record.id} has an invalid epoch payload`);
       }
       latestEpoch = {
@@ -471,24 +483,38 @@ export function assessP2Closure(
     }
   }
   const currentMissionVersionId = runtime.mission?.current()?.id ?? null;
+  let installedPack: ReturnType<typeof verifyInstalledPackAgainstSeal> | null = null;
+  if (latestRatification !== null && latestRatification.missionVersion === currentMissionVersionId) {
+    try {
+      installedPack = verifyInstalledPackAgainstSeal(runtime.repoRoot, 'assess P2 closure');
+    } catch {
+      // Preserve the read-only assessment and present an actionable governance blocker on drift.
+    }
+  }
   const ratificationCurrent =
     latestRatification !== null &&
     currentMissionVersionId !== null &&
-    liveSealHash !== null &&
+    installedPack !== null &&
     latestRatification.missionVersion === currentMissionVersionId &&
-    latestRatification.sealPath === documentationPack.sealFile &&
-    latestRatification.manifestPath === documentationPack.manifestFile &&
-    latestRatification.sealSha256 === liveSealHash;
+    latestRatification.sealPath === installedPack.pack.sealFile &&
+    latestRatification.manifestPath === installedPack.pack.manifestFile &&
+    latestRatification.sealSha256 === installedPack.sealSha &&
+    latestRatification.manifestSha256 === installedPack.declared.get(latestRatification.manifestPath) &&
+    latestRatification.constitutionPath === runtime.config.constitution.file &&
+    latestRatification.constitutionSha256 === installedPack.declared.get(latestRatification.constitutionPath) &&
+    latestRatification.declaredFileCount === installedPack.declared.size;
   const epochCurrent =
     ratificationCurrent &&
     latestEpoch !== null &&
     latestRatification !== null &&
     currentMissionVersionId !== null &&
-    liveSealHash !== null &&
+    installedPack !== null &&
     latestEpoch.missionVersion === currentMissionVersionId &&
     latestEpoch.sequence > latestRatification.sequence &&
     latestEpoch.ratificationEventId === latestRatification.eventId &&
-    latestEpoch.ratifiedSealSha256 === liveSealHash;
+    latestEpoch.ratifiedSealSha256 === installedPack.sealSha;
+  // The dashboard's recent-attempt limit is a display concern, not a closure boundary.
+  const board = readProofBoard(runtime, generatedAt, latestClosure?.cycleId);
   const facts = collectP2ClosureFacts(status, board, {
     ratificationCurrent,
     epochName: latestEpoch?.epochName ?? null,

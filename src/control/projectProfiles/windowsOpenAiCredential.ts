@@ -1,17 +1,19 @@
 /** Project-scoped OpenAI credentials managed by the interactive Windows user. */
 
 import { execFile, spawnSync } from 'node:child_process';
+import { realpathSync } from 'node:fs';
 import { win32 } from 'node:path';
 
+import { hashCanonicalJson } from '../../shared/ids.js';
 import { projectIdSchema } from '../../shared/schemas.js';
 
 const REFERENCE_PREFIX = 'credential-store:CLU-E/OpenAI/';
+const LEGACY_REFERENCE_PREFIX = `${REFERENCE_PREFIX}legacy/`;
 const TARGET_PREFIX = 'CLU-E/OpenAI/';
 const MAX_SECRET_LENGTH = 1280;
 const NATIVE_TIMEOUT_MS = 15_000;
 const PROMPT_TIMEOUT_MS = 120_000;
-const PRESENT_TTL_MS = 30_000;
-const MISSING_TTL_MS = 2_000;
+const CREDENTIAL_CACHE_TTL_MS = 30_000;
 
 const NATIVE_SCRIPT = String.raw`
 $ErrorActionPreference = 'Stop'
@@ -209,15 +211,33 @@ export function windowsOpenAiCredentialReference(projectId: string): string {
   return REFERENCE_PREFIX + projectIdSchema.parse(projectId);
 }
 
-function invocation(operation: Operation, projectId: string) {
+/** A separate namespace for an exact v2 target and its declared credential slot. */
+export function legacyWindowsOpenAiCredentialReference(targetRoot: string, environmentName: string): string {
+  let root = targetRoot;
+  if (process.platform === 'win32') {
+    try { root = realpathSync.native(root); } catch { /* Bind the configured path if the target is currently unavailable. */ }
+    root = win32.normalize(root).toLowerCase();
+  }
+  return LEGACY_REFERENCE_PREFIX + hashCanonicalJson([root, environmentName]);
+}
+
+function referenceKey(reference: string): string | null {
+  if (!reference.startsWith(REFERENCE_PREFIX)) return null;
+  const key = reference.slice(REFERENCE_PREFIX.length);
+  if (/^legacy\/[a-f0-9]{64}$/u.test(key)) return key;
+  const parsed = projectIdSchema.safeParse(key);
+  return parsed.success ? parsed.data : null;
+}
+
+function invocation(operation: Operation, key: string, displayId: string) {
   const systemRoot = process.env['SystemRoot'] ?? 'C:\\Windows';
   if (!/^[A-Za-z]:\\/u.test(systemRoot)) return null;
   const system32 = win32.join(systemRoot, 'System32');
   const cwd = win32.join(system32, 'WindowsPowerShell', 'v1.0');
   const script = [
     `$operation = '${operation}'`,
-    `$projectId = '${projectIdSchema.parse(projectId)}'`,
-    `$target = '${TARGET_PREFIX}' + $projectId`,
+    `$projectId = '${displayId.replaceAll("'", "''")}'`,
+    `$target = '${TARGET_PREFIX}${key}'`,
     NATIVE_SCRIPT,
   ].join('\n');
   const env: NodeJS.ProcessEnv = { SystemRoot: systemRoot, WINDIR: systemRoot, Path: `${system32};${cwd}` };
@@ -252,16 +272,25 @@ function forgetCredential(projectId: string): void {
 /** Undefined represents presence verified without reading the credential bytes. */
 function rememberCredential(projectId: string, value: string | null | undefined): void {
   forgetCredential(projectId);
-  const ttl = value === null ? MISSING_TTL_MS : PRESENT_TTL_MS;
-  const expiration = setTimeout(() => credentialCache.delete(projectId), ttl).unref();
+  const expiration = setTimeout(() => credentialCache.delete(projectId), CREDENTIAL_CACHE_TTL_MS).unref();
   credentialCache.set(projectId, { value, expiration });
 }
 
 export async function promptWindowsOpenAiCredential(projectId: string): Promise<WindowsOpenAiCredentialPrompt> {
-  const credentialReference = windowsOpenAiCredentialReference(projectId);
+  return promptForReference(windowsOpenAiCredentialReference(projectId), projectId);
+}
+
+export async function promptLegacyWindowsOpenAiCredential(
+  targetRoot: string, environmentName: string, projectId: string,
+): Promise<WindowsOpenAiCredentialPrompt> {
+  return promptForReference(legacyWindowsOpenAiCredentialReference(targetRoot, environmentName), projectId);
+}
+
+async function promptForReference(credentialReference: string, displayId: string): Promise<WindowsOpenAiCredentialPrompt> {
   if (process.platform !== 'win32') return { state: 'unsupported', credentialReference };
-  const command = invocation('prompt', projectId);
-  if (command === null || promptOpen) return { state: 'failed', credentialReference };
+  const key = referenceKey(credentialReference);
+  const command = key === null ? null : invocation('prompt', key, displayId);
+  if (command === null || key === null || promptOpen) return { state: 'failed', credentialReference };
   promptOpen = true;
   try {
     const state = await new Promise<PromptState>((resolve) => {
@@ -269,7 +298,7 @@ export async function promptWindowsOpenAiCredential(projectId: string): Promise<
         resolve(error === null ? 'stored' : error.code === 10 ? 'cancelled' : 'failed');
       });
     });
-    if (state === 'stored') forgetCredential(projectId);
+    if (state === 'stored') forgetCredential(key);
     return { state, credentialReference };
   } catch {
     return { state: 'failed', credentialReference };
@@ -278,9 +307,9 @@ export async function promptWindowsOpenAiCredential(projectId: string): Promise<
   }
 }
 
-function readNative(operation: 'read' | 'present', projectId: string) {
+function readNative(operation: 'read' | 'present', key: string) {
   if (process.platform !== 'win32') return null;
-  const command = invocation(operation, projectId);
+  const command = invocation(operation, key, '');
   if (command === null) return null;
   return spawnSync(command.executable, command.args, {
     ...command.options, timeout: NATIVE_TIMEOUT_MS,
@@ -288,7 +317,12 @@ function readNative(operation: 'read' | 'present', projectId: string) {
 }
 
 export function hasWindowsOpenAiCredential(projectId: string): boolean {
-  const id = projectIdSchema.parse(projectId);
+  return hasWindowsOpenAiCredentialReference(windowsOpenAiCredentialReference(projectId));
+}
+
+export function hasWindowsOpenAiCredentialReference(reference: string): boolean {
+  const id = referenceKey(reference);
+  if (id === null) return false;
   if (process.platform !== 'win32') return false;
   const cached = credentialCache.get(id);
   if (cached !== undefined) return cached.value !== null;
@@ -300,10 +334,9 @@ export function hasWindowsOpenAiCredential(projectId: string): boolean {
 
 /** Only use this value in the host gateway, never in HTTP responses or persisted data. */
 export function readWindowsOpenAiCredential(reference: string): string | null {
-  if (process.platform !== 'win32' || !reference.startsWith(REFERENCE_PREFIX)) return null;
-  const parsed = projectIdSchema.safeParse(reference.slice(REFERENCE_PREFIX.length));
-  if (!parsed.success) return null;
-  const projectId = parsed.data;
+  if (process.platform !== 'win32') return null;
+  const projectId = referenceKey(reference);
+  if (projectId === null) return null;
   const cached = credentialCache.get(projectId);
   if (cached?.value !== undefined) return cached.value;
   const value = readCredentialValue(projectId);

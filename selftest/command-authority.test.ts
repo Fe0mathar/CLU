@@ -121,6 +121,8 @@ test('DEV-P1-07: read-only and mission are the defaults, and the exceptions are 
     'project init',
     'project list',
     'project migrate-legacy',
+    'project preflight',
+    'project prepare-dashboard',
     'project readiness',
     'project rollback-v3',
     'project show',

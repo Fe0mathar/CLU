@@ -1,0 +1,16 @@
+{
+  "version": "clue-browser-scenario/1",
+  "id": "dedicated-webgpu-canary",
+  "warmups": 1,
+  "repetitions": 3,
+  "steps": [
+    { "type": "reload" },
+    { "type": "evaluate", "expression": "document.querySelector('#arm') ? true : Promise.reject(new Error('Canary page missing'))" },
+    { "type": "click", "x": 40, "y": 38 },
+    { "type": "click", "x": 40, "y": 86 },
+    { "type": "text", "text": "CLU-E" },
+    { "type": "key", "key": "Enter" }
+  ],
+  "measure": "globalThis.clueWebGpuCanary.measure()",
+  "screenshot": true
+}

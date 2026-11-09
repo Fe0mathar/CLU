@@ -33,6 +33,7 @@ const nativeSqliteTests = new Set([
   'workspace-project-identity.test.ts',
   'project-state-isolation.test.ts',
   'project-profile-runtime.test.ts',
+  'project-profile-migration.test.ts',
   'project-switching.test.ts',
   'project-profiles-fault-injection-acceptance.test.ts',
   'project-recognition-isolation.test.ts',

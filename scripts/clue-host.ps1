@@ -1,4 +1,4 @@
-#Requires -Version 7.0
+#Requires -Version 7.2
 <#
 .SYNOPSIS
     CLUE restricted host: a persistent PowerShell process that answers a fixed, typed command
@@ -283,10 +283,14 @@ function Resolve-RealPath {
         try {
             $item = Get-Item -LiteralPath $candidate -Force -ErrorAction Stop
             $target = $item.ResolveLinkTarget($true)
+            if ($null -eq $target -and ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+                Write-HostError 'PATH_UNREADABLE' 'path contains a reparse point that could not be resolved'
+            }
             $current = if ($null -ne $target) { [System.IO.Path]::GetFullPath($target.FullName) } else { $candidate }
         }
-        catch {
-            # Component is absent or unreadable; from here down the lexical path is the best answer.
+        catch [System.Management.Automation.ItemNotFoundException] {
+            # A missing component can be extended lexically. A permission or link resolution
+            # failure must reach the caller instead of letting the path pass its zone check.
             $current = $candidate
         }
     }
@@ -308,10 +312,10 @@ $script:OutputDir = Join-Path (Join-Path $script:ZoneRoots['workspace'] 'logs') 
 function Test-PathWithin {
     <# True when $child is $parent or lies beneath it, comparing already-resolved paths. #>
     param([string] $Parent, [string] $Child)
-    if ($Parent -eq $Child) { return $true }
     $sep = [System.IO.Path]::DirectorySeparatorChar
     $comparison = if ($IsWindows) { [System.StringComparison]::OrdinalIgnoreCase } else { [System.StringComparison]::Ordinal }
-    return $Child.StartsWith($Parent + $sep, $comparison)
+    if ([string]::Equals($Parent, $Child, $comparison)) { return $true }
+    return $Child.StartsWith($Parent.TrimEnd($sep) + $sep, $comparison)
 }
 
 function Get-Zone {
@@ -432,27 +436,40 @@ function Invoke-CapturedProcess {
         [Parameter(Mandatory)] [string[]] $Argv,
         [Parameter(Mandatory)] [string] $WorkingDirectory,
         [Parameter(Mandatory)] [string] $Label,
-        [int] $TimeoutMs = 600000
+        [int] $TimeoutMs = 600000,
+        [switch] $Git
     )
 
-    [System.IO.Directory]::CreateDirectory($script:OutputDir) | Out-Null
-    $stamp = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
-    $stdoutPath = Join-Path $script:OutputDir "$Label-$stamp.out.log"
-    $stderrPath = Join-Path $script:OutputDir "$Label-$stamp.err.log"
+    $output = Resolve-AndEnforceZone -RawPath $script:OutputDir -RequiredZone 'workspace'
+    [System.IO.Directory]::CreateDirectory($output.Path) | Out-Null
+    $stamp = [Guid]::NewGuid().ToString('N')
+    $stdoutPath = Join-Path $output.Path "$Label-$stamp.out.log"
+    $stderrPath = Join-Path $output.Path "$Label-$stamp.err.log"
 
     $psi = [System.Diagnostics.ProcessStartInfo]::new()
     $psi.FileName = $Executable
     foreach ($a in $Argv) { $psi.ArgumentList.Add($a) }
     $psi.WorkingDirectory = $WorkingDirectory
+    $psi.RedirectStandardInput = $true
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError = $true
     $psi.UseShellExecute = $false
     $psi.CreateNoWindow = $true
+    foreach ($key in @($psi.Environment.Keys)) {
+        if ($script:SecretEnvNames -contains $key -or ($Git -and $key -match '^(GIT|GCM|GH)_')) {
+            [void] $psi.Environment.Remove($key)
+        }
+    }
+    if ($Git) {
+        $psi.Environment['GIT_ALLOW_PROTOCOL'] = 'file'
+        $psi.Environment['GIT_TERMINAL_PROMPT'] = '0'
+    }
 
     $proc = [System.Diagnostics.Process]::new()
     $proc.StartInfo = $psi
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     [void] $proc.Start()
+    $proc.StandardInput.Close()
 
     $stdoutTask = $proc.StandardOutput.ReadToEndAsync()
     $stderrTask = $proc.StandardError.ReadToEndAsync()
@@ -619,6 +636,79 @@ function Resolve-AndEnforceZone {
     return [pscustomobject]@{ Path = $resolved; Zone = $zone }
 }
 
+function Resolve-GitOperandPath {
+    param([string] $Path, [string] $Base, [string[]] $Zones)
+    if (($IsWindows -and (($Path -replace '^[A-Za-z]:[\\/]', '') -match ':')) -or $Path -match '^[\\/]{2}') {
+        Write-HostError 'INVALID_ARGUMENT' 'Git operand must be a local filesystem path'
+    }
+    $resolved = Resolve-RealPath ([System.IO.Path]::GetFullPath($Path, $Base))
+    if ($Zones -notcontains (Get-Zone $resolved)) {
+        Write-HostError 'ZONE_MISMATCH' 'Git operand is outside the allowed filesystem zones'
+    }
+    return $resolved
+}
+
+function Find-HostApplication {
+    param([string] $Name)
+    foreach ($entry in @(Get-Command -Name $Name -CommandType Application -All -ErrorAction SilentlyContinue)) {
+        $resolved = Resolve-RealPath $entry.Source
+        if ((Get-Zone $resolved) -eq 'external') { return $resolved }
+    }
+    Write-HostError 'HOST_ERROR' "A host $Name installation is required outside the configured zones"
+}
+
+function Get-HostNpmTool {
+    if ($IsWindows) {
+        $node = Find-HostApplication 'node.exe'
+        $npm = Find-HostApplication 'npm.cmd'
+        $cli = Resolve-RealPath (Join-Path ([System.IO.Path]::GetDirectoryName($npm)) 'node_modules/npm/bin/npm-cli.js')
+    }
+    else {
+        $node = Find-HostApplication 'node'
+        $cli = Find-HostApplication 'npm'
+    }
+    if ((Get-Zone $cli) -ne 'external' -or -not (Test-Path -LiteralPath $cli -PathType Leaf)) {
+        Write-HostError 'HOST_ERROR' 'A host npm CLI installation is required outside the configured zones'
+    }
+    return [pscustomobject]@{ Node = $node; Cli = $cli }
+}
+
+function Invoke-HostGit {
+    param([string[]] $Argv, [string] $Root, [string] $Label)
+    $tool = Find-HostApplication ($(if ($IsWindows) { 'git.exe' } else { 'git' }))
+    $gitArgs = @('--no-optional-locks', '--no-replace-objects', '-c', 'core.fsmonitor=false', '-c', 'core.hooksPath=/dev/null',
+        '-c', 'submodule.recurse=false', '-c', 'fetch.recurseSubmodules=false', '-c', 'maintenance.auto=false', '-c', 'gc.auto=0') + $Argv
+    return Invoke-CapturedProcess -Executable $tool -Argv $gitArgs -WorkingDirectory $Root -Label $Label -Git
+}
+
+function Assert-HostGitRoot {
+    param([string] $Root, [string] $Zone)
+    $top = Invoke-HostGit @('rev-parse', '--show-toplevel') $Root 'git-check-root'
+    if ($top.ExitCode -ne 0 -or [string]::IsNullOrWhiteSpace($top.Stdout)) {
+        Write-HostError 'HOST_ERROR' 'Git repository root is unavailable'
+    }
+    $resolved = Resolve-AndEnforceZone -RawPath $top.Stdout.Trim() -RequiredZone $Zone
+    if (-not (Test-PathWithin $resolved.Path $Root) -or -not (Test-PathWithin $Root $resolved.Path)) {
+        Write-HostError 'ZONE_MISMATCH' 'Git command requires the exact top-level checkout directory'
+    }
+    foreach ($flag in @('--absolute-git-dir', '--git-common-dir')) {
+        $metadata = Invoke-HostGit @('rev-parse', '--path-format=absolute', $flag) $Root 'git-check-metadata'
+        if ($metadata.ExitCode -ne 0 -or [string]::IsNullOrWhiteSpace($metadata.Stdout)) {
+            Write-HostError 'HOST_ERROR' 'Git repository metadata directory is unavailable'
+        }
+        [void] (Resolve-AndEnforceZone -RawPath $metadata.Stdout.Trim() -RequiredZone $Zone)
+    }
+}
+
+function Invoke-CanonicalFetch {
+    param([string] $Shadow, [string] $Canonical, [string] $Ref)
+    $effective = Invoke-HostGit @('ls-remote', '--get-url', '--', $Canonical) $Shadow 'shadow-check-source'
+    if ($effective.ExitCode -ne 0 -or $effective.Stdout.Trim() -cne $Canonical) {
+        Write-HostError 'HOST_ERROR' 'Git did not resolve the fetch source to the canonical checkout'
+    }
+    return Invoke-HostGit @('fetch', '--no-tags', '--no-recurse-submodules', '--', $Canonical, $Ref) $Shadow 'shadow-fetch'
+}
+
 function Invoke-FsHash {
     param($Payload)
     $zone = Get-StringArg $Payload 'zone'
@@ -691,7 +781,33 @@ function Invoke-Git {
     if (-not (Test-Path -LiteralPath $r.Path -PathType Container)) {
         Write-HostError 'NOT_FOUND' 'git root directory does not exist'
     }
-    $run = Invoke-CapturedProcess -Executable 'git' -Argv $argv -WorkingDirectory $r.Path -Label "git-$verb"
+    if ($verb -eq 'clone') {
+        $source = Resolve-GitOperandPath $argv[2] $r.Path @('canonical')
+        $destination = Resolve-GitOperandPath $argv[3] $r.Path @('shadow')
+        Assert-HostGitRoot $source 'canonical'
+        $effective = Invoke-HostGit @('ls-remote', '--get-url', '--', $source) $r.Path 'shadow-check-source'
+        if ($effective.ExitCode -ne 0 -or $effective.Stdout.Trim() -cne $source) {
+            Write-HostError 'HOST_ERROR' 'Git did not resolve the clone source to the canonical checkout'
+        }
+        $run = Invoke-HostGit @('clone', '--no-checkout', '--no-local', '--', $source, $destination) $r.Path "git-$verb"
+    }
+    else {
+        if ($verb -eq 'hashObject') {
+            $argv[1] = Resolve-GitOperandPath $argv[1] $r.Path @($zone)
+        }
+        elseif ($verb -eq 'apply' -or $verb -eq 'applyCheck') {
+            $argv[$argv.Length - 1] = Resolve-GitOperandPath $argv[$argv.Length - 1] $r.Path @('shadow', 'workspace')
+        }
+        Assert-HostGitRoot $r.Path $zone
+        if ($verb -eq 'fetch') {
+            $canonical = Resolve-AndEnforceZone -RawPath $script:ZoneRoots['canonical'] -RequiredZone 'canonical'
+            Assert-HostGitRoot $canonical.Path 'canonical'
+            $run = Invoke-CanonicalFetch $r.Path $canonical.Path 'HEAD'
+        }
+        else {
+            $run = Invoke-HostGit $argv $r.Path "git-$verb"
+        }
+    }
     # Git stdout is returned inline (small by construction — porcelain status, a hash, a ref) but
     # still redacted; large output belongs in shadow.run's captured files, not here.
     $result = [ordered]@{
@@ -708,23 +824,27 @@ function Invoke-ShadowRefresh {
     $canonicalRoot = Get-StringArg $Payload 'canonicalRoot'
     $shadowRoot = Get-StringArg $Payload 'shadowRoot'
     $commit = Get-StringArg $Payload 'commit' -AllowNull $true
+    if ($null -ne $commit -and $commit -cnotmatch '\A[0-9a-f]{7,64}\z') {
+        Write-HostError 'INVALID_ARGUMENT' 'shadow refresh requires a canonical commit ID or null'
+    }
 
     $canon = Resolve-AndEnforceZone -RawPath $canonicalRoot -RequiredZone 'canonical'
     $shadow = Resolve-AndEnforceZone -RawPath $shadowRoot -RequiredZone 'shadow'
 
-    # Fetch the canonical history into the shadow tree, then check out the requested commit (or the
-    # canonical HEAD). Every step is a fixed Git argv run inside the shadow zone.
-    Invoke-CapturedProcess -Executable 'git' -Argv @('fetch', '--all', '--prune') -WorkingDirectory $shadow.Path -Label 'shadow-fetch' | Out-Null
-    $target = $commit
-    if ([string]::IsNullOrEmpty($target)) {
-        $headRun = Invoke-CapturedProcess -Executable 'git' -Argv @('rev-parse', 'HEAD') -WorkingDirectory $canon.Path -Label 'shadow-canon-head'
-        if ($headRun.ExitCode -ne 0) { Write-HostError 'HOST_ERROR' 'could not read canonical HEAD' }
-        $target = $headRun.Stdout.Trim()
+    Assert-HostGitRoot $canon.Path 'canonical'
+    Assert-HostGitRoot $shadow.Path 'shadow'
+    $wanted = if ($null -eq $commit) { 'HEAD' } else { $commit }
+    $headRun = Invoke-HostGit @('rev-parse', '--verify', "${wanted}^{commit}") $canon.Path 'shadow-canon-head'
+    $target = $headRun.Stdout.Trim()
+    if ($headRun.ExitCode -ne 0 -or $target -cnotmatch '\A(?:[0-9a-f]{40}|[0-9a-f]{64})\z') {
+        Write-HostError 'HOST_ERROR' 'could not resolve the requested canonical commit'
     }
-    $checkout = Invoke-CapturedProcess -Executable 'git' -Argv @('checkout', '--force', $target) -WorkingDirectory $shadow.Path -Label 'shadow-checkout'
+    $fetch = Invoke-CanonicalFetch $shadow.Path $canon.Path $target
+    if ($fetch.ExitCode -ne 0) { Write-HostError 'HOST_ERROR' 'could not fetch the requested canonical commit' }
+    $checkout = Invoke-HostGit @('checkout', '--force', '--detach', $target) $shadow.Path 'shadow-checkout'
     if ($checkout.ExitCode -ne 0) { Write-HostError 'HOST_ERROR' "shadow checkout of $target failed" }
 
-    $headRun2 = Invoke-CapturedProcess -Executable 'git' -Argv @('rev-parse', 'HEAD') -WorkingDirectory $shadow.Path -Label 'shadow-head'
+    $headRun2 = Invoke-HostGit @('rev-parse', 'HEAD') $shadow.Path 'shadow-head'
     $head = $headRun2.Stdout.Trim().ToLowerInvariant()
     if ($head -notmatch '^[0-9a-f]{7,64}$') { Write-HostError 'HOST_ERROR' 'shadow HEAD is not a git object id' }
 
@@ -766,21 +886,34 @@ function Invoke-ShadowRun {
     if ($script -eq 'serve.start') {
         # The dev server is long-lived; start it in the background, capture its early output, and
         # report started/failed rather than blocking until it exits.
-        [System.IO.Directory]::CreateDirectory($script:OutputDir) | Out-Null
-        $stamp = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
-        $outPath = Join-Path $script:OutputDir "serve-$stamp.out.log"
-        $errPath = Join-Path $script:OutputDir "serve-$stamp.err.log"
+        if ($null -ne $script:ServeProcess -and -not $script:ServeProcess.HasExited) {
+            Write-HostError 'HOST_ERROR' 'The shadow server is already running'
+        }
+        $npmTool = Get-HostNpmTool
+        $output = Resolve-AndEnforceZone -RawPath $script:OutputDir -RequiredZone 'workspace'
+        [System.IO.Directory]::CreateDirectory($output.Path) | Out-Null
+        $stamp = [Guid]::NewGuid().ToString('N')
+        $outPath = Join-Path $output.Path "serve-$stamp.out.log"
+        $errPath = Join-Path $output.Path "serve-$stamp.err.log"
         $psi = [System.Diagnostics.ProcessStartInfo]::new()
-        $psi.FileName = 'npm'
+        $psi.FileName = $npmTool.Node
+        $psi.ArgumentList.Add($npmTool.Cli)
         foreach ($a in $script:ShadowArgv['serve.start']) { $psi.ArgumentList.Add($a) }
         $psi.WorkingDirectory = $shadow.Path
         $psi.UseShellExecute = $false
+        $psi.RedirectStandardInput = $true
         $psi.RedirectStandardOutput = $true
         $psi.RedirectStandardError = $true
         $psi.CreateNoWindow = $true
+        foreach ($key in @($psi.Environment.Keys)) {
+            if ($script:SecretEnvNames -contains $key) { [void] $psi.Environment.Remove($key) }
+        }
         $proc = [System.Diagnostics.Process]::new()
         $proc.StartInfo = $psi
         [void] $proc.Start()
+        $proc.StandardInput.Close()
+        $proc.BeginOutputReadLine()
+        $proc.BeginErrorReadLine()
         $script:ServeProcess = $proc
         Start-Sleep -Milliseconds ([Math]::Min($timeoutMs, 1500))
         $started = -not $proc.HasExited
@@ -799,8 +932,9 @@ function Invoke-ShadowRun {
         return @{ result = $result; resolvedPath = $shadow.Path; zone = $shadow.Zone }
     }
 
-    $argv = $script:ShadowArgv[$script]
-    $run = Invoke-CapturedProcess -Executable 'npm' -Argv $argv -WorkingDirectory $shadow.Path -Label "shadow-$script" -TimeoutMs $timeoutMs
+    $npmTool = Get-HostNpmTool
+    $argv = @($npmTool.Cli) + $script:ShadowArgv[$script]
+    $run = Invoke-CapturedProcess -Executable $npmTool.Node -Argv $argv -WorkingDirectory $shadow.Path -Label "shadow-$script" -TimeoutMs $timeoutMs
     $result = [ordered]@{
         script = $script
         exitCode = [int] $run.ExitCode

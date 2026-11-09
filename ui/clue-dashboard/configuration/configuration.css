@@ -29,6 +29,13 @@
 .cfg-layout { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:12px; margin-top:12px; align-items:start; }
 .cfg-column { display:grid; gap:12px; min-width:0; }
 .cfg-card { min-width:0; padding:14px; }
+.cfg-card:focus-visible, .cfg-card[tabindex="-1"]:focus { outline:2px solid #35ceff; outline-offset:-2px; }
+.cfg-startup-binding { margin-top:12px; border-color:rgba(244,175,45,.30); }
+.cfg-startup-binding strong, .cfg-startup-binding-link strong { color:#ffd47c; }
+.cfg-startup-binding summary { color:#9dd8ed; cursor:pointer; }
+.cfg-startup-binding ol { margin:10px 0 0; padding-left:20px; color:#a9c8da; }
+.cfg-startup-binding li + li { margin-top:8px; }
+.cfg-legacy-connection { margin:10px 0; padding:0 0 10px; border-bottom:1px solid rgba(104,190,232,.14); }
 .cfg-card-head { display:flex; align-items:flex-start; justify-content:space-between; gap:14px; padding-bottom:10px; border-bottom:1px solid rgba(104,190,232,.14); }
 .cfg-card-head h3 { margin:3px 0 0; color:#dff5ff; font:700 13px/1.2 ui-monospace,Consolas,monospace; letter-spacing:.04em; }
 .cfg-kicker { color:#00a3e0; font:800 9px/1 ui-monospace,Consolas,monospace; letter-spacing:.16em; }

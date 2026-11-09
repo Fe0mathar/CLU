@@ -20,9 +20,6 @@
     height: 52px; display: flex; align-items: center; gap: 14px; padding: 0 14px;
     border-bottom: 1px solid var(--edge); background: rgba(8,13,24,.85);
   }
-  #rail .brand { font-weight: 700; letter-spacing: .18em; color: var(--accent); }
-  #rail .meta { color: var(--dim); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  #rail .spacer { flex: 1; }
   .pill { border: 1px solid var(--edge); border-radius: 999px; padding: 3px 10px; font-size: 11px; color: var(--dim); }
   .pill.on { color: var(--good); border-color: rgba(55,224,139,.4); }
   .pill.run { color: var(--warn); border-color: rgba(255,180,84,.5); }
@@ -34,7 +31,6 @@
   }
   button:hover { border-color: var(--accent); }
   button:disabled { opacity: .45; cursor: default; }
-  #start { color: #04121f; background: linear-gradient(180deg, #46e0ff, #14a8d8); border-color: #6ff; }
   #grid {
     height: calc(100% - 52px); display: grid; gap: 10px; padding: 10px;
     grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr;
@@ -92,17 +88,12 @@
   #toplevelTabs button[aria-selected="true"] {
     color: var(--accent); border-color: var(--accent); background: rgba(33,199,255,.08);
   }
-  /* DEV-P1-17: density. One attribute on the root; stylesheets read it, JavaScript never asks it
-     to decide content. Compact tightens the shell's own spacing — rail height, grid gap, quadrant
-     header padding — and the 52px rail constant moves through a variable so both densities keep
-     the grid exactly viewport-filling. Nothing appears or disappears; §3.6 forbids that. */
+  /* The rail, dashboard grid, and configuration panel share one responsive rail height. */
   :root { --rail-h: 52px; --grid-gap: 10px; --grid-pad: 10px; --quad-head-pad: 6px 10px; }
-  [data-density="compact"] { --rail-h: 40px; --grid-gap: 6px; --grid-pad: 6px; --quad-head-pad: 3px 8px; }
   #rail { height: var(--rail-h); }
   #grid { height: calc(100% - var(--rail-h)); gap: var(--grid-gap); padding: var(--grid-pad); }
   .quad > header { padding: var(--quad-head-pad); }
   #cfg { top: var(--rail-h); }
-  #densityBtn[aria-pressed="true"] { color: var(--accent); border-color: var(--accent); }
 
   /* Focus must stay visible: the roving tabindex means the keyboard is the intended way in. */
   #toplevelTabs button:focus-visible, #grid:focus-visible, #cfg:focus-visible {
@@ -114,24 +105,46 @@
 
 </style>
 <link rel="stylesheet" href="/ui/configuration/configuration.css" />
+<link rel="stylesheet" href="/ui/components/ribbon.css" />
+<link rel="stylesheet" href="/ui/quadrants/q4Terminal.css" />
 </head>
 <body>
   <header id="rail" role="banner">
-    <span class="brand">CLU-E</span>
-    <span class="meta" id="mission">—</span>
-    <span class="pill" id="activeTargetPill" title="No active Project Profile">TARGET —</span>
-    <span class="pill" id="sealPill">SEAL —</span>
-    <span class="pill" id="streamPill">STREAM —</span>
-    <span class="pill" id="runPill">IDLE</span>
-    <span class="spacer"></span>
-    <span class="meta" id="runLine"></span>
-    <button type="button" id="densityBtn" aria-pressed="false"
-            title="Toggle presentation density (spacing only; nothing gains or loses content)">DENSITY</button>
+    <div class="clue-ribbon-brand" aria-label="CLU-E" role="img">
+      <svg class="clue-ribbon-wordmark" viewBox="0 0 104 24" aria-hidden="true">
+        <path d="M4 0H19L23 4H6L3 7V17L6 20H23L19 24H4L0 20V4ZM27 0H31V20H47V24H27ZM51 0H55V17L58 20H66L69 17V0H73V19L68 24H56L51 19ZM77 10H85V14H77ZM89 0H104V4H93V10H102V14H93V20H104V24H89Z"/>
+      </svg>
+      <canvas width="228" height="68" aria-hidden="true"></canvas>
+    </div>
+    <div class="clue-ribbon-seal" title="Awaiting a sealed status frame">
+      <span class="clue-ribbon-seal-value">—</span>
+      <span class="clue-ribbon-seal-glyphs" aria-hidden="true" hidden></span>
+      <span class="clue-ribbon-seal-line" aria-hidden="true"></span>
+      <span class="clue-ribbon-seal-label">SEAL</span>
+    </div>
+    <div class="clue-ribbon-bulbs" aria-label="System readiness" role="group">
+      <button type="button" data-ribbon-capability="status" data-state="unknown" aria-expanded="false" aria-controls="ribbonDetails"><span aria-hidden="true" class="clue-ribbon-bulb"></span><span>STATUS</span></button>
+      <button type="button" data-ribbon-capability="git" data-state="unknown" aria-expanded="false" aria-controls="ribbonDetails"><span aria-hidden="true" class="clue-ribbon-bulb"></span><span>GIT</span></button>
+      <button type="button" data-ribbon-capability="ai" data-state="unknown" aria-expanded="false" aria-controls="ribbonDetails"><span aria-hidden="true" class="clue-ribbon-bulb"></span><span>AI</span></button>
+      <button type="button" data-ribbon-capability="chrome" data-state="unknown" aria-expanded="false" aria-controls="ribbonDetails"><span aria-hidden="true" class="clue-ribbon-bulb"></span><span>CHROME</span></button>
+      <button type="button" data-ribbon-capability="console" data-state="unknown" aria-expanded="false" aria-controls="ribbonDetails"><span aria-hidden="true" class="clue-ribbon-bulb"></span><span>CONSOLE</span></button>
+    </div>
     <nav id="toplevelTabs" role="tablist" aria-label="Top level views">
-      <button type="button" id="tabDashboard">DASHBOARD</button>
-      <button type="button" id="tabConfiguration">CONFIGURATION</button>
+      <button type="button" id="tabDashboard" aria-label="Dashboard" title="Dashboard" aria-selected="true">
+        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z"/></svg>
+      </button>
+      <button type="button" id="tabConfiguration" aria-label="Configuration" title="Configuration">
+        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M3 6h5m4 0h9M3 12h11m4 0h3M3 18h3m4 0h11"/><circle cx="10" cy="6" r="2"/><circle cx="16" cy="12" r="2"/><circle cx="8" cy="18" r="2"/></svg>
+      </button>
     </nav>
-    <button id="start">▶ START CLU-E</button>
+    <section id="ribbonDetails" aria-labelledby="ribbonDetailsTitle" hidden>
+      <div class="clue-ribbon-details-head">
+        <h2 id="ribbonDetailsTitle"></h2>
+        <button id="ribbonDetailsClose" type="button" aria-label="Close readiness details">×</button>
+      </div>
+      <p id="ribbonDetailsSummary" role="status"></p>
+      <ul id="ribbonDetailsChecks"></ul>
+    </section>
   </header>
 
   <main id="shell">
@@ -156,10 +169,26 @@
     </section>
 
     <section class="quad" id="q4">
-      <header><b>Q4</b> OPERATIONAL CONSOLE — REAL TRAFFIC ONLY</header>
-      <div class="body">
-        <div id="work"><div class="empty" style="grid-column:1/-1">no current work contract — nothing is running</div></div>
-        <div id="feed"><div class="empty">no operational traffic recorded yet — press START CLU-E</div></div>
+      <header><b>Q4</b> OPERATIONAL CONSOLE</header>
+      <div class="body q4-console">
+        <section class="q4-operation-pane" aria-label="Operational feed" tabindex="0">
+          <h2 class="q4-pane-title">Operational feed</h2>
+          <div id="work"><div class="empty" style="grid-column:1/-1">No current work contract</div></div>
+          <ol id="q4-command-receipts" class="q4-command-receipts" aria-label="Command receipts" hidden></ol>
+          <div id="feed"><div class="empty">No operational traffic recorded. Enter /start in the console to begin.</div></div>
+        </section>
+        <section class="q4-command-pane" aria-labelledby="q4-terminal-title">
+          <div class="q4-terminal-heading">
+            <h2 id="q4-terminal-title" class="q4-pane-title">Master Agent console</h2>
+            <span class="q4-terminal-help" id="q4-terminal-help"><code>/help</code> for CLU-E commands</span>
+          </div>
+          <ol id="q4-terminal-log" class="q4-terminal-log" role="log" aria-label="Command and conversation history" aria-live="polite" tabindex="0"></ol>
+          <form id="q4-terminal-form" class="q4-terminal-form" aria-label="CLU-E command or message" aria-busy="false">
+            <label for="q4-terminal-input" class="q4-terminal-prompt" aria-label="CLU-E command or message">CLU-E<span aria-hidden="true">›</span></label>
+            <input id="q4-terminal-input" type="text" maxlength="2048" aria-label="CLU-E command or message" aria-describedby="q4-terminal-help" autocomplete="off" spellcheck="false" placeholder="/start or ask the Master Agent…" />
+            <button type="submit" id="q4-terminal-submit" aria-label="Submit to CLU-E" title="Submit (Enter)">↵</button>
+          </form>
+        </section>
       </div>
     </section>
   </div>
