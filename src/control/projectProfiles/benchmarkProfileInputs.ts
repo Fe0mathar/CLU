@@ -134,6 +134,19 @@ function parseInputs(bytes: Buffer, expectedSha256: string, repoRoot: string): A
   return { ...capsule, bytes: inputs };
 }
 
+/** Broker admission also pins the profile to the exact writable workspace granted by the OS. */
+export function assertBenchmarkProfileWorkspace(
+  bytes: Uint8Array,
+  sha256: string,
+  repoRoot: string,
+  workspaceRoot: string,
+): void {
+  const verified = parseInputs(Buffer.from(bytes), sha256, repoRoot);
+  if (relative(workspaceRoot, realpathSync.native(verified.record.profile.workspaceRoot)) !== '') {
+    throw new Error('Supervised benchmark profile does not bind the granted workspace.');
+  }
+}
+
 /** The explicit worker entry point establishes this scope only for one fixed CLI command. */
 export function withBenchmarkProfileInputs<T>(
   path: string,

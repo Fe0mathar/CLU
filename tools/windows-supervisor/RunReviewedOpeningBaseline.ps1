@@ -1,5 +1,11 @@
 [CmdletBinding()]
-param()
+param(
+    [switch] $Candidate,
+    [string] $OpeningReport,
+    [string] $ProofContract,
+    [string] $PatchManifest,
+    [string] $OfflineCache
+)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -20,6 +26,18 @@ function Read-ReviewedScript([string] $Path, [string] $Sha256) {
     } finally { $stream.Dispose() }
 }
 
+function Write-PinnedReceipt([string] $Directory, [string] $Name, $Body) {
+    $path = Join-Path $Directory $Name
+    $bytes = [Text.UTF8Encoding]::new($false, $true).GetBytes(($Body | ConvertTo-Json -Depth 16) + "`n")
+    $stream = [IO.File]::Open($path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+    try {
+        $stream.Write($bytes, 0, $bytes.Length)
+        $stream.Flush($true)
+    } finally { $stream.Dispose() }
+    $sha = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant()
+    return [pscustomobject]@{ path = $path; sha256 = $sha; lock = Open-PinnedFile $path $sha 1MB }
+}
+
 function New-LiveQualification($Reviewed, [string] $Directory, [string] $Commit, [string] $ReviewDigest) {
     $cases = [ordered]@{}
     foreach ($name in $script:reviewedNativeCases) { $cases[$name] = $Reviewed.qualification['cases'][$name] }
@@ -37,9 +55,9 @@ function New-LiveQualification($Reviewed, [string] $Directory, [string] $Commit,
         host = $Reviewed.qualification['host']
         cases = $cases
         operatorReview = [ordered]@{
-            operation = 'live-opening-baseline'
+            operation = 'profile-proof-session'
             commit = $Commit
-            reviewDigest = $ReviewDigest
+            openingReviewDigest = $ReviewDigest
             networkFaultScope = $script:reviewedFaultScope
             offHostLan = 'NOT_TESTED'
             admissionSha256 = $script:reviewedAdmissionSha
@@ -47,15 +65,21 @@ function New-LiveQualification($Reviewed, [string] $Directory, [string] $Commit,
             networkFaultBundleSha256 = $Reviewed.bundleSha
         }
     }
-    $path = Join-Path $Directory 'qualification.json'
-    $bytes = [Text.UTF8Encoding]::new($false, $true).GetBytes(($body | ConvertTo-Json -Depth 16) + "`n")
-    $stream = [IO.File]::Open($path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
-    try {
-        $stream.Write($bytes, 0, $bytes.Length)
-        $stream.Flush($true)
-    } finally { $stream.Dispose() }
-    $sha = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant()
-    return [pscustomobject]@{ path = $path; sha256 = $sha; lock = Open-PinnedFile $path $sha 1MB }
+    return Write-PinnedReceipt $Directory 'qualification.json' $body
+}
+
+function New-OperationAuthorization([string] $Directory, [string] $Operation, [string] $Commit,
+        [string] $ReviewDigest, [string] $QualificationSha256) {
+    $body = [ordered]@{
+        schemaVersion = 'clue-windows-proof-operation-authorization/1'
+        checkedAt = [DateTime]::UtcNow.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", [Globalization.CultureInfo]::InvariantCulture)
+        operation = $Operation
+        commit = $Commit
+        reviewDigest = $ReviewDigest
+        qualificationSha256 = $QualificationSha256
+        authorization = 'APPROVED'
+    }
+    return Write-PinnedReceipt $Directory 'operator-authorization.json' $body
 }
 
 function Invoke-BaselineGit([string] $Git, [string] $Repo, [string] $FixedPath, [string[]] $Arguments) {
@@ -133,15 +157,19 @@ $commit = $null
 $reviewed = $null
 $reviewDigest = $null
 $receipt = $null
+$authorization = $null
 $inspection = $null
 $inspectionExitCode = $null
 $inspectionDiagnostics = @()
 $childOutcome = $null
 $baselineExitCode = $null
 $reportPath = $null
+$runDirectory = $null
 $blocker = $null
 $phase = 'BASELINE_PREFLIGHT_UNVERIFIED'
 $result = 2
+$operation = if ($Candidate) { 'live-candidate-proof' } else { 'live-opening-baseline' }
+$reportKind = if ($Candidate) { 'LIVE_CANDIDATE_PROOF' } else { 'LIVE_OPENING_BASELINE' }
 try {
     if (!$IsWindows -or $PSVersionTable.PSVersion.Major -lt 7 -or ![Environment]::UserInteractive) {
         throw 'BASELINE_INTERACTIVE_WINDOWS_REQUIRED'
@@ -173,7 +201,23 @@ try {
     Assert-ExternalPath $evidence $repo $programFiles
     $stamp = [DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss-fff', [Globalization.CultureInfo]::InvariantCulture)
     $nonce = [Guid]::NewGuid().ToString('N').Substring(0, 12)
-    $reportPath = Join-Path $evidence "CLU-E_WINDOWS_LIVE_OPENING_BASELINE_$stamp-$nonce.json"
+    $reportPath = Join-Path $evidence "CLU-E_WINDOWS_$($reportKind)_$stamp-$nonce.json"
+    if ($Candidate) {
+        foreach ($candidatePath in @($OpeningReport, $ProofContract, $PatchManifest)) {
+            if (!$candidatePath -or ![IO.Path]::IsPathFullyQualified($candidatePath)) { throw 'BASELINE_EXTERNAL_PROOF_INPUTS_REQUIRED' }
+            Assert-ExactPath $candidatePath $false
+            if (!$candidatePath.StartsWith("$evidence\", [StringComparison]::OrdinalIgnoreCase)) {
+                throw 'BASELINE_EXTERNAL_PROOF_INPUTS_REQUIRED'
+            }
+        }
+        if ($OfflineCache) {
+            if (![IO.Path]::IsPathFullyQualified($OfflineCache)) { throw 'BASELINE_OFFLINE_CACHE_PATH_INVALID' }
+            Assert-ExactPath $OfflineCache $true
+            Assert-ExternalPath $OfflineCache $repo $programFiles
+        }
+    } elseif ($OpeningReport -or $ProofContract -or $PatchManifest -or $OfflineCache) {
+        throw 'BASELINE_EXTERNAL_PROOF_INPUTS_REQUIRED'
+    }
 
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     try {
@@ -277,7 +321,8 @@ process.stdout.write(JSON.stringify({
     $phase = 'BASELINE_BUILD_UNVERIFIED'
     $compiler = Join-Path $repo 'node_modules\typescript\bin\tsc'
     $config = Join-Path $repo 'tsconfig.json'
-    $script = Join-Path $PSScriptRoot 'live-opening-baseline.mjs'
+    $scriptName = if ($Candidate) { 'live-candidate-proof.mjs' } else { 'live-opening-baseline.mjs' }
+    $script = Join-Path $PSScriptRoot $scriptName
     Assert-ExactPath $compiler $false
     Assert-ExactPath $config $false
     Assert-ExactPath $script $false
@@ -288,7 +333,7 @@ process.stdout.write(JSON.stringify({
             throw 'BASELINE_BUILD_OUTPUT_REDIRECTED'
         }
     }
-    $runDirectory = Join-Path $evidence "opening-baseline-$stamp-$nonce"
+    $runDirectory = Join-Path $evidence "$operation-$stamp-$nonce"
     $null = New-Item -ItemType Directory -Path $runDirectory
     Assert-ExactPath $runDirectory $true
     $buildInfo = Join-Path $runDirectory 'build.tsbuildinfo'
@@ -303,8 +348,13 @@ process.stdout.write(JSON.stringify({
     Assert-BaselineCheckout $git $repo $fixedPath $commit
 
     $phase = 'BASELINE_REVIEW_UNVERIFIED'
-    $inspectStart = New-ChildStart $node @($script, '--inspect', $commit) $repo $fixedPath -PilotEnvironment
-    $inspectOutcome = Read-BaselineChild $inspectStart $null 180000 -CaptureDiagnostics
+    $inspectArgs = @($script, '--inspect', $commit)
+    if ($Candidate) {
+        $inspectArgs += @($OpeningReport, $ProofContract, $PatchManifest, (Join-Path $runDirectory 'review-npm-cache'))
+        if ($OfflineCache) { $inspectArgs += $OfflineCache }
+    }
+    $inspectStart = New-ChildStart $node $inspectArgs $repo $fixedPath -PilotEnvironment
+    $inspectOutcome = Read-BaselineChild $inspectStart $null 300000 -CaptureDiagnostics
     $inspection = $inspectOutcome.report
     $inspectionExitCode = $inspectOutcome.exitCode
     $inspectionDiagnostics = $inspectOutcome.diagnosticCodes
@@ -312,21 +362,53 @@ process.stdout.write(JSON.stringify({
         $inspection['reviewDigest'] -cnotmatch '\A[a-f0-9]{64}\z' -or
         $inspection['review'] -isnot [System.Collections.IDictionary]) { throw $phase }
     $reviewDigest = $inspection['reviewDigest']
+    if ($Candidate) {
+        $review = $inspection['review']
+        $openingLock = Open-PinnedFile $OpeningReport $review['openingReportSha256'] 1MB
+        $locks.Add($openingLock)
+        $opening = Read-Json $openingLock
+        $locks.Add((Open-PinnedFile $ProofContract $review['proofContractSha256'] 2MB))
+        $locks.Add((Open-PinnedFile $PatchManifest $review['patchManifestSha256'] 2MB))
+        $candidateSource = Join-Path ([IO.Path]::GetDirectoryName($PatchManifest)) $review['candidateSourceName']
+        $locks.Add((Open-PinnedFile $candidateSource $review['candidateSourceSha256'] 16MB))
+        $qualificationPath = $opening['qualificationReceipt']
+        $qualificationSha = $opening['qualificationReceiptSha256']
+        $openingAuthorizationPath = $opening['authorizationReceipt']
+        if ($qualificationSha -cne $review['executionBoundary']['qualificationSha256'] -or
+            $opening['supervisorSha256'] -cne $wrapperSha -or
+            !$qualificationPath.StartsWith("$evidence\", [StringComparison]::OrdinalIgnoreCase) -or
+            !$openingAuthorizationPath.StartsWith("$evidence\", [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'BASELINE_CANDIDATE_QUALIFICATION_UNVERIFIED'
+        }
+        $receipt = [pscustomobject]@{ path = $qualificationPath; sha256 = $qualificationSha;
+            lock = Open-PinnedFile $qualificationPath $qualificationSha 1MB }
+        $locks.Add($receipt.lock)
+        $locks.Add((Open-PinnedFile $openingAuthorizationPath $opening['authorizationReceiptSha256'] 1MB))
+    }
 
     Write-Host ''
     Write-Host "Supervisor $wrapperSha"
     Write-Host "Committed source $commit"
     Write-Host 'The reviewed supervisor passed production request admission, seven native canaries, and the same-PC network fault test.'
-    Write-Host 'The live benchmark writes a run into this profile workspace. The launcher invokes the registered opening benchmark only.'
+    if ($Candidate) {
+        Write-Host 'The candidate runner uses the exact opening boundary and records the verdict in the profile workspace.'
+    } else {
+        Write-Host 'The live benchmark writes a run into this profile workspace. The launcher invokes the registered opening benchmark only.'
+    }
     Write-Host ($inspection['review'] | ConvertTo-Json -Depth 16)
-    $answer = "QUALIFY LIVE BASELINE $($reviewDigest.Substring(0, 12))"
+    $verb = if ($Candidate) { 'AUTHORIZE LIVE CANDIDATE' } else { 'QUALIFY LIVE BASELINE' }
+    $answer = "$verb $($reviewDigest.Substring(0, 12))"
     $phase = 'BASELINE_OPERATOR_AUTHORIZATION_REQUIRED'
-    if ((Read-Host "Type $answer to approve this exact opening benchmark") -cne $answer) {
+    if ((Read-Host "Type $answer to approve this exact operation") -cne $answer) {
         throw 'BASELINE_OPERATOR_AUTHORIZATION_DECLINED'
     }
     Assert-BaselineCheckout $git $repo $fixedPath $commit
-    $receipt = New-LiveQualification $reviewed $runDirectory $commit $reviewDigest
-    $locks.Add($receipt.lock)
+    if (!$Candidate) {
+        $receipt = New-LiveQualification $reviewed $runDirectory $commit $reviewDigest
+        $locks.Add($receipt.lock)
+    }
+    $authorization = New-OperationAuthorization $runDirectory $operation $commit $reviewDigest $receipt.sha256
+    $locks.Add($authorization.lock)
 
     $phase = 'BASELINE_PRODUCTION_SESSION_UNVERIFIED'
     Add-Type -TypeDefinition @'
@@ -371,21 +453,37 @@ public static class ClueLiveBaselinePipe {
     if (!$listening -or $guardian.HasExited) { throw 'BASELINE_PRODUCTION_SESSION_NOT_READY' }
 
     $phase = 'BASELINE_NATIVE_RUN_UNVERIFIED'
-    $start = New-ChildStart $node @($script, '--run', $commit, $reviewDigest) $repo $fixedPath -PilotEnvironment
+    $runArgs = @($script, '--run', $commit, $reviewDigest)
+    if ($Candidate) {
+        $runArgs += @($OpeningReport, $ProofContract, $PatchManifest, (Join-Path $runDirectory 'run-npm-cache'))
+        if ($OfflineCache) { $runArgs += $OfflineCache }
+    }
+    $start = New-ChildStart $node $runArgs $repo $fixedPath -PilotEnvironment
     $start.Environment['CLU_WINDOWS_SUPERVISOR_PATH'] = $image
     $start.Environment['CLU_WINDOWS_SUPERVISOR_SHA256'] = $wrapperSha
     $start.Environment['CLU_WINDOWS_SUPERVISOR_QUALIFICATION'] = $receipt.path
     $start.Environment['CLU_WINDOWS_SUPERVISOR_QUALIFICATION_SHA256'] = $receipt.sha256
-    $outcome = Read-BaselineChild $start $guardian 7200000
+    $start.Environment['CLU_PROOF_OPERATOR_AUTHORIZATION'] = $authorization.path
+    $start.Environment['CLU_PROOF_OPERATOR_AUTHORIZATION_SHA256'] = $authorization.sha256
+    $timeout = if ($Candidate) { 14400000 } else { 7200000 }
+    $outcome = Read-BaselineChild $start $guardian $timeout
     $childOutcome = $outcome.report
     $baselineExitCode = $outcome.exitCode
     $boundary = $childOutcome['executionBoundary']
+    $validOutcome = if ($Candidate) {
+        $childOutcome['disposition'] -cin @('ACCEPT', 'REJECT', 'REVISE', 'INVALID') -and
+        $childOutcome['controlArtifactSha256'] -cmatch '\A[a-f0-9]{64}\z' -and
+        $childOutcome['candidateArtifactSha256'] -cmatch '\A[a-f0-9]{64}\z' -and
+        $childOutcome['verdictArtifactSha256'] -cmatch '\A[a-f0-9]{64}\z'
+    } else {
+        $childOutcome['measures'] -eq 13 -and $childOutcome['incomplete'] -eq 0 -and
+        $childOutcome['artifactSha256'] -cmatch '\A[a-f0-9]{64}\z'
+    }
     if ($baselineExitCode -ne 0 -or $childOutcome['state'] -cne 'PASS' -or
         $childOutcome['sourceCommit'] -cne $commit -or $childOutcome['reviewDigest'] -cne $reviewDigest -or
-        $childOutcome['measures'] -ne 13 -or $childOutcome['incomplete'] -ne 0 -or
+        !$validOutcome -or
         $childOutcome['eventId'] -cnotmatch '\AEVENT-[0-9]+\z' -or
         $childOutcome['eventSha256'] -cnotmatch '\A[a-f0-9]{64}\z' -or
-        $childOutcome['artifactSha256'] -cnotmatch '\A[a-f0-9]{64}\z' -or
         $boundary -isnot [System.Collections.IDictionary] -or $boundary['kind'] -cne 'windows-supervisor' -or
         $boundary['sha256'] -cne $wrapperSha -or $boundary['qualificationSha256'] -cne $receipt.sha256) { throw $phase }
 
@@ -394,12 +492,13 @@ public static class ClueLiveBaselinePipe {
     Assert-InstalledPair $protectedRoot $operatorSid $image $engine $prelude
     if ((Get-Digest $imageLock) -cne $wrapperSha -or (Get-Digest $engineLock) -cne $engineSha -or
         (Get-Digest $preludeLock) -cne $preludeSha -or (Get-Digest $receipt.lock) -cne $receipt.sha256 -or
+        (Get-Digest $authorization.lock) -cne $authorization.sha256 -or
         $guardian.HasExited) { throw $phase }
     $result = 0
 } catch {
     $blocker = $_.Exception.Message
     if ($blocker -cnotmatch '^(?:RELEASE|BASELINE)_[A-Z0-9_]{1,72}$') { $blocker = $phase }
-    Write-Host "CLU-E Windows live opening baseline stopped: $blocker"
+    Write-Host "CLU-E Windows $operation stopped: $blocker"
 } finally {
     if ($null -ne $script:runner) {
         try {
@@ -412,24 +511,53 @@ public static class ClueLiveBaselinePipe {
     }
     if ($null -ne $guardian) { $guardian.Dispose() }
     foreach ($lock in $locks) { $lock.Dispose() }
+    if ($Candidate -and $runDirectory) {
+        foreach ($cacheName in @('review-npm-cache', 'run-npm-cache')) {
+            $stagedCache = Join-Path $runDirectory $cacheName
+            if (Test-Path -LiteralPath $stagedCache) {
+                try {
+                    Assert-ExactPath $stagedCache $true
+                    if (Get-ChildItem -LiteralPath $stagedCache -Force -Recurse |
+                        Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint } | Select-Object -First 1) {
+                        throw 'BASELINE_STAGED_CACHE_REDIRECTED'
+                    }
+                    Remove-Item -LiteralPath $stagedCache -Force -Recurse
+                } catch {
+                    if ($result -eq 0) {
+                        $result = 2
+                        $blocker = $phase = 'BASELINE_STAGED_CACHE_CLEANUP_UNVERIFIED'
+                    }
+                    Write-Host "Staged offline cache cleanup was unverified: $stagedCache"
+                }
+            }
+        }
+    }
 
     if ($null -ne $reportPath) {
         $report = [ordered]@{
-            schemaVersion = 'clue-windows-live-opening-baseline/1'
+            schemaVersion = if ($Candidate) { 'clue-windows-live-candidate-proof/1' } else { 'clue-windows-live-opening-baseline/2' }
             checkedAt = [DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ss.fffZ', [Globalization.CultureInfo]::InvariantCulture)
             state = if ($result -eq 0) { 'PASS' } else { 'BLOCKED' }
             blocker = $blocker
-            phase = if ($result -eq 0) { 'BASELINE_COMPLETE' } else { $phase }
+            phase = if ($result -eq 0 -and $Candidate) { 'CANDIDATE_PROOF_COMPLETE' } elseif ($result -eq 0) { 'BASELINE_COMPLETE' } else { $phase }
             sourceCommit = $commit
             reviewDigest = $reviewDigest
             supervisorSha256 = if ($null -eq $reviewed) { $null } else { $reviewed.wrapperSha }
             qualificationReceipt = if ($null -eq $receipt) { $null } else { $receipt.path }
             qualificationReceiptSha256 = if ($null -eq $receipt) { $null } else { $receipt.sha256 }
+            authorizationReceipt = if ($null -eq $authorization) { $null } else { $authorization.path }
+            authorizationReceiptSha256 = if ($null -eq $authorization) { $null } else { $authorization.sha256 }
             inspectionExitCode = $inspectionExitCode
             inspectionDiagnosticCodes = $inspectionDiagnostics
             inspection = $inspection
             baselineExitCode = $baselineExitCode
             baseline = $childOutcome
+        }
+        if ($Candidate) {
+            $report.Remove('baselineExitCode')
+            $report.Remove('baseline')
+            $report['candidateExitCode'] = $baselineExitCode
+            $report['candidate'] = $childOutcome
         }
         try {
             Assert-ExactPath $evidence $true
@@ -439,9 +567,9 @@ public static class ClueLiveBaselinePipe {
                 $stream.Write($bytes, 0, $bytes.Length)
                 $stream.Flush($true)
             } finally { $stream.Dispose() }
-            Write-Host "Opening baseline report: $reportPath"
+            Write-Host "Proof report: $reportPath"
         } catch {
-            Write-Host 'CLU-E Windows live opening baseline could not save its report.'
+            Write-Host 'CLU-E Windows proof runner could not save its report.'
             $result = 2
         }
     }

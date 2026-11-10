@@ -69,6 +69,9 @@ import { readBenchmarkContract } from '../../benchmark/harnessBlock.js';
 import { OFFLINE_SUITE_V1_TESTS } from '../../benchmark/offlineSuiteV1.js';
 import { parseScriptCommand } from '../../analysis/scenarios/scenarioRunner.js';
 import { captureBenchmarkExecutableInputs } from '../../control/benchmarkRun.js';
+import { isBenchmarkProfileContract } from '../../control/projectProfiles/benchmarkProfileInputs.js';
+import { projectProfileStartupPath, readActiveProjectProfileForBenchmark } from '../../control/projectProfiles/projectProfileStartup.js';
+import { prepareShadowBenchmarkProfileInputs, type ShadowBenchmarkProfileInputs } from '../../control/projectProfiles/shadowBenchmarkProfile.js';
 import { createRestrictedExecution, requireProofExecutionBoundary } from '../../benchmark/restrictedExecution.js';
 import {
   assertExactRunInputs,
@@ -79,6 +82,7 @@ import {
 } from '../../control/exactRunInputs.js';
 import { verifyFrozenContract, type FrozenProofContract } from '../../proof/proofContract.js';
 import { assessBaselineValidity, type BaselinePackage } from '../../proof/baselineRegistry.js';
+import type { ProjectProfileRecord } from '../../shared/schemas.js';
 
 /* ------------------------------------------------------------------------- */
 /* The typed patch and its record                                             */
@@ -129,6 +133,7 @@ export interface ProofExecutionDeps {
   readonly benchmarkContractPath: string;
   /** CLU-E repo root (the runner composes the cli argv from it). */
   readonly repoRoot: string;
+  readonly projectProfile?: ProjectProfileRecord;
   readonly execImpl?: ExecFn;
   readonly log?: (line: string) => void;
 }
@@ -149,6 +154,7 @@ export type ProofExecution =
       readonly installed: boolean;
       readonly static_preparation: readonly { readonly script: string; readonly wall_ms: number }[];
       readonly instrumentation: readonly ProofInstrumentationChange[];
+      readonly profile_relocation?: ShadowBenchmarkProfileInputs['receipt'];
       readonly anomalies: readonly string[];
     }
   | {
@@ -166,11 +172,18 @@ const CLU_V020_INSTRUMENT_PATHS = new Set([
   'selftest/benchmark-offline-suite-v1.ts',
   'selftest/project-profile-fixture.ts',
   ...OFFLINE_SUITE_V1_TESTS.map((name) => `selftest/${name}.ts`),
+  'config/project-profiles.yaml',
+  'src/benchmark/benchmarkProfileWorker.ts',
   'src/benchmark/offlineSuiteV1.ts',
   'src/cli/commandAuthority.ts',
   'src/cli/commands/benchmarkCommands.ts',
   'src/cli/index.ts',
+  'src/control/projectProfiles/benchmarkProfileInputs.ts',
+  'src/control/projectProfiles/projectAuthority.ts',
+  'src/control/projectProfiles/projectPathIsolation.ts',
   'src/control/projectProfiles/projectProfileStartup.ts',
+  'src/control/projectProfiles/projectRuntimeBinding.ts',
+  'src/control/projectProfiles/shadowBenchmarkProfile.ts',
   'src/control/runtime.ts',
   'src/memory/db.ts',
   'src/memory/eventLog.ts',
@@ -504,7 +517,16 @@ export function prepareSelfTargetExecution(input: {
  * for whatever the stick's harness writes. Nothing here reads the outcome's numbers:
  * per Directory §16 this plane collects and hands over, and only the verdict decides.
  */
-export async function executeProofPlan(deps: ProofExecutionDeps): Promise<ProofExecution> {
+export function executeProofPlan(deps: ProofExecutionDeps): Promise<ProofExecution> {
+  return executeShadowProof(deps, false);
+}
+
+/** Rehearse the unchanged input in a fresh shadow with the candidate's exact execution policy. */
+export function executeMatchedProofControl(deps: Omit<ProofExecutionDeps, 'patch'>): Promise<ProofExecution> {
+  return executeShadowProof({ ...deps, shadow: { ...deps.shadow, persistent: false }, patch: [] }, true);
+}
+
+async function executeShadowProof(deps: ProofExecutionDeps, matchedControl: boolean): Promise<ProofExecution> {
   const log = deps.log ?? (() => {});
 
   if (deps.execImpl === undefined) {
@@ -562,7 +584,7 @@ export async function executeProofPlan(deps: ProofExecutionDeps): Promise<ProofE
   // contract. Two candidate attempts therefore cannot contaminate one another with stale
   // files, while an exact rerun may reuse its dependencies safely.
   const leaseId =
-    `proof-${deps.frozen.contract_hash.slice(0, 10)}-${patchDigest.slice(0, 10)}`;
+    `proof-${matchedControl ? 'control-' : ''}${deps.frozen.contract_hash.slice(0, 10)}-${patchDigest.slice(0, 10)}`;
   const shadowDir = join(deps.shadow.root, leaseId);
   const expectedLeaseIdentity = canonicalJson({
     contract_hash: deps.frozen.contract_hash,
@@ -635,7 +657,10 @@ export async function executeProofPlan(deps: ProofExecutionDeps): Promise<ProofE
   try {
     candidateInputs = captureExactRunInputs(shadowDir);
     assertMeasuredChanges(deps.pinnedInputs, candidateInputs, changeSet);
-    if (candidateInputs.id === deps.pinnedInputs.id) {
+    if (matchedControl && canonicalJson(candidateInputs) !== canonicalJson(deps.pinnedInputs)) {
+      return { ok: false, stage: 'patch', reason: 'The matched control must use exactly the unchanged screened project inputs.' };
+    }
+    if (!matchedControl && candidateInputs.id === deps.pinnedInputs.id) {
       return { ok: false, stage: 'patch', reason: 'The candidate patch did not change the pinned project inputs.' };
     }
   } catch (error) {
@@ -647,14 +672,40 @@ export async function executeProofPlan(deps: ProofExecutionDeps): Promise<ProofE
   // shadow. This is instrument-plane relocation, never part of the candidate change set.
   let executionLocation: ExecutionLocation;
   let executionInputs: ExactRunInputs;
+  const canonicalProfile = deps.projectProfile;
+  const candidateProfile = process.platform === 'win32' && deps.execImpl === undefined &&
+    samePhysicalPath(deps.repoRoot, deps.projectRoot) &&
+    (canonicalProfile !== undefined || existsSync(projectProfileStartupPath(deps.repoRoot)));
   try {
-    executionLocation = prepareSelfTargetExecution({
-      canonical_repo_root: deps.repoRoot,
-      canonical_project_root: deps.projectRoot,
-      shadow_dir: shadowDir,
-      patch_paths: changeSet.map((entry) => entry.path),
-      fromPinnedCopy: true,
-    });
+    if (candidateProfile) {
+      if (canonicalProfile === undefined || !samePhysicalPath(deps.projectRoot, canonicalProfile.profile.targetRoot) ||
+          !isBenchmarkProfileContract(deps.baseline.benchmark.contract_sha256)) {
+        throw new Error('Profile-bound candidate requires the verified CLU-E self-target and exact clu-master@0.2.0 contract.');
+      }
+      const authorityPaths = new Set([
+        'config/clue.config.yaml',
+        'config/project-profiles.yaml',
+        ...[canonicalProfile.profile.authority.targetDescription, canonicalProfile.profile.authority.masterBenchmark,
+          canonicalProfile.profile.authority.projectIntent, ...canonicalProfile.profile.authority.additionalDocuments]
+          .flatMap((entry) => entry?.enabled ? [normalisePath(relative(deps.projectRoot, entry.canonicalPath))] : []),
+      ].map(pathKey));
+      const authorityChange = changeSet.find(({ path }) => authorityPaths.has(pathKey(path)));
+      if (authorityChange !== undefined) throw new Error(`a candidate cannot modify profile authority: ${authorityChange.path}`);
+      executionLocation = {
+        runner_repo_root: shadowDir,
+        workspace_root: join(dirname(shadowDir), `${basename(shadowDir)}-workspace`),
+        instrumentation: [],
+        self_target: true,
+      };
+    } else {
+      executionLocation = prepareSelfTargetExecution({
+        canonical_repo_root: deps.repoRoot,
+        canonical_project_root: deps.projectRoot,
+        shadow_dir: shadowDir,
+        patch_paths: changeSet.map((entry) => entry.path),
+        fromPinnedCopy: true,
+      });
+    }
     executionInputs = captureExactRunInputs(shadowDir);
     assertMeasuredChanges(candidateInputs, executionInputs, executionLocation.instrumentation.map((change) => ({
       path: change.path,
@@ -669,20 +720,32 @@ export async function executeProofPlan(deps: ProofExecutionDeps): Promise<ProofE
     };
   }
 
-  if (candidateInputs.id === deps.pinnedInputs.id) {
-    return { ok: false, stage: 'patch', reason: 'the candidate patch did not change the pinned inputs' };
-  }
-
   let executionScope: ReturnType<typeof createRestrictedExecution> | undefined;
   try {
     rmSync(executionLocation.workspace_root, { recursive: true, force: true });
     mkdirSync(join(executionLocation.workspace_root, 'graph'), { recursive: true });
+    let profileInputs: ShadowBenchmarkProfileInputs | undefined;
+    if (candidateProfile && canonicalProfile !== undefined) {
+      profileInputs = await prepareShadowBenchmarkProfileInputs({
+        canonical: canonicalProfile,
+        shadow: shadowDir,
+        workspace: executionLocation.workspace_root,
+        verifyActiveProfile: () => {
+          const current = readActiveProjectProfileForBenchmark(deps.repoRoot);
+          if (current === null || canonicalJson(current) !== canonicalJson(canonicalProfile)) {
+            throw new Error('The active Project Profile changed during candidate proof.');
+          }
+        },
+      });
+      log(`instrument: lease-local Project Profile bound (${hashBytes(profileInputs.bytes).slice(0, 12)}…)`);
+    }
     if (deps.execImpl === undefined) {
       executionScope = createRestrictedExecution({
         repoRoot: executionLocation.runner_repo_root,
         projectRoot: shadowDir,
         workspaceRoot: executionLocation.workspace_root,
         mode: 'candidate',
+        ...(profileInputs === undefined ? {} : { benchmarkProfileInputs: profileInputs }),
       });
     }
     const exec = deps.execImpl ?? executionScope?.exec;
@@ -761,7 +824,7 @@ export async function executeProofPlan(deps: ProofExecutionDeps): Promise<ProofE
     // The relocated self-target CLI needs its own mission/projections before the approved
     // harness can drive snapshot/recognition/status commands. This child uses a different
     // workspace and therefore never contends with the canonical proof writer lock.
-    if (executionLocation.self_target) {
+    if (executionLocation.self_target && profileInputs === undefined) {
       const cli = join(shadowDir, 'dist', 'src', 'cli', 'index.js');
       if (!existsSync(cli)) {
         return {
@@ -817,6 +880,7 @@ export async function executeProofPlan(deps: ProofExecutionDeps): Promise<ProofE
 
     try {
       assertExactRunInputs(shadowDir, executionInputs, 'candidate inputs after benchmark');
+      profileInputs?.verifyCurrent();
       assertExactRunInputs(deps.projectRoot, deps.pinnedInputs, 'canonical inputs after benchmark');
       const afterExecutables = captureBenchmarkExecutableInputs(executionLocation.runner_repo_root, shadowDir);
       if (canonicalJson(afterExecutables) !== canonicalJson(executableInputs)) {
@@ -848,7 +912,9 @@ export async function executeProofPlan(deps: ProofExecutionDeps): Promise<ProofE
       ok: true,
       outcome,
       candidate_snapshot_id: requireSha256(candidateInputs.id, 'candidate input manifest'),
-      candidate_snapshot_basis: 'verified measured candidate input manifest before instrument relocation',
+      candidate_snapshot_basis: matchedControl
+        ? 'verified unchanged screened input manifest before matched control instrument relocation'
+        : 'verified measured candidate input manifest before instrument relocation',
       candidate_inputs: candidateInputs,
       executable_inputs: executableInputs,
       patch_digest: patchDigest,
@@ -857,6 +923,7 @@ export async function executeProofPlan(deps: ProofExecutionDeps): Promise<ProofE
       installed,
       static_preparation: staticReceipts,
       instrumentation: executionLocation.instrumentation,
+      ...(profileInputs === undefined ? {} : { profile_relocation: profileInputs.receipt }),
       anomalies,
     };
   } catch (error) {

@@ -13,11 +13,11 @@ import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 
 import { canonicalHarnessBody } from '../src/benchmark/harnessBlock.js';
 import { runMasterBenchmark } from '../src/benchmark/benchmarkRunner.js';
-import { executeProofPlan } from '../src/experiment/proof/executionCoordinator.js';
+import { executeMatchedProofControl, executeProofPlan } from '../src/experiment/proof/executionCoordinator.js';
 import { captureExactRunInputs } from '../src/control/exactRunInputs.js';
 import { captureBaseline } from '../src/proof/baselineRegistry.js';
 import { freezeProofContract, type ProofContract } from '../src/proof/proofContract.js';
-import { decide } from '../src/proof/verdict.js';
+import { decide, decideWithMatchedControl } from '../src/proof/verdict.js';
 import { nativeProofSkipReason } from './proof-isolation-fixture.js';
 import { hashText, type Sha256 } from '../src/shared/ids.js';
 
@@ -98,6 +98,73 @@ test('a candidate cannot replace an offline suite test in the version 0.2.0 benc
   assert.deepEqual(result, {
     ok: false, stage: 'patch', reason: `a proof candidate cannot modify the benchmark instrument: ${testPath}`,
   });
+});
+
+test('a matched proof control measures the pinned unchanged tree in a fresh separate lease', async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'clue-proof-matched-control-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const project = join(root, 'target');
+  const stick = writeSelfTargetStick(project);
+  writeFile(join(project, 'src', 'value.ts'), 'export const value = 100;\n');
+  const exec = async () => ({ code: 0, stdout: '', stderr: '', wallMs: 1, timedOut: false });
+  const opening = await runMasterBenchmark({
+    repoRoot: root, projectRoot: project, workspaceRoot: root, contractPath: stick, execImpl: exec,
+  });
+  assert.ok(opening.ok, opening.ok ? '' : opening.reason);
+  const baseline = captureBaseline({
+    outcome: opening,
+    snapshot_id: SNAPSHOT,
+    mission_version: 'MISSION-SELF-000001',
+    run_artifact: {
+      hash: '8'.repeat(64), bytes: 1, media_type: 'application/json; charset=utf-8',
+      label: 'opening.json', created_at: opening.timing.finished_at,
+    },
+  });
+  const frozen = freezeProofContract({ contract: contract(), policy: POLICY, capabilities: ['benchmark:clu-master'] });
+  assert.ok(!('refusals' in frozen));
+  const pinnedInputs = captureExactRunInputs(project);
+  const deps = {
+    frozen, baseline, projectRoot: project, pinnedInputs,
+    shadow: { root: join(root, 'shadow'), persistent: true, install_command: null, install_on_lockfile_change: true },
+    scripts: { typecheck: 'node typecheck.js', build: 'node build.js' },
+    benchmarkContractPath: stick, repoRoot: root, execImpl: exec,
+  };
+  const first = await executeMatchedProofControl(deps);
+  assert.ok(first.ok, first.ok ? '' : first.reason);
+  assert.deepEqual(first.candidate_inputs, pinnedInputs);
+  assert.deepEqual(first.change_set, []);
+  assert.match(first.shadow_dir, /proof-control-/u);
+  writeFile(join(first.shadow_dir, 'dist', 'unrecorded.js'), 'throw new Error("old control state")');
+  const second = await executeMatchedProofControl(deps);
+  assert.ok(second.ok, second.ok ? '' : second.reason);
+  assert.deepEqual(second.candidate_inputs, pinnedInputs);
+  assert.equal(existsSync(join(second.shadow_dir, 'dist', 'unrecorded.js')), false);
+  const noOp = await executeProofPlan({ ...deps, patch: [] });
+  assert.ok(!noOp.ok && noOp.stage === 'patch');
+
+  const observations = (cost: number, guard = 1) => baseline.measures.map((measure) => {
+    const value = measure.id === 'SIG-COST' ? cost : guard;
+    return { ...measure, value, samples: [value] };
+  });
+  const verdictInput = {
+    contract: frozen.contract,
+    contract_hash: frozen.contract_hash,
+    baseline,
+    candidate: { ...baseline, snapshot_id: hashText('changed candidate'), measures: observations(80) },
+  };
+  assert.equal(decideWithMatchedControl(verdictInput, null).disposition, 'ACCEPT');
+  assert.equal(decideWithMatchedControl(verdictInput, { ...baseline, measures: observations(90) }).disposition, 'ACCEPT');
+  for (const control of [
+    { ...baseline, measures: observations(81) },
+    { ...baseline, measures: observations(90, 2) },
+    { ...baseline, run_wall_ms: Number.POSITIVE_INFINITY },
+  ]) {
+    const verdict = decideWithMatchedControl(verdictInput, control);
+    assert.equal(verdict.disposition, 'INVALID');
+    assert.equal(verdict.improvement, false);
+    assert.match(verdict.reasons.join(' '), /matched shadow control comparison/u);
+    assert.equal(verdict.identity.baseline_snapshot, baseline.snapshot_id);
+  }
 });
 
 function contract(): ProofContract {

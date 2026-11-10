@@ -457,6 +457,14 @@ export const COMMAND_AUTHORITIES: readonly CommandAuthority[] = [
       'superseded mission with a fresh identity, preserving the predecessor and its lock',
   },
   {
+    command: 'cycle supersede',
+    capability: 'fs.write.workspace',
+    mutates: true,
+    requiresMission: true,
+    rationale: 'Execution Model §21.3: require exact Creator authorization to replace an unaccepted ' +
+      'proof-authoritative cycle after its measured target inputs change',
+  },
+  {
     command: 'benchmark run',
     capability: 'fs.write.workspace',
     mutates: true,

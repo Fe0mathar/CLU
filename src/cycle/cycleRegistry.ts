@@ -45,6 +45,7 @@
  * stage and evidence intact. Two concurrent cycles would mean two competing baselines.
  */
 
+import { z } from 'zod';
 import {
   cycleClosedSchema,
   cycleInputLockSchema,
@@ -55,7 +56,9 @@ import {
   cycleResumedSchema,
   cycleStageAdvancedSchema,
   cycleSuspendedSchema,
+  entityIdSchema,
   parseOrThrow,
+  sha256Schema,
   type ArtifactRef,
   type Actor,
   type CycleInputLock,
@@ -65,6 +68,7 @@ import {
   type CycleClosed,
 } from '../shared/schemas.js';
 import { makeEntityId, nowIso, type Sha256 } from '../shared/ids.js';
+import { assertNoSecretMaterial } from '../shared/secretSafety.js';
 import type { EventLog } from '../memory/eventLog.js';
 import type Database from 'better-sqlite3';
 import type { ProjectionModule, ProjectionStore } from '../memory/db.js';
@@ -80,6 +84,7 @@ import type { EventRecord } from '../shared/schemas.js';
 export const CYCLE_EVENT_TYPES = {
   opened: 'cycle.opened',
   restarted: 'cycle.restarted',
+  superseded: 'cycle.superseded',
   inputsLocked: 'cycle.inputs_locked',
   stageAdvanced: 'cycle.stage_advanced',
   suspended: 'cycle.suspended',
@@ -168,6 +173,46 @@ function projectOpenedCycle(db: Db, payload: CycleOpened): void {
   ).run(payload.cycle_id, payload.mission_version, payload.opened_at, payload.opened_at);
 }
 
+const ACTIVE_CYCLE_SQL = `SELECT * FROM cycles WHERE stage != 'CLOSED' AND NOT EXISTS (
+  SELECT 1 FROM cycle_restarts WHERE previous_cycle_id = cycles.id
+) ORDER BY opened_at DESC LIMIT 1`;
+
+const supersessionEvidenceRefSchema = z.object({
+  event_id: entityIdSchema,
+  event_sha256: sha256Schema,
+  artifact_sha256: sha256Schema,
+}).strict();
+
+const supersessionEvidenceSchema = z.object({
+  screened: supersessionEvidenceRefSchema,
+  baseline: supersessionEvidenceRefSchema,
+  previous_inputs_id: sha256Schema,
+  replacement_inputs_id: sha256Schema,
+}).strict().refine((value) => value.previous_inputs_id !== value.replacement_inputs_id,
+  'supersession requires changed exact target inputs');
+
+const supersessionReasonSchema = z.string().min(1).max(240)
+  .regex(/^[^\u0000-\u001f\u007f]+$/u, 'supersession reason must be one line')
+  .refine((value) => value === value.trim(), 'supersession reason must be nonempty and trimmed');
+
+const cycleSupersededSchema = z.object({
+  previous_cycle_id: entityIdSchema,
+  previous_lock_digest: sha256Schema,
+  reason: supersessionReasonSchema,
+  confirmation: z.string(),
+  evidence: supersessionEvidenceSchema,
+  successor: cycleOpenedSchema,
+}).strict().refine((value) => value.previous_cycle_id !== value.successor.cycle_id &&
+  value.confirmation === cycleSupersessionConfirmation(
+    value.previous_cycle_id, value.successor.mission_version, value.previous_lock_digest),
+'supersession requires a distinct cycle and the exact Creator confirmation');
+
+export type CycleSupersessionEvidence = z.infer<typeof supersessionEvidenceSchema>;
+
+export function cycleSupersessionConfirmation(cycleId: string, missionVersion: string, lockDigest: string): string {
+  return `SUPERSEDE ${cycleId} ${missionVersion} ${lockDigest}`;
+}
+
 /**
  * The cycle projection module. Registered into the `ProjectionStore` at construction, so a
  * full rebuild clears and replays `cycles` like every other derived table — the events are
@@ -199,6 +244,28 @@ export const CYCLE_PROJECTION: ProjectionModule = {
       db.prepare(
         'INSERT INTO cycle_restarts (previous_cycle_id, successor_cycle_id) VALUES (?, ?)',
       ).run(payload.previous_cycle_id, payload.successor.cycle_id);
+      projectOpenedCycle(db, payload.successor);
+    },
+    [CYCLE_EVENT_TYPES.superseded]: (db: Db, record: EventRecord): void => {
+      const payload = parseOrThrow(cycleSupersededSchema, record.payload, `${record.id} cycle.superseded`);
+      assertNoSecretMaterial(payload.reason, 'supersession reason');
+      const previous = db.prepare(ACTIVE_CYCLE_SQL).get() as CycleRecord | undefined;
+      const eventSequence = db.prepare(`SELECT sequence FROM events_index
+        WHERE id = ? AND hash = ? AND type = ? AND subject_id IS ? AND mission_version = ?`);
+      const screened = eventSequence.get(payload.evidence.screened.event_id, payload.evidence.screened.event_sha256,
+        CYCLE_EVENT_TYPES.stageAdvanced, payload.previous_cycle_id, payload.successor.mission_version) as { sequence: number } | undefined;
+      const baseline = eventSequence.get(payload.evidence.baseline.event_id, payload.evidence.baseline.event_sha256,
+        'benchmark.run_recorded', null, payload.successor.mission_version) as { sequence: number } | undefined;
+      if (previous?.id !== payload.previous_cycle_id || previous.mission_version !== payload.successor.mission_version ||
+          previous.lock_digest !== payload.previous_lock_digest || previous.stage !== 'SCREENED' ||
+          previous.grade !== 'proof-authoritative' || screened === undefined || baseline === undefined ||
+          screened.sequence >= baseline.sequence || baseline.sequence >= record.sequence ||
+          record.subject_id !== payload.successor.cycle_id || record.mission_version !== payload.successor.mission_version ||
+          record.actor !== 'creator' || payload.successor.opened_by !== 'creator') {
+        throw new Error(`${record.id} cycle.superseded disagrees with its predecessor or evidence identity.`);
+      }
+      db.prepare('INSERT INTO cycle_restarts (previous_cycle_id, successor_cycle_id) VALUES (?, ?)')
+        .run(payload.previous_cycle_id, payload.successor.cycle_id);
       projectOpenedCycle(db, payload.successor);
     },
     [CYCLE_EVENT_TYPES.inputsLocked]: (db: Db, record: EventRecord): void => {
@@ -269,13 +336,7 @@ export const CYCLE_PROJECTION: ProjectionModule = {
  * not take the writer lock. Same row, same schema, no append path constructed.
  */
 export function readCurrentCycle(projections: ProjectionStore): CycleRecord | null {
-  const row = projections.db
-    .prepare(
-      `SELECT * FROM cycles WHERE stage != 'CLOSED' AND NOT EXISTS (
-         SELECT 1 FROM cycle_restarts WHERE previous_cycle_id = cycles.id
-       ) ORDER BY opened_at DESC LIMIT 1`,
-    )
-    .get();
+  const row = projections.db.prepare(ACTIVE_CYCLE_SQL).get();
   return row === undefined ? null : parseOrThrow(cycleRecordSchema, row, 'current cycle row');
 }
 
@@ -345,6 +406,11 @@ export interface CycleRestartExpectation {
   readonly cycleId: string;
   readonly missionVersion: string;
   readonly lockDigest: Sha256;
+}
+
+export interface CycleSupersessionExpectation extends CycleRestartExpectation {
+  readonly reason: string;
+  readonly confirmation: string;
 }
 
 export class CycleRegistry {
@@ -439,6 +505,52 @@ export class CycleRegistry {
       },
     }, 'cycle.restarted');
     this.append(CYCLE_EVENT_TYPES.restarted, payload, successorId, 'cli');
+    return { cycle: this.mustGet(successorId), created: true };
+  }
+
+  /** Replaces an unaccepted proof-authoritative cycle whose screened source has changed. */
+  public supersede(
+    expected: CycleSupersessionExpectation,
+    inspect: (previous: CycleRecord) => CycleSupersessionEvidence,
+  ): { readonly cycle: CycleRecord; readonly created: boolean } {
+    const previous = this.get(expected.cycleId);
+    const mission = this.missionVersion();
+    if (previous === null || previous.stage !== 'SCREENED' || previous.grade !== 'proof-authoritative' ||
+        previous.lock_digest !== expected.lockDigest || mission !== expected.missionVersion ||
+        previous.mission_version !== mission) {
+      throw new CycleTransitionError(expected.cycleId, previous?.stage ?? null, 'OPENED',
+        'supersession requires the exact screened proof-authoritative cycle, full lock digest and current mission');
+    }
+    const confirmation = cycleSupersessionConfirmation(previous.id, mission, expected.lockDigest);
+    if (expected.confirmation !== confirmation) throw new Error(`Type exactly ${confirmation} to supersede this cycle.`);
+    const reason = parseOrThrow(supersessionReasonSchema, expected.reason.trim(), 'supersession reason');
+    assertNoSecretMaterial(reason, 'supersession reason');
+
+    const existingId = this.restartSuccessorId(previous.id);
+    if (existingId !== null) {
+      for (const record of this.log.replay()) {
+        if (record.type !== CYCLE_EVENT_TYPES.superseded || record.subject_id !== existingId) continue;
+        const payload = cycleSupersededSchema.parse(record.payload);
+        const cycle = this.get(existingId);
+        if (cycle !== null && payload.previous_cycle_id === previous.id && payload.reason === reason &&
+            payload.confirmation === confirmation) return { cycle, created: false };
+        break;
+      }
+      throw new Error(`Supersession of ${previous.id} disagrees with the recorded Creator authorization.`);
+    }
+    if (this.current()?.id !== previous.id) {
+      throw new CycleTransitionError(previous.id, previous.stage, 'OPENED', 'only the active cycle can be superseded');
+    }
+    const successorId = this.nextCycleId();
+    const payload = parseOrThrow(cycleSupersededSchema, {
+      previous_cycle_id: previous.id,
+      previous_lock_digest: expected.lockDigest,
+      reason,
+      confirmation,
+      evidence: inspect(previous),
+      successor: { cycle_id: successorId, mission_version: mission, opened_by: 'creator', opened_at: nowIso() },
+    }, 'cycle.superseded');
+    this.append(CYCLE_EVENT_TYPES.superseded, payload, successorId, 'creator');
     return { cycle: this.mustGet(successorId), created: true };
   }
 

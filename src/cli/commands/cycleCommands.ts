@@ -176,6 +176,25 @@ function commandCycleRestart(
   });
 }
 
+function commandCycleSupersede(
+  cycleId: string,
+  options: { readonly expectMission: string; readonly expectLock: string; readonly reason: string; readonly confirmation: string },
+): number {
+  const lockDigest = requireSha256(options.expectLock, '--expect-lock');
+  return withRuntime({
+    withLog: true, verifyLog: 'full', allowStaleHeartbeatReclaim: false, requireMission: false,
+  }, (runtime) => {
+    runtime.projections.catchUpVerified(runtime.requireLog());
+    const { cycle, created } = new CycleOrchestrator(runtime).supersede({
+      cycleId, missionVersion: options.expectMission, lockDigest,
+      reason: options.reason, confirmation: options.confirmation,
+    });
+    write(`${cycleId} ${created ? 'superseded' : 'already superseded'} by ${cycle.id} under ${cycle.mission_version}.`);
+    write(`Cycle ${cycle.id} at ${cycle.stage} (${cycle.grade ?? 'ungraded'}).`);
+    return 0;
+  });
+}
+
 /* ------------------------------------------------------------------------- */
 /* clue cycle close                                                           */
 /* ------------------------------------------------------------------------- */
@@ -294,5 +313,15 @@ export function registerCycleCommands(program: Command): void {
     .requiredOption('--expect-lock <sha256>', 'require the complete lock digest from cycle status')
     .action((cycleId: string, options: { expectMission: string; expectLock: string }) => {
       process.exitCode = runGuarded(() => commandCycleRestart(cycleId, options));
+    });
+  cycle
+    .command('supersede <cycle-id>')
+    .description('preserve an unaccepted proof-authoritative cycle and open a new cycle over changed target inputs')
+    .requiredOption('--expect-mission <mission-id>', 'require this exact current mission')
+    .requiredOption('--expect-lock <sha256>', 'require the complete predecessor lock digest')
+    .requiredOption('--reason <text>', 'record the Creator reason for replacing this cycle')
+    .requiredOption('--confirmation <text>', 'require SUPERSEDE <cycle-id> <mission-id> <full-lock-digest>')
+    .action((cycleId: string, options: Parameters<typeof commandCycleSupersede>[1]) => {
+      process.exitCode = runGuarded(() => commandCycleSupersede(cycleId, options));
     });
 }

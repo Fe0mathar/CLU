@@ -19,7 +19,7 @@ import { canonicalJson, hashBytes, hashCanonicalJson } from '../../dist/src/shar
 import { artifactRefSchema, cycleInputLockSchema, epochSealSchema, packRatificationSchema } from '../../dist/src/shared/schemas.js';
 import { redactSecretText } from '../../dist/src/shared/secretSafety.js';
 
-const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
+export const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
 const expected = Object.freeze({
   projectId: 'clue1',
   profileGeneration: 9,
@@ -30,11 +30,11 @@ const expected = Object.freeze({
   benchmarkSha256: 'f4ed32fa892f2a9716db44d4d0dd458d5bb029993054fefa0d06c4c68f04199f',
 });
 
-function requireCondition(condition, detail) {
+export function requireCondition(condition, detail) {
   if (!condition) throw new Error(detail);
 }
 
-function reviewPreflight(sourceCommit, needsSupervisor) {
+export function reviewPreflight(sourceCommit, needsSupervisor) {
   const report = runWindowsPreflight(repoRoot);
   const blockers = report.blockers.filter((item) => needsSupervisor || item.id !== 'supervisor');
   requireCondition(blockers.length === 0, 'Preflight refused: ' + blockers.map(({ code }) => code).join(', '));
@@ -42,7 +42,7 @@ function reviewPreflight(sourceCommit, needsSupervisor) {
     'The working tree and commit must match the reviewed clean checkout.');
 }
 
-function readReviewedProfile() {
+export function readReviewedProfile() {
   const profile = readActiveProjectProfileForBenchmark(repoRoot);
   requireCondition(profile?.profile.projectId === expected.projectId && profile.generation === expected.profileGeneration &&
     profile.projectProfileHash === expected.profileHash, 'The active profile is outside the approved clue1 generation 9 scope.');
@@ -86,7 +86,7 @@ export function requireReviewedAuthority(ratifiedEvent, sealedEvent, installedPa
   };
 }
 
-function collectReview(runtime, sourceCommit) {
+export function collectReview(runtime, sourceCommit, requireNew = true) {
   const binding = runtime.projectBinding;
   const profile = binding?.record;
   requireCondition(profile?.profile.projectId === expected.projectId &&
@@ -105,10 +105,12 @@ function collectReview(runtime, sourceCommit) {
   const eligibleRuns = [];
   let exactEpoch;
   let exactRatification;
+  let journalHead;
   const events = runtime.log === null
     ? EventLog.replayReadOnly(runtime.projectState.eventLogRoot)
     : runtime.log.replay();
   for (const event of events) {
+    journalHead = event;
     if (event.type === AUTHORITY_EVENT_TYPES.epochSealed) exactEpoch = event;
     if (event.type === AUTHORITY_EVENT_TYPES.packRatified) exactRatification = event;
     if (event.mission_version !== mission.id) continue;
@@ -144,9 +146,10 @@ function collectReview(runtime, sourceCommit) {
     canonicalJson(screening.inputs) === canonicalJson(subject.inputs) &&
     subject.executable_inputs.engine_dist_id !== null && subject.executable_inputs.engine_dependencies_id !== null,
   'The current source, compiled output or benchmark no longer matches the screening basis.');
-  requireCondition(!eligibleRuns.some((event) => event.sequence > screened.sequence &&
+  const matchingRuns = eligibleRuns.filter((event) => event.sequence > screened.sequence &&
     event.payload.snapshot_id === subject.snapshot_id && event.payload.inputs_id === subject.inputs.id &&
-    event.payload.contract?.sha256 === subject.contract_sha256),
+    event.payload.contract?.sha256 === subject.contract_sha256);
+  requireCondition(!requireNew || matchingRuns.length === 0,
   'This screened snapshot already has a proof-eligible benchmark receipt.');
 
   const review = {
@@ -164,7 +167,7 @@ function collectReview(runtime, sourceCommit) {
     configSha256: subject.config_sha256,
     executableInputs: subject.executable_inputs,
   };
-  return { review, reviewDigest: hashCanonicalJson(review), contract, config: runtime.config };
+  return { review, reviewDigest: hashCanonicalJson(review), contract, config: runtime.config, matchingRuns, journalHead, lock };
 }
 
 /** Refuse incomplete runs before recording a proof-eligible baseline. */
@@ -192,8 +195,17 @@ export function requireReviewedQualification(bytes, boundary, sourceCommit, revi
   requireCondition(boundary.kind === 'windows-supervisor' && hashBytes(bytes) === boundary.qualificationSha256,
     'The exact Windows qualification receipt is required.');
   const review = JSON.parse(bytes.toString('utf8')).operatorReview;
-  requireCondition(review?.operation === 'live-opening-baseline' && review.commit === sourceCommit &&
-    review.reviewDigest === reviewDigest, 'The Windows qualification receipt does not authorize this reviewed baseline.');
+  requireCondition(review?.operation === 'profile-proof-session' && review.commit === sourceCommit &&
+    review.openingReviewDigest === reviewDigest, 'The Windows qualification receipt is outside this reviewed proof session.');
+}
+
+export function requireOperationAuthorization(bytes, sha256, operation, sourceCommit, reviewDigest, qualificationSha256) {
+  requireCondition(hashBytes(bytes) === sha256, 'The exact operator authorization receipt is required.');
+  const receipt = JSON.parse(bytes.toString('utf8'));
+  requireCondition(receipt?.schemaVersion === 'clue-windows-proof-operation-authorization/1' &&
+    receipt.operation === operation && receipt.commit === sourceCommit && receipt.reviewDigest === reviewDigest &&
+    receipt.qualificationSha256 === qualificationSha256 && receipt.authorization === 'APPROVED',
+  'The operator authorization does not cover this exact operation.');
 }
 
 async function main() {
@@ -217,6 +229,9 @@ async function main() {
     requireCondition(planned.reviewDigest === reviewedDigest, 'The opening basis changed after operator review.');
     const boundary = requireProofExecutionBoundary();
     requireReviewedQualification(readFileSync(process.env.CLU_WINDOWS_SUPERVISOR_QUALIFICATION), boundary, sourceCommit, reviewedDigest);
+    requireOperationAuthorization(readFileSync(process.env.CLU_PROOF_OPERATOR_AUTHORIZATION),
+      process.env.CLU_PROOF_OPERATOR_AUTHORIZATION_SHA256, 'live-opening-baseline', sourceCommit, reviewedDigest,
+      boundary.qualificationSha256);
 
     stage = 'benchmark';
     const performed = await performBenchmarkRun({

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { requireCompleteOpeningOutcome, requireReviewedAuthority, requireReviewedQualification } from './live-opening-baseline.mjs';
+import { requireCompleteOpeningOutcome, requireOperationAuthorization, requireReviewedAuthority, requireReviewedQualification } from './live-opening-baseline.mjs';
 import { AUTHORITY_EVENT_TYPES, verifyInstalledPackAgainstSeal } from '../../dist/src/control/mission.js';
 import { hashBytes, hashCanonicalJson } from '../../dist/src/shared/ids.js';
 
@@ -139,12 +139,29 @@ test('changes to reviewed execution pins or the screened snapshot refuse the ope
   assert.throws(() => requireCompleteOpeningOutcome(performed, boundary, reviewed), /different opening basis/);
 });
 
-test('a pinned qualification must authorize the exact baseline review', () => {
+test('a pinned qualification must match the exact proof session', () => {
   const bytes = Buffer.from(JSON.stringify({
-    operatorReview: { operation: 'live-opening-baseline', commit: 'commit', reviewDigest: 'digest' },
+    operatorReview: { operation: 'profile-proof-session', commit: 'commit', openingReviewDigest: 'digest' },
   }));
   const boundary = { kind: 'windows-supervisor', qualificationSha256: hashBytes(bytes) };
   assert.doesNotThrow(() => requireReviewedQualification(bytes, boundary, 'commit', 'digest'));
-  assert.throws(() => requireReviewedQualification(bytes, boundary, 'other-commit', 'digest'), /does not authorize/);
+  assert.throws(() => requireReviewedQualification(bytes, boundary, 'other-commit', 'digest'), /outside this reviewed/);
   assert.throws(() => requireReviewedQualification(Buffer.concat([bytes, Buffer.from('\n')]), boundary, 'commit', 'digest'), /exact Windows/);
+  const old = Buffer.from(JSON.stringify({
+    operatorReview: { operation: 'live-opening-baseline', commit: 'commit', reviewDigest: 'digest' },
+  }));
+  assert.throws(() => requireReviewedQualification(old, { ...boundary, qualificationSha256: hashBytes(old) }, 'commit', 'digest'),
+    /outside this reviewed/);
+});
+
+test('operation authorization cannot transfer from opening to candidate or to another candidate input digest', () => {
+  const bytes = Buffer.from(JSON.stringify({
+    schemaVersion: 'clue-windows-proof-operation-authorization/1', operation: 'live-candidate-proof',
+    commit: 'commit', reviewDigest: 'digest', qualificationSha256: 'qualification', authorization: 'APPROVED',
+  }));
+  const sha = hashBytes(bytes);
+  assert.doesNotThrow(() => requireOperationAuthorization(bytes, sha, 'live-candidate-proof', 'commit', 'digest', 'qualification'));
+  assert.throws(() => requireOperationAuthorization(bytes, sha, 'live-opening-baseline', 'commit', 'digest', 'qualification'), /exact operation/);
+  assert.throws(() => requireOperationAuthorization(bytes, sha, 'live-candidate-proof', 'commit', 'other', 'qualification'), /exact operation/);
+  assert.throws(() => requireOperationAuthorization(bytes, sha, 'live-candidate-proof', 'commit', 'digest', 'other'), /exact operation/);
 });

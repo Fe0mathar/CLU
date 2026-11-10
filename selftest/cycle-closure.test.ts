@@ -23,7 +23,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { stringify as stringifyYaml } from 'yaml';
@@ -35,18 +35,22 @@ import {
   CYCLE_EVENT_TYPES,
   CYCLE_PROJECTION,
   CycleRegistry,
+  cycleSupersessionConfirmation,
 } from '../src/cycle/cycleRegistry.js';
 import { CycleOrchestrator } from '../src/cycle/cycleOrchestrator.js';
+import { createDashboardCycleProgress } from '../src/daemon/dashboardCycleProgress.js';
 import { canonicalHarnessBody } from '../src/benchmark/harnessBlock.js';
 import { runMasterBenchmark, type ExecFn } from '../src/benchmark/benchmarkRunner.js';
-import { prepareBenchmarkRunSubject, resolveContract, type PerformedRun } from '../src/control/benchmarkRun.js';
-import { hashText } from '../src/shared/ids.js';
+import { BENCHMARK_EVENT_TYPES, prepareBenchmarkRunSubject, resolveContract, type PerformedRun } from '../src/control/benchmarkRun.js';
+import { PACK_MANIFEST_FILE, PACK_SEAL_FILE } from '../src/control/mission.js';
+import { hashBytes, hashCanonicalJson, hashText, requireSha256 } from '../src/shared/ids.js';
 import { PROOF_EVENT_TYPES } from '../src/proof/proofContract.js';
 import { cycleCheck } from '../src/cli/commands/doctorCommands.js';
 import { commandCycleClose } from '../src/cli/commands/cycleCommands.js';
 import {
   cycleClosedSchema,
   cycleInputsLockedSchema,
+  cycleStageAdvancedSchema,
   nextCycleVitalInputSchema,
   type CycleClosed,
   type CycleRecord,
@@ -300,6 +304,118 @@ function writeFullFixture(withBenchmark = false): string {
     mkdirSync(join(root, 'workspace', directory), { recursive: true });
   }
   return root;
+}
+
+function writeSupersessionAuthority(root: string): void {
+  const manifest = '{"permanentFiles":[]}\n';
+  writeFileSync(join(root, PACK_MANIFEST_FILE), manifest);
+  writeFileSync(join(root, PACK_SEAL_FILE),
+    `${hashBytes(readFileSync(join(root, 'CLUE.md')))}  CLUE.md\n${hashText(manifest)}  ${PACK_MANIFEST_FILE}\n`);
+  mkdirSync(join(root, 'config', 'measurements'), { recursive: true });
+  writeFileSync(join(root, 'config', 'measurements', 'catalogue.yaml'),
+    readFileSync(join(process.cwd(), 'config', 'measurements', 'catalogue.yaml')));
+  for (const name of ['equilibrium', 'budget', 'routing']) {
+    writeFileSync(join(root, 'config', 'policies', `${name}.yaml`), 'version: 1\n');
+  }
+  writeFileSync(join(root, 'config', 'policies', 'p2-closure.yaml'), stringifyYaml({
+    version: 1,
+    phase: 'P2',
+    gateway: { decision: 'SAFE_DISABLED_DEFERRED', decision_id: 'P2-D4-TEST', recorded_at: '2026-08-14',
+      recorded_by: 'creator', reason: 'test phase boundary' },
+    p3_deferrals: { project_intent_model: true, environment_adapters: true },
+  }));
+}
+
+for (const disposition of ['ACCEPT', 'REVISE'] as const) {
+  test(`§21.3: proof-authoritative supersession with a prior ${disposition} verdict`, () => {
+    const root = writeFullFixture(true);
+    try {
+      writeSupersessionAuthority(root);
+      withRuntime({ withLog: true, repoRoot: root }, (runtime) => {
+        const log = runtime.requireLog();
+        assert.ok(runtime.mission);
+        const mission = runtime.mission.bootstrap().mission;
+        runtime.mission.ratifyInstalledAuthority({ statement: 'RATIFY TEST FIXTURE' });
+        runtime.mission.sealEpoch({ epochName: 'fixture-epoch', statement: 'SEAL TEST FIXTURE' });
+        const orchestrator = new CycleOrchestrator(runtime);
+        const { cycle, lock } = orchestrator.drive();
+        assert.equal(cycle.stage, 'SCREENED');
+        assert.equal(cycle.grade, 'proof-authoritative');
+        assert.ok(lock?.master_benchmark);
+        const lockDigest = requireSha256(cycle.lock_digest ?? '', 'fixture lock');
+        const reason = 'Replacement changes the measured target input.';
+        const expected = { cycleId: cycle.id, missionVersion: mission.id, lockDigest, reason,
+          confirmation: cycleSupersessionConfirmation(cycle.id, mission.id, lockDigest) };
+        assert.throws(() => orchestrator.supersede({ ...expected, confirmation: 'SUPERSEDE' }), /Type exactly/);
+        assert.throws(() => orchestrator.supersede({ ...expected, lockDigest: requireSha256('0'.repeat(64), 'wrong lock') }), /full lock digest/);
+        assert.throws(() => orchestrator.supersede(expected), /proof-eligible opening baseline/);
+
+        const screened = [...log.replay()].findLast((event) => event.type === CYCLE_EVENT_TYPES.stageAdvanced);
+        assert.ok(screened);
+        const evidence = cycleStageAdvancedSchema.parse(screened.payload).evidence;
+        assert.ok(evidence);
+        const screening = runtime.artifacts.getJson(requireSha256(evidence.hash, 'fixture screening')) as {
+          snapshot_id: string; inputs: { id: string };
+        };
+        const baselineShared = { proof_eligible: true, config_sha256: hashCanonicalJson(runtime.config),
+          contract: { path: lock.master_benchmark.path, sha256: lock.master_benchmark.sha256,
+            benchmark_id: 'fixture', benchmark_version: '1.0.0', block_id: 'fixture',
+            runner_adapter: 'cli-node', integrity_sha256: 'c'.repeat(64) },
+          execution_boundary: { kind: 'linux-bwrap', sha256: 'a'.repeat(64) },
+          executable_inputs: {} };
+        const baselineArtifact = runtime.artifacts.putJson({ ...baselineShared, inputs: screening.inputs });
+        const baseline = log.append({ type: BENCHMARK_EVENT_TYPES.runRecorded, actor: 'cli', missionVersion: mission.id,
+          subjectId: null, payload: { ...baselineShared, registered: true, snapshot_id: screening.snapshot_id,
+            inputs_id: screening.inputs.id, result_artifact: baselineArtifact, budget_exhausted: false,
+            unified_score: null, measures_count: 13, incomplete_count: 0, protective: [],
+            environment: lock.environment_fingerprint, log_head_before: null,
+            started_at: cycle.opened_at, finished_at: cycle.updated_at, wall_ms: 10 } });
+        runtime.projections.sync(log);
+        assert.throws(() => orchestrator.supersede(expected), /exact target inputs have not changed/);
+        appendClosureVerdict(runtime, { subjectCycleId: cycle.id, disposition });
+        writeFileSync(join(root, 'murugan', 'src', 'hello.ts'), 'export const replacement = true;\n');
+
+        if (disposition === 'ACCEPT') {
+          assert.throws(() => orchestrator.supersede(expected), /ACCEPT verdict or Great Book/);
+          assert.deepEqual(orchestrator.status(), cycle);
+          assert.equal([...log.replay()].some((event) => event.type === CYCLE_EVENT_TYPES.superseded), false);
+          return;
+        }
+        const result = orchestrator.supersede(expected);
+        assert.equal(result.created, true);
+        assert.equal(result.cycle.stage, 'OPENED');
+        assert.equal(result.cycle.lock_digest, null);
+        assert.equal(result.cycle.mission_version, mission.id);
+        assert.deepEqual(orchestrator.supersede(expected), { cycle: result.cycle, created: false });
+        assert.throws(() => orchestrator.supersede({ ...expected, reason: 'A different reason' }), /recorded Creator authorization/);
+        const superseded = [...log.replay()].filter((event) => event.type === CYCLE_EVENT_TYPES.superseded);
+        assert.equal(superseded.length, 1);
+        assert.equal(superseded[0]?.actor, 'creator');
+        const payload = superseded[0]?.payload as { evidence: { baseline: { event_id: string; event_sha256: string }; replacement_inputs_id: string } };
+        assert.equal(payload.evidence.baseline.event_id, baseline.id);
+        assert.equal(payload.evidence.baseline.event_sha256, baseline.hash);
+        assert.notEqual(payload.evidence.replacement_inputs_id, screening.inputs.id);
+        assert.equal(runtime.artifacts.verifyOne(requireSha256(baselineArtifact.hash, 'fixture baseline')), true);
+        const history = new CycleRegistry({ log, projections: runtime.projections, missionVersion: () => mission.id });
+        assert.deepEqual(history.get(cycle.id), cycle);
+        assert.equal(history.current()?.id, result.cycle.id);
+        const rebuilt = new ProjectionStore(join(root, 'supersession-replay.db'), { modules: [CYCLE_PROJECTION] });
+        try {
+          rebuilt.sync(log);
+          const replayed = new CycleRegistry({ log, projections: rebuilt, missionVersion: () => mission.id });
+          assert.deepEqual(replayed.get(cycle.id), cycle);
+          assert.deepEqual(replayed.current(), result.cycle);
+          const dashboard = createDashboardCycleProgress({ projections: rebuilt, currentMissionId: () => mission.id }).read();
+          assert.equal(dashboard?.checkpoint?.kind, CYCLE_EVENT_TYPES.superseded);
+          assert.equal(dashboard?.recoverable, true);
+        } finally {
+          rebuilt.close();
+        }
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true, maxRetries: 3 });
+    }
+  });
 }
 
 function appendClosureVerdict(

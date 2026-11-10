@@ -11,6 +11,7 @@ import { requireWindowsSupervisorQualification } from './windowsSupervisorQualif
 import { windowsNodeEntryArgs } from './windowsNodeEntry.js';
 import { hashBytes, type Sha256 } from '../shared/ids.js';
 import {
+  assertBenchmarkProfileWorkspace,
   BENCHMARK_PROFILE_INPUTS_FILE,
   isBenchmarkProfileCommand,
   type PreparedBenchmarkProfileInputs,
@@ -80,11 +81,14 @@ export function createRestrictedExecution(scope: Scope): { exec: ExecFn; dispose
   const cwd = directory(scope.projectRoot);
   const workspaceRoot = directory(scope.workspaceRoot);
   const profileInputs = scope.benchmarkProfileInputs;
-  if (profileInputs !== undefined && (boundary.kind !== 'windows-supervisor' || scope.mode !== 'baseline' ||
-      relative(repoRoot, cwd) !== '')) {
-    throw new Error('Profile-bound benchmark inputs require the Windows self-target baseline boundary.');
-  }
   const profileInputsSha = profileInputs === undefined ? null : hashBytes(profileInputs.bytes);
+  if (profileInputs !== undefined && profileInputsSha !== null) {
+    if (boundary.kind !== 'windows-supervisor' || relative(repoRoot, cwd) !== '' ||
+        (scope.mode === 'candidate' && relative(join(dirname(cwd), `${basename(cwd)}-workspace`), workspaceRoot) !== '')) {
+      throw new Error('Profile-bound benchmark inputs require the exact Windows self-target boundary.');
+    }
+    assertBenchmarkProfileWorkspace(profileInputs.bytes, profileInputsSha, repoRoot, workspaceRoot);
+  }
   const node = realpathSync.native(process.execPath);
   const nodeBin = dirname(node);
   const nodeRoot = process.platform === 'linux' && basename(nodeBin) === 'bin' && !['/usr/bin', '/bin'].includes(nodeBin)

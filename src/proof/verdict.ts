@@ -117,6 +117,26 @@ export interface VerdictInput {
   readonly anomalies?: readonly string[];
 }
 
+/** Keep the durable opening baseline as authority, and require like-for-like shadow evidence for an acceptance. */
+export function decideWithMatchedControl(input: VerdictInput, control: BaselinePackage | null): DeterministicVerdict {
+  const openingVerdict = decide(input);
+  if (openingVerdict.disposition !== 'ACCEPT' || control === null) return openingVerdict;
+  const controlValidity = assessBaselineValidity(input.contract, control);
+  const matchedVerdict = controlValidity.valid
+    ? decide({ ...input, baseline: control })
+    : { disposition: 'INVALID', reasons: controlValidity.reasons };
+  if (matchedVerdict.disposition === 'ACCEPT') {
+    return { ...openingVerdict, reasons: [...openingVerdict.reasons, `matched shadow control: ${matchedVerdict.reasons.join('; ')}`] };
+  }
+  return decide({
+    ...input,
+    anomalies: [
+      ...(input.anomalies ?? []),
+      `matched shadow control comparison did not establish the improvement (${matchedVerdict.disposition}): ${matchedVerdict.reasons.join('; ')}`,
+    ],
+  });
+}
+
 /* ------------------------------------------------------------------------- */
 /* Arithmetic                                                                 */
 /* ------------------------------------------------------------------------- */

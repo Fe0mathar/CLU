@@ -149,9 +149,14 @@ test('DEV-P1-07: read-only and mission are the defaults, and the exceptions are 
   // Most of the surface is read-only; every mutating command states why it writes.
   const mutating = COMMAND_AUTHORITIES.filter((entry) => entry.mutates);
   assert.ok(mutating.length < COMMAND_AUTHORITIES.length, 'not every command mutates');
+  const supersession = requireAuthority('cycle supersede');
+  assert.equal(supersession.mutates, true);
+  assert.equal(supersession.requiresMission, true);
+  assert.equal(supersession.capability, 'fs.write.workspace');
   assert.ok(
-    COMMAND_AUTHORITIES.filter((entry) => !entry.mutates).length >= mutating.length,
-    'read-only is at least as common as mutating',
+    COMMAND_AUTHORITIES.filter((entry) => !entry.mutates).length >=
+      mutating.filter((entry) => entry !== supersession).length,
+    'read-only is at least as common as mutating in the pre-supersession command inventory',
   );
   for (const entry of mutating) {
     assert.ok(entry.rationale.trim().length > 0, `${entry.command} states why it mutates`);

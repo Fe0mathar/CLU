@@ -33,6 +33,8 @@
  *                      the families that were unavailable, named
  */
 
+import { realpathSync } from 'node:fs';
+import { relative } from 'node:path';
 import { z } from 'zod';
 import type { Runtime } from '../control/runtime.js';
 import { runRecognition } from '../control/recognitionRun.js';
@@ -47,6 +49,7 @@ import { requireProofExecutionBoundary } from '../benchmark/restrictedExecution.
 import { isCompleteCluBenchmarkV020 } from '../benchmark/benchmarkRunner.js';
 import { captureSnapshot, snapshotManifestSchema } from '../analysis/source/snapshot.js';
 import { assertExactRunInputs, captureExactRunInputs } from '../control/exactRunInputs.js';
+import { isBenchmarkProfileContract } from '../control/projectProfiles/benchmarkProfileInputs.js';
 import { resolveProjectRecognition } from '../control/projectProfiles/projectRecognition.js';
 import {
   PROOF_EVENT_TYPES,
@@ -57,11 +60,13 @@ import {
   captureBaseline,
   type BaselinePackage,
 } from '../proof/baselineRegistry.js';
-import { decide, type DeterministicVerdict } from '../proof/verdict.js';
+import { decideWithMatchedControl, type DeterministicVerdict } from '../proof/verdict.js';
 import { buildGreatBookEntry, type GreatBookRecording } from '../greatBook/greatBookEntry.js';
 import {
+  executeMatchedProofControl,
   executeProofPlan,
   type PatchOperation,
+  type ProofExecutionDeps,
   type ProofExecutionRefusalStage,
 } from '../experiment/proof/executionCoordinator.js';
 
@@ -98,7 +103,10 @@ import {
   type CycleStage,
 } from '../shared/schemas.js';
 import type { EventLog } from '../memory/eventLog.js';
-import { CYCLE_EVENT_TYPES, CycleRegistry, type CycleRestartExpectation } from './cycleRegistry.js';
+import {
+  CYCLE_EVENT_TYPES, CycleRegistry, type CycleRestartExpectation, type CycleSupersessionExpectation,
+} from './cycleRegistry.js';
+import { inspectCycleSupersession } from './cycleSupersession.js';
 import { computeInputLock } from './cycleInputLock.js';
 import { verifyResume } from './resumePlanner.js';
 import { buildNextCycleVitalInput } from './nextCycleVitalInput.js';
@@ -191,6 +199,11 @@ export class CycleOrchestrator {
       predecessor = successor;
     }
     return this.registry.restart(expected);
+  }
+
+  public supersede(expected: CycleSupersessionExpectation): { readonly cycle: CycleRecord; readonly created: boolean } {
+    this.runtime.requireFreshProjections();
+    return this.registry.supersede(expected, (previous) => inspectCycleSupersession(this.runtime, previous));
   }
 
   /** The operator's suspension (§21.1): recorded with its reason, refused by the registry
@@ -378,6 +391,8 @@ export class CycleOrchestrator {
     readonly contract: unknown;
     readonly capabilities: readonly string[];
     readonly patch: readonly PatchOperation[];
+    readonly expectedBaselineEventId?: string;
+    readonly log?: (line: string) => void;
   }): Promise<CandidateArmResult> {
     return this.candidateInner(input);
   }
@@ -386,6 +401,8 @@ export class CycleOrchestrator {
     readonly contract: unknown;
     readonly capabilities: readonly string[];
     readonly patch: readonly PatchOperation[];
+    readonly expectedBaselineEventId?: string;
+    readonly log?: (line: string) => void;
   }): Promise<CandidateArmResult> {
     const cycle = this.registry.current();
     if (cycle === null) throw new Error('No cycle in progress — the candidate arm hangs off SCREENED.');
@@ -484,6 +501,7 @@ export class CycleOrchestrator {
     const configSha = hashCanonicalJson(config);
     for (const record of log.replay()) {
       if (record.type !== BENCHMARK_EVENT_TYPES.runRecorded) continue;
+      if (input.expectedBaselineEventId !== undefined && record.id !== input.expectedBaselineEventId) continue;
       const payload = record.payload as {
         snapshot_id?: string | null;
         registered?: boolean;
@@ -598,26 +616,99 @@ export class CycleOrchestrator {
     if (typecheck === undefined || build === undefined) {
       throw new Error('runtime.scripts.typecheck/build are schema-required and missing — the config is defective.');
     }
-    let execution = await executeProofPlan({
+    const needsMatchedControl = executionBoundary.kind === 'windows-supervisor' && this.runtime.projectProfile !== null &&
+      isBenchmarkProfileContract(lock.master_benchmark.sha256) &&
+      relative(realpathSync.native(this.runtime.repoRoot), realpathSync.native(config.project.root)) === '';
+    const executionDeps: Omit<ProofExecutionDeps, 'patch'> = {
       frozen,
       baseline,
-      patch: input.patch,
       projectRoot: config.project.root,
       pinnedInputs,
       shadow: {
         root: config.shadow.root,
-        persistent: config.shadow.persistent,
+        // Both sides of the local comparison start with new dependency and workspace state.
+        persistent: !needsMatchedControl && config.shadow.persistent,
         install_command: config.shadow.install_command ?? null,
         install_on_lockfile_change: config.shadow.install_on_lockfile_change,
       },
       scripts: { typecheck, build },
       benchmarkContractPath,
       repoRoot: this.runtime.repoRoot,
-    });
+      ...(this.runtime.projectProfile === null ? {} : { projectProfile: this.runtime.projectProfile }),
+    };
+    const control = needsMatchedControl ? await executeMatchedProofControl({
+      ...executionDeps,
+      log: (line) => input.log?.(`Matched control: ${line}`),
+    }) : null;
+    let controlArtifact: ArtifactRef | null = null;
+    let controlBaseline: BaselinePackage | null = null;
+    let controlRefusal: string | null = null;
+    if (control !== null) {
+      if (!control.ok) {
+        controlRefusal = `Matched shadow control refused at ${control.stage}: ${control.reason}`;
+      } else if (control.anomalies.length !== 0 ||
+          canonicalJson(control.outcome.execution_boundary ?? null) !== canonicalJson(executionBoundary) ||
+          canonicalJson(control.candidate_inputs) !== canonicalJson(pinnedInputs) ||
+          control.profile_relocation === undefined ||
+          control.profile_relocation.canonicalProfileHash !== lock.project_basis?.operationIdentity.projectProfileHash ||
+          control.profile_relocation.canonicalAuthoritySha256 !== lock.project_basis?.authorityHash ||
+          !isCompleteCluBenchmarkV020(control.outcome.result)) {
+        controlRefusal = 'Matched shadow control did not complete the same benchmark under the pinned Windows boundary, profile authority and screened inputs.';
+      } else {
+        controlArtifact = this.runtime.artifacts.putJson({
+          role: 'unchanged-matched-shadow-control',
+          result: control.outcome.result,
+          contract: control.outcome.contract,
+          timing: control.outcome.timing,
+          policy: control.outcome.policy,
+          budget: control.outcome.budget,
+          inputs: control.candidate_inputs,
+          executable_inputs: control.executable_inputs,
+          execution_boundary: control.outcome.execution_boundary,
+          profile_relocation: control.profile_relocation,
+          instrumentation: control.instrumentation,
+        }, { label: `proof-control-run-${frozen.contract_hash.slice(0, 12)}.json` });
+        controlBaseline = captureBaseline({
+          outcome: control.outcome,
+          snapshot_id: requireSha256(frozen.contract.snapshot_id, 'matched control snapshot'),
+          mission_version: frozen.contract.mission_version,
+          ...(frozen.contract.project_basis === undefined ? {} : { project_basis: frozen.contract.project_basis }),
+          run_artifact: controlArtifact,
+        });
+        const controlValidity = assessBaselineValidity(frozen.contract, controlBaseline);
+        if (!controlValidity.valid) controlRefusal = `Matched shadow control is invalid: ${controlValidity.reasons.join('; ')}`;
+      }
+    }
+    let execution = controlRefusal === null
+      ? await executeProofPlan({ ...executionDeps, patch: input.patch, log: (line) => input.log?.(`Candidate: ${line}`) })
+      : {
+          ok: false as const, stage: 'instrument' as const, reason: controlRefusal,
+          evidence: control !== null && !control.ok ? control.evidence ?? [] : [],
+        };
     if (execution.ok) {
       try {
         if (canonicalJson(execution.outcome.execution_boundary ?? null) !== canonicalJson(executionBoundary)) {
           throw new Error('Candidate execution did not use the pinned benchmark isolation boundary.');
+        }
+        if (control?.ok === true) {
+          const controlRelocation = control.profile_relocation;
+          const candidateRelocation = execution.profile_relocation;
+          if (controlRelocation === undefined || candidateRelocation === undefined ||
+              controlRelocation.canonicalProfileHash !== candidateRelocation.canonicalProfileHash ||
+              controlRelocation.canonicalAuthoritySha256 !== candidateRelocation.canonicalAuthoritySha256 ||
+              controlRelocation.shadowProfileHash === candidateRelocation.shadowProfileHash ||
+              controlRelocation.capsuleSha256 === candidateRelocation.capsuleSha256 ||
+              controlRelocation.shadowMission !== candidateRelocation.shadowMission ||
+              relative(realpathSync.native(control.shadow_dir), realpathSync.native(execution.shadow_dir)) === '') {
+            throw new Error('Candidate and matched shadow control did not use distinct leases under the same verified project authority.');
+          }
+          const matched = control.executable_inputs;
+          const observed = execution.executable_inputs;
+          if (matched.node_sha256 !== observed.node_sha256 ||
+              matched.engine_dependencies_id === null || matched.engine_dependencies_id !== observed.engine_dependencies_id ||
+              matched.target_dependencies_id === null || matched.target_dependencies_id !== observed.target_dependencies_id) {
+            throw new Error('Candidate and matched shadow control did not use the same Node binary and dependency bytes.');
+          }
         }
         const currentExecutableInputs = captureBenchmarkExecutableInputs(this.runtime.repoRoot, config.project.root);
         if (canonicalJson(currentExecutableInputs) !== canonicalJson(baselineSource?.executable_inputs)) {
@@ -661,6 +752,8 @@ export class CycleOrchestrator {
         inputs: execution.candidate_inputs,
         executable_inputs: execution.executable_inputs,
         execution_boundary: execution.outcome.execution_boundary,
+        ...(execution.profile_relocation === undefined ? {} : { profile_relocation: execution.profile_relocation }),
+        ...(controlArtifact === null ? {} : { matched_control: controlArtifact }),
         ...(frozen.contract.project_basis === undefined
           ? {}
           : { project_basis: frozen.contract.project_basis }),
@@ -676,13 +769,14 @@ export class CycleOrchestrator {
         : { project_basis: frozen.contract.project_basis }),
       run_artifact: candidateRunArtifact,
     });
-    const verdict = decide({
+    const verdictInput = {
       contract: frozen.contract,
       contract_hash: frozen.contract_hash,
       baseline,
       candidate,
       anomalies: execution.anomalies,
-    });
+    };
+    const verdict = decideWithMatchedControl(verdictInput, controlBaseline);
     const verdictArtifact = this.runtime.artifacts.putJson(verdict, {
       label: `proof-verdict-${frozen.contract_hash.slice(0, 12)}.json`,
     });
