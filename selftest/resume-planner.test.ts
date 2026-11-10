@@ -252,7 +252,7 @@ test('§21.2: a successor mission refuses the resume and names §21.4', () => {
   }
 });
 
-test('§21.3: cycle restart binds the exact prior lock and current successor mission', () => {
+test('§21.3: cycle restart binds the exact prior lock and follows the recorded mission successors', () => {
   const root = writeFixture(fileURLToPath(new URL('..', import.meta.url)));
   try {
     cpSync(fileURLToPath(new URL('../src', import.meta.url)), join(root, 'dist', 'src'), { recursive: true });
@@ -271,20 +271,32 @@ test('§21.3: cycle restart binds the exact prior lock and current successor mis
     assert.equal(status.status, 0, status.stdout + status.stderr);
     assert.ok(status.stdout.includes(previous.lock_digest), 'operator can review the complete lock');
 
-    const restart = (mission: string) => run(
-      'restart', previous.id, '--expect-mission', mission, '--expect-lock', previous.lock_digest ?? '',
+    const restart = (mission: string, lockDigest = previous.lock_digest ?? '') => run(
+      'restart', previous.id, '--expect-mission', mission, '--expect-lock', lockDigest,
     );
     const beforeSupersession = restart(previous.mission_version);
     assert.equal(beforeSupersession.status, 1);
-    assert.match(beforeSupersession.stdout, /directly supersede/);
+    assert.match(beforeSupersession.stdout, /through recorded successor links/);
 
     writeFileSync(join(root, 'CLUE.md'), '# CLUE\n\nAmended for the restart test.\n', 'utf8');
+    const intermediateMission = withRuntime({ withLog: true, repoRoot: root }, (runtime) =>
+      runtime.mission?.bootstrap().mission.id);
+    assert.ok(intermediateMission);
+    const wrongLock = '0'.repeat(64);
+    const directWithWrongLock = restart(intermediateMission, wrongLock);
+    assert.equal(directWithWrongLock.status, 1);
+    assert.match(directWithWrongLock.stdout, /full lock digest/);
+
+    writeFileSync(join(root, 'CLUE.md'), '# CLUE\n\nAmended again before the restart.\n', 'utf8');
     const successorMission = withRuntime({ withLog: true, repoRoot: root }, (runtime) =>
       runtime.mission?.bootstrap().mission.id);
     assert.ok(successorMission);
-    const moved = restart(previous.mission_version);
+    const moved = restart(intermediateMission);
     assert.equal(moved.status, 1);
-    assert.match(moved.stdout, /directly supersede/);
+    assert.match(moved.stdout, /through recorded successor links/);
+    const wrongLockOnCurrent = restart(successorMission, wrongLock);
+    assert.equal(wrongLockOnCurrent.status, 1);
+    assert.match(wrongLockOnCurrent.stdout, /full lock digest/);
     const restarted = restart(successorMission);
     assert.equal(restarted.status, 0, restarted.stdout + restarted.stderr);
     assert.match(restarted.stdout, /CYCLE-000001 superseded by CYCLE-000002/);

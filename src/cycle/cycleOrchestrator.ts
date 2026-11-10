@@ -177,9 +177,18 @@ export class CycleOrchestrator {
     const missions = this.runtime.requireMission();
     const current = missions.requireCurrent();
     const previous = this.registry.get(expected.cycleId);
-    if (current.id !== expected.missionVersion || previous === null ||
-        missions.get(previous.mission_version)?.superseded_by !== current.id) {
-      throw new Error('Restart requires the exact current mission to directly supersede the selected cycle mission.');
+    const refusal = 'Restart requires the exact current mission to supersede the selected cycle mission through recorded successor links.';
+    const priorMission = previous === null ? null : missions.get(previous.mission_version);
+    if (current.id !== expected.missionVersion || priorMission === null || priorMission.version >= current.version) {
+      throw new Error(refusal);
+    }
+    let predecessor = priorMission;
+    while (predecessor.id !== current.id) {
+      const successor = predecessor.superseded_by === null ? null : missions.get(predecessor.superseded_by);
+      if (successor === null || successor.version <= predecessor.version || successor.version > current.version) {
+        throw new Error(refusal);
+      }
+      predecessor = successor;
     }
     return this.registry.restart(expected);
   }

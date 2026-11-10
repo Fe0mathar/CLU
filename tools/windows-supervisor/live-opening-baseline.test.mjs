@@ -1,12 +1,91 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { fileURLToPath } from 'node:url';
 
-import { requireCompleteOpeningOutcome, requireReviewedQualification } from './live-opening-baseline.mjs';
-import { hashBytes } from '../../dist/src/shared/ids.js';
+import { requireCompleteOpeningOutcome, requireReviewedAuthority, requireReviewedQualification } from './live-opening-baseline.mjs';
+import { AUTHORITY_EVENT_TYPES, verifyInstalledPackAgainstSeal } from '../../dist/src/control/mission.js';
+import { hashBytes, hashCanonicalJson } from '../../dist/src/shared/ids.js';
+
+const missionId = 'MISSION-000007';
+const constitutionPath = 'CLUE_Constitution_v9.md';
+const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
+
+function sampleAuthority(sequence) {
+  const installedPack = verifyInstalledPackAgainstSeal(repoRoot, 'test the live opening baseline');
+  const { pack, sealSha, declared } = installedPack;
+  const id = (position) => 'EVENT-' + String(position).padStart(6, '0');
+  const ratification = {
+    type: AUTHORITY_EVENT_TYPES.packRatified, id: id(sequence), sequence,
+    mission_version: missionId, subject_id: missionId, actor: 'creator', hash: 'a'.repeat(64),
+    payload: {
+      pack_release: pack.releaseName, release_version: pack.releaseVersion,
+      seal_path: pack.sealFile, seal_sha256: sealSha,
+      manifest_path: pack.manifestFile, manifest_sha256: declared.get(pack.manifestFile),
+      constitution_path: constitutionPath, constitution_sha256: declared.get(constitutionPath),
+      declared_file_count: declared.size, ratified_by: 'creator', statement: 'RATIFY ' + sealSha.slice(0, 12),
+      ratified_at: '2026-11-10T20:30:00.000Z',
+    },
+  };
+  const epoch = {
+    type: AUTHORITY_EVENT_TYPES.epochSealed, id: id(sequence + 2), sequence: sequence + 2,
+    mission_version: missionId, subject_id: missionId, actor: 'creator', hash: 'b'.repeat(64),
+    previous_hash: 'c'.repeat(64),
+    payload: {
+      epoch_name: 'P2-authoritative-' + missionId, legacy_head_sequence: sequence + 1,
+      legacy_head_hash: 'c'.repeat(64), blob_manifest_sha256: 'd'.repeat(64), blob_count: 89,
+      ratification_event_id: ratification.id, ratified_seal_sha256: sealSha,
+      sealed_by: 'creator', statement: 'SEAL ' + 'c'.repeat(12), sealed_at: '2026-11-10T20:31:00.000Z',
+    },
+  };
+  return { ratification, epoch, installedPack };
+}
+
+test('review authority binds exact durable evidence without requiring predetermined event IDs', () => {
+  const digests = [11800, 13927].map((sequence) => {
+    const { ratification, epoch, installedPack } = sampleAuthority(sequence);
+    const { reviewEvidence } = requireReviewedAuthority(ratification, epoch, installedPack, constitutionPath);
+    assert.deepEqual(reviewEvidence, {
+      ratificationEventId: ratification.id, ratificationEventSha256: ratification.hash,
+      epochEventId: epoch.id, epochEventSha256: epoch.hash,
+      epochBoundarySequence: epoch.sequence - 1, epochBoundarySha256: epoch.previous_hash,
+      epochBlobManifestSha256: epoch.payload.blob_manifest_sha256,
+    });
+    return hashCanonicalJson(reviewEvidence);
+  });
+  assert.notEqual(...digests);
+});
+
+test('review authority refuses mission 6 records or a ratification newer than the epoch', () => {
+  const { ratification, epoch, installedPack } = sampleAuthority(11800);
+  const oldMission = { mission_version: 'MISSION-000006', subject_id: 'MISSION-000006' };
+  const oldRatification = { ...ratification, ...oldMission };
+  const oldEpoch = { ...epoch, ...oldMission };
+  assert.throws(() => requireReviewedAuthority(oldRatification, oldEpoch, installedPack, constitutionPath), /MISSION-000007/);
+  assert.throws(() => requireReviewedAuthority(ratification, oldEpoch, installedPack, constitutionPath), /MISSION-000007/);
+  assert.throws(() => requireReviewedAuthority({ ...ratification, sequence: epoch.sequence + 1 }, epoch, installedPack, constitutionPath),
+    /MISSION-000007/);
+});
+
+test('review authority requires the exact pack and an epoch linked to the ratification and event boundary', () => {
+  const { ratification, epoch, installedPack } = sampleAuthority(11800);
+  const otherSha = 'e'.repeat(64);
+  for (const changes of [
+    { epoch_name: 'P2-authoritative-MISSION-000006' },
+    { ratification_event_id: 'EVENT-011722' },
+    { ratified_seal_sha256: otherSha },
+    { legacy_head_sequence: epoch.sequence - 2 },
+    { legacy_head_hash: otherSha },
+  ]) {
+    const changed = { ...epoch, payload: { ...epoch.payload, ...changes } };
+    assert.throws(() => requireReviewedAuthority(ratification, changed, installedPack, constitutionPath), /verified event boundary/);
+  }
+  const changed = { ...ratification, payload: { ...ratification.payload, manifest_sha256: otherSha } };
+  assert.throws(() => requireReviewedAuthority(changed, epoch, installedPack, constitutionPath), /installed v9 pack/);
+});
 
 function sample() {
   const reviewed = {
-    missionId: 'MISSION-000006', snapshotId: 'snapshot', inputsId: 'inputs',
+    missionId, snapshotId: 'snapshot', inputsId: 'inputs',
     configSha256: 'config', executableInputs: { engine_dist_id: 'dist' }, benchmarkSha256: 'contract',
   };
   const boundary = { kind: 'windows-supervisor', sha256: 'supervisor', qualificationSha256: 'receipt' };

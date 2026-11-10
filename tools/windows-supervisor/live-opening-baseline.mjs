@@ -24,12 +24,8 @@ const expected = Object.freeze({
   projectId: 'clue1',
   profileGeneration: 9,
   profileHash: 'profile:v1:62140f8b95362e58c57edc4dfb9f1e2be347fe6f832f8a02335f6c851a2b944d',
-  missionId: 'MISSION-000006',
-  epochName: 'P2-authoritative-MISSION-000006',
-  epochEventId: 'EVENT-011723',
-  ratificationEventId: 'EVENT-011722',
-  epochBoundarySha256: 'c4982dedab2a248761d360f1b079ff1d155b954ccea360032c7c91ed2fdea3bb',
-  epochBlobManifestSha256: '20a83247cc2088caf836df87b9797632e2a8715db0d00da5a7262b283b17229b',
+  missionId: 'MISSION-000007',
+  epochName: 'P2-authoritative-MISSION-000007',
   v9SealSha256: '7b62c8e3a84457f173b5bec4d63b9b417b277990d93e2949bafb5decc6e918ca',
   benchmarkSha256: 'f4ed32fa892f2a9716db44d4d0dd458d5bb029993054fefa0d06c4c68f04199f',
 });
@@ -51,6 +47,43 @@ function readReviewedProfile() {
   requireCondition(profile?.profile.projectId === expected.projectId && profile.generation === expected.profileGeneration &&
     profile.projectProfileHash === expected.profileHash, 'The active profile is outside the approved clue1 generation 9 scope.');
   return profile;
+}
+
+/** Validate the latest authority records from the verified event replay. */
+export function requireReviewedAuthority(ratifiedEvent, sealedEvent, installedPack, constitutionPath) {
+  requireCondition(ratifiedEvent && sealedEvent &&
+    ratifiedEvent.type === AUTHORITY_EVENT_TYPES.packRatified && sealedEvent.type === AUTHORITY_EVENT_TYPES.epochSealed &&
+    ratifiedEvent.mission_version === expected.missionId && sealedEvent.mission_version === expected.missionId &&
+    ratifiedEvent.subject_id === expected.missionId && sealedEvent.subject_id === expected.missionId &&
+    ratifiedEvent.actor === 'creator' && sealedEvent.actor === 'creator' && ratifiedEvent.sequence < sealedEvent.sequence,
+  'Ratify the installed pack and seal the current evidence epoch for ' + expected.missionId + '.');
+  const ratification = { ...packRatificationSchema.parse(ratifiedEvent.payload), event_id: ratifiedEvent.id, sequence: ratifiedEvent.sequence };
+  const epoch = { ...epochSealSchema.parse(sealedEvent.payload), event_id: sealedEvent.id, sequence: sealedEvent.sequence };
+  const { pack, sealSha, declared } = installedPack;
+  requireCondition(pack.releaseVersion === '9.0' && sealSha === expected.v9SealSha256 &&
+    ratification.pack_release === pack.releaseName && ratification.release_version === pack.releaseVersion &&
+    ratification.seal_path === pack.sealFile && ratification.seal_sha256 === sealSha &&
+    ratification.manifest_path === pack.manifestFile && ratification.manifest_sha256 === declared.get(pack.manifestFile) &&
+    ratification.constitution_path === constitutionPath && ratification.constitution_sha256 === declared.get(constitutionPath) &&
+    ratification.declared_file_count === declared.size,
+  'The current ratification must match the installed v9 pack.');
+  // EventLog verifies sequence continuity and previous_hash against the preceding event.
+  requireCondition(epoch.epoch_name === expected.epochName && epoch.ratification_event_id === ratification.event_id &&
+    epoch.ratified_seal_sha256 === sealSha && epoch.legacy_head_sequence === sealedEvent.sequence - 1 &&
+    epoch.legacy_head_hash === sealedEvent.previous_hash,
+  'The current evidence epoch must be ' + expected.epochName + ' and match the verified event boundary.');
+  return {
+    ratification, epoch,
+    reviewEvidence: {
+      ratificationEventId: ratifiedEvent.id,
+      ratificationEventSha256: ratifiedEvent.hash,
+      epochEventId: sealedEvent.id,
+      epochEventSha256: sealedEvent.hash,
+      epochBoundarySequence: epoch.legacy_head_sequence,
+      epochBoundarySha256: epoch.legacy_head_hash,
+      epochBlobManifestSha256: epoch.blob_manifest_sha256,
+    },
+  };
 }
 
 function collectReview(runtime, sourceCommit) {
@@ -85,19 +118,10 @@ function collectReview(runtime, sourceCommit) {
     }
     if (event.type === BENCHMARK_EVENT_TYPES.runRecorded && event.payload?.proof_eligible === true) eligibleRuns.push(event);
   }
-  requireCondition(exactEpoch?.id === expected.epochEventId && exactRatification?.id === expected.ratificationEventId &&
-    exactEpoch.mission_version === mission.id && exactRatification.mission_version === mission.id &&
-    exactEpoch.sequence > exactRatification.sequence,
-  'The reviewed ratification and mission epoch must be the current durable records.');
-  const ratification = { ...packRatificationSchema.parse(exactRatification.payload), event_id: exactRatification.id, sequence: exactRatification.sequence };
-  const epoch = { ...epochSealSchema.parse(exactEpoch.payload), event_id: exactEpoch.id, sequence: exactEpoch.sequence };
-  const pack = verifyInstalledPackAgainstSeal(runtime.repoRoot, 'prepare the live opening baseline');
-  requireCondition(pack.pack.releaseVersion === '9.0' && pack.sealSha === expected.v9SealSha256 &&
-    ratification.seal_sha256 === pack.sealSha && epoch.epoch_name === expected.epochName &&
-    epoch.legacy_head_hash === expected.epochBoundarySha256 && epoch.blob_manifest_sha256 === expected.epochBlobManifestSha256 &&
-    epoch.ratification_event_id === ratification.event_id && epoch.ratified_seal_sha256 === pack.sealSha,
-  'The installed v9 seal or evidence boundary differs from the reviewed authority.');
-  requireCondition(locked && screened && locked.sequence > exactEpoch.sequence && screened.sequence > locked.sequence,
+  const installedPack = verifyInstalledPackAgainstSeal(runtime.repoRoot, 'prepare the live opening baseline');
+  const { ratification, epoch, reviewEvidence } = requireReviewedAuthority(exactRatification, exactEpoch,
+    installedPack, runtime.config.constitution.file);
+  requireCondition(locked && screened && locked.sequence > epoch.sequence && screened.sequence > locked.sequence,
   'The cycle must have a durable input lock and screening after the approved epoch.');
 
   const lock = cycleInputLockSchema.parse(locked.payload.lock);
@@ -127,6 +151,7 @@ function collectReview(runtime, sourceCommit) {
 
   const review = {
     ...expected,
+    ...reviewEvidence,
     sourceCommit,
     targetRootIdentity: profile.profile.targetRootIdentity,
     missionBasisSha256: registry.basis().basisHash,
