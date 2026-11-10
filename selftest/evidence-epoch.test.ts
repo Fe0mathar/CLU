@@ -206,6 +206,15 @@ test('ADR-0006: the seal binds the verified head, lands at head+1, and pins a re
     kernel.artifacts.putText('second blob');
 
     const boundaryManifest = kernel.artifacts.manifest();
+    const boundaryVerification = kernel.artifacts.verifyAll();
+    const browserExecution = join(fixture.config.workspace.root, 'blobs', 'browser-executions', `BEXEC-${'a'.repeat(32)}`);
+    mkdirSync(browserExecution, { recursive: true });
+    for (const name of ['page.jpg', 'request.json', 'response.json', 'receipt.json']) {
+      writeFileSync(join(browserExecution, name), name);
+    }
+    assert.deepEqual(kernel.artifacts.manifest(), boundaryManifest);
+    assert.deepEqual(kernel.artifacts.verifyAll(), boundaryVerification);
+
     const boundarySha = sha256(Buffer.from(JSON.stringify(boundaryManifest), 'utf8'));
     const preHead = kernel.log.getHead();
     assert.ok(preHead !== null);
@@ -224,6 +233,7 @@ test('ADR-0006: the seal binds the verified head, lands at head+1, and pins a re
     // ADR: "a blob manifest recomputed at the boundary state reproduces blob_manifest_sha256".
     assert.equal(record.blob_manifest_sha256, boundarySha);
     assert.equal(record.blob_count, boundaryManifest.length);
+    assert.equal(readFileSync(join(browserExecution, 'receipt.json'), 'utf8'), 'receipt.json');
 
     // ADR: "a blob added after sealing changes nothing about the record".
     kernel.artifacts.putText('post-seal blob');

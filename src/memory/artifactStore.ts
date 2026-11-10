@@ -45,7 +45,7 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs';
-import { dirname, join, sep } from 'node:path';
+import { dirname, join } from 'node:path';
 
 import { createHash, randomBytes } from 'node:crypto';
 
@@ -530,17 +530,19 @@ export class ArtifactStore {
 
   /** Every stored blob as a forward-slashed path relative to the store root. */
   private listBlobRelativePaths(): string[] {
-    const entries = readdirSync(this.rootDir, { recursive: true, withFileTypes: true });
     const paths: string[] = [];
+    const directories = [''];
 
-    for (const entry of entries) {
-      if (!entry.isFile()) continue;
-      const parentRelative = entry.parentPath.slice(this.rootDir.length).replace(/^[\\/]/, '');
-      const relative = (parentRelative.length > 0 ? `${parentRelative}${sep}${entry.name}` : entry.name)
-        .split(sep)
-        .join('/');
-      if (relative.startsWith(`${TEMP_DIR}/`)) continue;
-      paths.push(relative);
+    for (const directory of directories) {
+      for (const entry of readdirSync(join(this.rootDir, directory), { withFileTypes: true })) {
+        const relative = directory === '' ? entry.name : `${directory}/${entry.name}`;
+        if (entry.isDirectory()) {
+          // The browser execution ledger verifies its own named evidence files.
+          if (relative !== TEMP_DIR && relative !== 'browser-executions') directories.push(relative);
+        } else if (entry.isFile()) {
+          paths.push(relative);
+        }
+      }
     }
 
     return paths;
