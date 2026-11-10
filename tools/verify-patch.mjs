@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import {
-  cpSync, lstatSync, mkdirSync, mkdtempSync, readFileSync,
+  cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync,
   readdirSync, realpathSync, rmSync, writeFileSync,
 } from 'node:fs';
 import { dirname, isAbsolute, join, relative, sep } from 'node:path';
@@ -10,18 +10,26 @@ import { fileURLToPath } from 'node:url';
 
 const root = realpathSync(fileURLToPath(new URL('..', import.meta.url)));
 const reportDir = join(dirname(root), 'release-evidence');
-const defaultManifest = 'CLU-E-P02B-Manifest.json';
+const defaultManifest = existsSync(join(root, 'CLU-E-P03-Manifest.json'))
+  ? 'CLU-E-P03-Manifest.json' : 'CLU-E-P02B-Manifest.json';
 const checks = {
   'dashboard-p02b': [
     'clue-dashboard-server-authority', 'dashboard-cycle-progress', 'resume-planner', 'cycle-closure',
     'clue-agent', 'release-packaging',
   ],
+  'native-proof-p03': [
+    'p03-native-proof-pilot', 'proof-cli', 'proof-verdict-protocol',
+    'proof-cycle-project-isolation', 'windows-verification-tools', 'release-packaging',
+  ],
 };
-const pendingWindowsChecks = [
-  'Live Windows P02 cycle interruption and recovery',
-  'Live Windows A to B to A profile isolation',
-  'Live dashboard operator review and real CLUE brain test',
-];
+const pendingWindowsChecks = {
+  'dashboard-p02b': [
+    'Live Windows P02 cycle interruption and recovery',
+    'Live Windows A to B to A profile isolation',
+    'Live dashboard operator review and real CLUE brain test',
+  ],
+  'native-proof-p03': ['Native Windows frozen-contract proof pilot and durable verdict'],
+};
 const digest = (bytes) => createHash('sha256').update(bytes).digest('hex');
 const isHash = (value) => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
 const isCommit = (value) => typeof value === 'string' && /^[a-f0-9]{40}$/.test(value);
@@ -365,7 +373,7 @@ const report = {
   versions: { node: process.version },
   gates: [],
   commit: { status: 'not-requested', commit: null },
-  liveWindowsChecks: { status: 'pending', checks: pendingWindowsChecks },
+  liveWindowsChecks: { status: 'pending', checks: [] },
   blocker: null,
 };
 let scratch;
@@ -373,6 +381,7 @@ try {
   const options = parseArgs(process.argv.slice(2));
   const manifest = readManifest(options.manifest);
   report.patchId = manifest.patchId;
+  report.liveWindowsChecks.checks = pendingWindowsChecks[manifest.gate];
   report.manifestSha256 = digest(manifest.bytes);
   const env = osEnvironment();
   repositoryRoot(env);

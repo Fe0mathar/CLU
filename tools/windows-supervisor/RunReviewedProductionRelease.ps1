@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param()
+param([switch] $ProofPilot)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -71,12 +71,17 @@ function Open-PinnedFile([string] $Path, [string] $ExpectedSha, [long] $MaximumB
     }
 }
 
-function Read-Json([IO.Stream] $Stream) {
+function Read-Json([IO.Stream] $Stream, [switch] $PreserveDateStrings) {
     $Stream.Position = 0
     $encoding = [Text.UTF8Encoding]::new($false, $true)
     $reader = [IO.StreamReader]::new($Stream, $encoding, $true, 4096, $true)
-    try { return ConvertFrom-Json -InputObject ($reader.ReadToEnd()) -AsHashtable -Depth 48 }
-    finally { $reader.Dispose() }
+    try {
+        $json = $reader.ReadToEnd()
+        if ($PreserveDateStrings -and (Get-Command ConvertFrom-Json).Parameters.ContainsKey('DateKind')) {
+            return ConvertFrom-Json -InputObject $json -AsHashtable -Depth 48 -DateKind String
+        }
+        return ConvertFrom-Json -InputObject $json -AsHashtable -Depth 48
+    } finally { $reader.Dispose() }
 }
 
 function Assert-ProtectedRoot([string] $Path, [string] $OperatorSid) {
@@ -168,14 +173,20 @@ function Test-ObservedAdmission($Report) {
     return $true
 }
 
-function New-ChildStart([string] $File, [string[]] $Arguments, [string] $WorkingDirectory, [string] $ChildPath) {
+function New-ChildStart([string] $File, [string[]] $Arguments, [string] $WorkingDirectory, [string] $ChildPath,
+        [switch] $PilotEnvironment) {
     $start = [Diagnostics.ProcessStartInfo]::new()
     $start.FileName = $File
     $start.WorkingDirectory = $WorkingDirectory
     $start.UseShellExecute = $false
     foreach ($argument in $Arguments) { $start.ArgumentList.Add($argument) }
+    # The production supervisor admits scratch under this host's qualified TEMP root.
+    $windowsEnvironment = @('SystemRoot', 'WINDIR', 'ComSpec', 'SystemDrive', 'PATHEXT', 'ProgramFiles',
+        'ProgramFiles(x86)', 'ProgramW6432', 'CommonProgramFiles', 'CommonProgramFiles(x86)', 'USERPROFILE',
+        'HOMEDRIVE', 'HOMEPATH', 'APPDATA', 'LOCALAPPDATA', 'USERNAME', 'USERDOMAIN', 'COMPUTERNAME', 'TEMP', 'TMP')
     foreach ($name in @($start.Environment.Keys)) {
-        if ($name -match '^(GIT_|NODE_|CLU_WINDOWS_SUPERVISOR_|CLUE_RELEASE_|OPENAI_API_KEY$)') {
+        if (($PilotEnvironment -and $name -notin $windowsEnvironment) -or
+            $name -match '^(GIT_|NODE_|CLU_WINDOWS_SUPERVISOR_|CLUE_RELEASE_|CLUE_P03_|OPENAI_API_KEY$)') {
             $null = $start.Environment.Remove($name)
         }
     }
@@ -294,6 +305,98 @@ function Get-ReleaseGateOutcome([string] $Directory, [string] $Commit, [string] 
     return $outcome
 }
 
+function Assert-P03SourceFile([string] $Path, [string] $ExpectedSha) {
+    Assert-ExactPath $Path $false
+    $stream = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+    try {
+        if ($stream.Length -gt 8MB) { throw 'P03_COMMITTED_PATCH_UNVERIFIED' }
+        if ((Get-Digest $stream) -ceq $ExpectedSha) { return }
+        # Match the patch verifier's Windows text line-ending allowance.
+        $stream.Position = 0
+        $copy = [IO.MemoryStream]::new([int] $stream.Length)
+        try {
+            $stream.CopyTo($copy)
+            $text = [Text.UTF8Encoding]::new($false, $true).GetString($copy.ToArray())
+        } finally { $copy.Dispose() }
+        if (!$text.Contains("`r`n") -or (Get-PathDigest ($text.Replace("`r`n", "`n"))) -cne $ExpectedSha) {
+            throw 'P03_COMMITTED_PATCH_UNVERIFIED'
+        }
+    } finally { $stream.Dispose() }
+}
+
+function Get-P03ManifestSha([string] $Checkout) {
+    $path = Join-Path $Checkout 'CLU-E-P03-Manifest.json'
+    Assert-ExactPath $path $false
+    $stream = [IO.File]::Open($path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+    try {
+        if ($stream.Length -lt 1 -or $stream.Length -gt 256KB) { throw 'P03_COMMITTED_PATCH_UNVERIFIED' }
+        $manifest = Read-Json $stream
+        if ($manifest -isnot [System.Collections.IDictionary] -or $manifest['schemaVersion'] -ne 1 -or
+            $manifest['patchId'] -cne 'P03' -or $manifest['gate'] -cne 'native-proof-p03' -or
+            $manifest['files'] -isnot [array] -or $manifest['files'].Count -lt 1 -or
+            $manifest['baseFiles'] -isnot [array] -or ($manifest['baseFiles'].Count + $manifest['files'].Count) -gt 300) {
+            throw 'P03_COMMITTED_PATCH_UNVERIFIED'
+        }
+        $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+        foreach ($entry in @($manifest['baseFiles']) + @($manifest['files'])) {
+            if ($entry -isnot [System.Collections.IDictionary]) { throw 'P03_COMMITTED_PATCH_UNVERIFIED' }
+            $file = $entry['path']
+            if ($file -isnot [string] -or $file.Length -gt 240 -or
+                $file -cnotmatch '\A[A-Za-z0-9][A-Za-z0-9._ -]*(?<![. ])(?:/[A-Za-z0-9][A-Za-z0-9._ -]*(?<![. ]))*\z' -or
+                $file -match '(?:\A|/)(?:node_modules|dist|workspace|release-evidence)(?:/|\z)' -or
+                !$seen.Add($file) -or $entry['sha256'] -cnotmatch '\A[a-f0-9]{64}\z') {
+                throw 'P03_COMMITTED_PATCH_UNVERIFIED'
+            }
+            Assert-P03SourceFile (Join-Path $Checkout ($file.Replace('/', '\'))) $entry['sha256']
+        }
+        foreach ($file in @('selftest/p03-native-proof-pilot.test.ts', 'tools/windows-supervisor/RunReviewedProductionRelease.ps1',
+                'tools/windows-supervisor/ReviewedProductionQualification.ps1')) {
+            if (!$seen.Contains($file)) { throw 'P03_COMMITTED_PATCH_UNVERIFIED' }
+        }
+        return Get-Digest $stream
+    } finally { $stream.Dispose() }
+}
+
+function Get-P03ProofOutcome([string] $Path, [string] $SupervisorSha256, [string] $QualificationSha256, [int] $ExitCode) {
+    if ($ExitCode -ne 0) { throw 'P03_NATIVE_PROOF_FAILED' }
+    if (!(Test-Path -LiteralPath $Path -PathType Leaf)) { throw 'P03_NATIVE_EVIDENCE_MISSING' }
+    Assert-ExactPath $Path $false
+    $stream = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+    try {
+        if ($stream.Length -lt 1 -or $stream.Length -gt 256KB) { throw 'P03_NATIVE_EVIDENCE_UNVERIFIED' }
+        $report = Read-Json $stream -PreserveDateStrings
+        if ($report -isnot [System.Collections.IDictionary] -or
+            $report['schemaVersion'] -cne 'clue-p03-native-proof-pilot/1' -or $report['status'] -cne 'passed' -or
+            $report['scope'] -cne 'disposable-synthetic-local-target' -or $report['platform'] -cne 'win32' -or
+            $report['supervisor'] -isnot [System.Collections.IDictionary] -or
+            $report['supervisor']['sha256'] -cne $SupervisorSha256 -or
+            $report['supervisor']['qualificationSha256'] -cne $QualificationSha256 -or
+            $report['evidenceDigestSha256'] -cnotmatch '\A[a-f0-9]{64}\z' -or $report['cycleStage'] -cne 'SCREENED') {
+            throw 'P03_NATIVE_EVIDENCE_UNVERIFIED'
+        }
+        $verdict = $report['verdict']
+        $fixture = $report['fixturePolicy']
+        $baseline = $report['baseline']
+        $candidate = $report['candidate']
+        $canonical = $report['canonical']
+        if ($report['configurationMode'] -cne 'legacy-v2' -or $fixture -isnot [System.Collections.IDictionary] -or
+            $fixture['patchingMode'] -cne 'NOTIFY' -or ![object]::Equals($fixture['remoteConfigured'], $false) -or
+            ![object]::Equals($fixture['backupPushEnabled'], $false) -or ![object]::Equals($fixture['gatewayEnabled'], $false) -or
+            $verdict -isnot [System.Collections.IDictionary] -or $verdict['disposition'] -cne 'ACCEPT' -or
+            ![object]::Equals($verdict['improvement'], $true) -or $verdict['improvementPct'] -ne 20 -or
+            $verdict['greatBookEntryId'] -cnotmatch '\AGBI-[a-f0-9]{32}\z' -or
+            $baseline -isnot [System.Collections.IDictionary] -or $baseline['cost'] -ne 100 -or $baseline['guard'] -ne 497 -or
+            $candidate -isnot [System.Collections.IDictionary] -or $candidate['cost'] -ne 80 -or $candidate['guard'] -ne 497 -or
+            $canonical -isnot [System.Collections.IDictionary] -or ![object]::Equals($canonical['unchanged'], $true) -or
+            $canonical['beforeSha256'] -cnotmatch '\A[a-f0-9]{64}\z' -or
+            $canonical['beforeSha256'] -cne $canonical['afterSha256']) { throw 'P03_NATIVE_EVIDENCE_UNVERIFIED' }
+        return [ordered]@{
+            sha256 = Get-Digest $stream
+            report = $report
+        }
+    } finally { $stream.Dispose() }
+}
+
 $locks = [Collections.Generic.List[IO.Stream]]::new()
 $guardian = $null
 $runner = $null
@@ -308,23 +411,16 @@ $commit = $null
 $reportPath = $null
 $gateOutcome = $null
 $gateExit = $null
+$patchManifestSha = $null
+$pilotFailureStage = $null
 $blocker = $null
 $result = 2
 $phase = 'RELEASE_PREFLIGHT_UNVERIFIED'
+$operation = if ($ProofPilot) { 'proof pilot' } else { 'release' }
 try {
     if (!$IsWindows -or $PSVersionTable.PSVersion.Major -lt 7 -or ![Environment]::UserInteractive) {
         throw 'RELEASE_INTERACTIVE_WINDOWS_REQUIRED'
     }
-    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
-    try {
-        $operatorSid = $identity.User.Value
-        $principal = [Security.Principal.WindowsPrincipal]::new($identity)
-        if ($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-            throw 'RELEASE_STANDARD_SESSION_REQUIRED'
-        }
-    } finally { $identity.Dispose() }
-    $sessionId = (Get-Process -Id $PID).SessionId
-    if ($sessionId -le 0) { throw 'RELEASE_STANDARD_SESSION_REQUIRED' }
 
     $repo = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))
     $programFiles = [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles)
@@ -336,7 +432,19 @@ try {
 
     $stamp = [DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss-fff', [Globalization.CultureInfo]::InvariantCulture)
     $nonce = [Guid]::NewGuid().ToString('N')
-    $reportPath = Join-Path $evidence "CLU-E_WINDOWS_REVIEWED_RELEASE_$stamp-$($nonce.Substring(0, 8)).json"
+    $reportPrefix = if ($ProofPilot) { 'CLU-E_WINDOWS_P03_PROOF_PILOT' } else { 'CLU-E_WINDOWS_REVIEWED_RELEASE' }
+    $reportPath = Join-Path $evidence "$($reportPrefix)_$stamp-$($nonce.Substring(0, 8)).json"
+
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    try {
+        $operatorSid = $identity.User.Value
+        $principal = [Security.Principal.WindowsPrincipal]::new($identity)
+        if ($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+            throw 'RELEASE_STANDARD_SESSION_REQUIRED'
+        }
+    } finally { $identity.Dispose() }
+    $sessionId = (Get-Process -Id $PID).SessionId
+    if ($sessionId -le 0) { throw 'RELEASE_STANDARD_SESSION_REQUIRED' }
 
     $phase = 'RELEASE_REVIEWED_EVIDENCE_UNVERIFIED'
     $reviewHelper = Join-Path $PSScriptRoot 'ReviewedProductionQualification.ps1'
@@ -403,7 +511,8 @@ try {
     Assert-ExactPath $git $false
     Assert-ExactPath $pwsh $false
     $systemDirectory = [Environment]::SystemDirectory
-    $childPath = (@($systemDirectory, [IO.Path]::GetDirectoryName($git), [IO.Path]::GetDirectoryName($pwsh), $nodeDir, $env:PATH) -join ';')
+    $fixedPath = (@($systemDirectory, [IO.Path]::GetDirectoryName($git), [IO.Path]::GetDirectoryName($pwsh), $nodeDir) -join ';')
+    $childPath = "$fixedPath;$env:PATH"
     $phase = 'RELEASE_CURRENT_HOST_UNVERIFIED'
     $hostCheck = @'
 const { createHash } = require('node:crypto');
@@ -457,10 +566,14 @@ process.stdout.write(JSON.stringify({
     $boundCommit = Invoke-Child (New-ChildStart $git @('rev-parse', '--verify', 'HEAD^{commit}') $checkout $childPath) 30000 -Capture
     $status = Invoke-Child (New-ChildStart $git @('status', '--porcelain', '--untracked-files=all') $checkout $childPath) 30000 -Capture
     if ($boundCommit -cne $commit -or $status -cne '') { throw 'RELEASE_ISOLATED_HEAD_UNVERIFIED' }
+    if ($ProofPilot) {
+        $phase = 'P03_COMMITTED_PATCH_UNVERIFIED'
+        $patchManifestSha = Get-P03ManifestSha $checkout
+    }
     Write-Host "Testing committed Git HEAD $($commit.Substring(0, 12)) in an isolated checkout."
 
     $phase = 'RELEASE_OPERATOR_REVIEW_REQUIRED'
-    $receipt = New-ReviewedProductionQualification $reviewed $evidence $commit
+    $receipt = New-ReviewedProductionQualification $reviewed $evidence $commit -ProofPilot:$ProofPilot
     $locks.Add($receipt.lock)
 
     $phase = 'RELEASE_DEPENDENCY_INSTALL_UNVERIFIED'
@@ -479,7 +592,17 @@ process.stdout.write(JSON.stringify({
     } finally { $dependencyLock.Dispose() }
     $status = Invoke-Child (New-ChildStart $git @('status', '--porcelain', '--untracked-files=all') $checkout $childPath) 30000 -Capture
     if ($status -cne '') { throw 'RELEASE_ISOLATED_CHECKOUT_DIRTY' }
-    $script = Join-Path $checkout 'tools\release.mjs'
+    if ($ProofPilot) {
+        $phase = 'P03_BUILD_UNVERIFIED'
+        $compiler = Join-Path $checkout 'node_modules\typescript\bin\tsc'
+        Assert-ExactPath $compiler $false
+        Write-Host 'Building the committed P03 checkout.'
+        if ((Invoke-Child (New-ChildStart $node @($compiler) $checkout $fixedPath -PilotEnvironment) 300000) -ne 0) {
+            throw 'P03_BUILD_FAILED'
+        }
+    }
+    $script = if ($ProofPilot) { Join-Path $checkout 'dist\selftest\p03-native-proof-pilot.test.js' }
+        else { Join-Path $checkout 'tools\release.mjs' }
     Assert-ExactPath $script $false
 
     $phase = 'RELEASE_PRODUCTION_SESSION_UNVERIFIED'
@@ -524,33 +647,72 @@ public static class ClueGatedReleasePipe {
     } while (!$listening -and $wait.ElapsedMilliseconds -lt 10000)
     if (!$listening -or $guardian.HasExited) { throw 'RELEASE_PRODUCTION_SESSION_NOT_READY' }
 
-    $phase = 'RELEASE_FORMAL_GATES_UNVERIFIED'
-    $output = Join-Path $evidence "06L-$stamp-$($nonce.Substring(0, 8))"
+    $phase = if ($ProofPilot) { 'P03_NATIVE_PROOF_UNVERIFIED' } else { 'RELEASE_FORMAL_GATES_UNVERIFIED' }
+    $outputPrefix = if ($ProofPilot) { 'P03' } else { '06L' }
+    $output = Join-Path $evidence "$outputPrefix-$stamp-$($nonce.Substring(0, 8))"
     if (Test-Path -LiteralPath $output) { throw 'RELEASE_OUTPUT_COLLISION' }
     $null = New-Item -ItemType Directory -Path $output
     Assert-ExactPath $output $true
-    $start = New-ChildStart $node @($script, '--out', $output) $checkout $childPath
+    if ($ProofPilot) {
+        $pilotReport = Join-Path $output 'native-proof.json'
+        $start = New-ChildStart $node @('--test', '--test-reporter=tap', '--test-concurrency=1', $script) $checkout $fixedPath -PilotEnvironment
+        $start.Environment['CLUE_P03_NATIVE_PILOT_OUTPUT'] = $pilotReport
+        $start.RedirectStandardOutput = $true
+        $start.RedirectStandardError = $true
+        $timeout = 1200000
+        Write-Host 'Running the native Windows proof pilot against the disposable target.'
+    } else {
+        $start = New-ChildStart $node @($script, '--out', $output) $checkout $childPath
+        $start.Environment['CLUE_RELEASE_TEST_CONCURRENCY'] = '1'
+        $timeout = 7200000
+        Write-Host 'Running the formal Windows release gates.'
+    }
     $start.Environment['CLU_WINDOWS_SUPERVISOR_PATH'] = $image
     $start.Environment['CLU_WINDOWS_SUPERVISOR_SHA256'] = $wrapperSha
     $start.Environment['CLU_WINDOWS_SUPERVISOR_QUALIFICATION'] = $receipt.path
     $start.Environment['CLU_WINDOWS_SUPERVISOR_QUALIFICATION_SHA256'] = $receipt.sha256
-    $start.Environment['CLUE_RELEASE_TEST_CONCURRENCY'] = '1'
-    Write-Host 'Running the formal Windows release gates.'
     $runner = [Diagnostics.Process]::Start($start)
-    if ($null -eq $runner) { throw 'RELEASE_FORMAL_GATES_LAUNCH_FAILED' }
+    if ($null -eq $runner) {
+        if ($ProofPilot) { throw 'P03_NATIVE_PROOF_LAUNCH_FAILED' }
+        throw 'RELEASE_FORMAL_GATES_LAUNCH_FAILED'
+    }
     $checkoutCleanupSafe = $false
-    if (!$runner.WaitForExit(7200000)) {
+    if ($ProofPilot) {
+        $pilotStdout = $runner.StandardOutput.ReadToEndAsync()
+        $pilotStderr = $runner.StandardError.ReadToEndAsync()
+    }
+    if (!$runner.WaitForExit($timeout)) {
         try {
             $runner.Kill($true)
             $null = $runner.WaitForExit(30000)
         } catch { }
+        if ($ProofPilot) { throw 'P03_NATIVE_PROOF_TIMEOUT' }
         throw 'RELEASE_FORMAL_GATES_TIMEOUT'
     }
-    $checkoutCleanupSafe = $true
     $gateExit = $runner.ExitCode
 
-    $phase = 'RELEASE_GATE_OUTCOME_UNVERIFIED'
-    $gateOutcome = Get-ReleaseGateOutcome $output $commit $wrapperSha $gateExit
+    if ($ProofPilot) {
+        if (!$pilotStdout.Wait(10000) -or !$pilotStderr.Wait(10000)) { throw 'P03_NATIVE_OUTPUT_UNVERIFIED' }
+        $checkoutCleanupSafe = $true
+        $stdout = $pilotStdout.GetAwaiter().GetResult()
+        $stderr = $pilotStderr.GetAwaiter().GetResult()
+        if ($stdout) { Write-Host $stdout.TrimEnd() }
+        if ($stderr) { Write-Host $stderr.TrimEnd() }
+        if ($gateExit -ne 0) {
+            $refusal = [regex]::Match("$stdout`n$stderr", '(?m)^(?:# )?P03_NATIVE_PILOT_REFUSED (qualification|fixture|screening|baseline|proof|verification|journal|cleanup|evidence)\r?$')
+            if ($refusal.Success) { $pilotFailureStage = $refusal.Groups[1].Value }
+        }
+        $phase = 'P03_NATIVE_EVIDENCE_UNVERIFIED'
+        $gateOutcome = Get-P03ProofOutcome $pilotReport $wrapperSha $receipt.sha256 $gateExit
+        $status = Invoke-Child (New-ChildStart $git @('status', '--porcelain', '--untracked-files=all') $checkout $fixedPath -PilotEnvironment) 30000 -Capture
+        if ($status -cne '' -or (Get-P03ManifestSha $checkout) -cne $patchManifestSha) {
+            throw 'P03_ISOLATED_CHECKOUT_CHANGED'
+        }
+    } else {
+        $checkoutCleanupSafe = $true
+        $phase = 'RELEASE_GATE_OUTCOME_UNVERIFIED'
+        $gateOutcome = Get-ReleaseGateOutcome $output $commit $wrapperSha $gateExit
+    }
     $phase = 'RELEASE_INSTALLED_IMAGE_AFTER_RUN_UNVERIFIED'
     Assert-InstalledPair $protectedRoot $operatorSid $image $engine $prelude
     if ((Get-Digest $imageLock) -cne $wrapperSha -or (Get-Digest $engineLock) -cne $engineSha -or
@@ -562,15 +724,17 @@ public static class ClueGatedReleasePipe {
     }
 } catch {
     $blocker = $_.Exception.Message
-    if ($blocker -cnotmatch '^RELEASE_[A-Z0-9_]{1,72}$') { $blocker = $phase }
-    if ($null -ne $gateOutcome) {
+    if ($blocker -cnotmatch '^(?:RELEASE|P03)_[A-Z0-9_]{1,72}$') { $blocker = $phase }
+    if (!$ProofPilot -and $null -ne $gateOutcome) {
         $gateOutcome.releaseArchive = $null
         $gateOutcome.releaseArchiveSha256 = $null
     }
-    Write-Host "CLU-E Windows release stopped: $blocker"
+    Write-Host "CLU-E Windows $operation stopped: $blocker"
     if ($blocker -ceq 'RELEASE_STANDARD_SESSION_REQUIRED') { Write-Host 'Run the launcher from your normal Windows session.' }
 } finally {
-    if ($null -ne $output -and (Test-Path -LiteralPath $output -PathType Container)) { Write-Host "Release evidence: $output" }
+    if ($null -ne $output -and (Test-Path -LiteralPath $output -PathType Container)) {
+        if ($ProofPilot) { Write-Host "Pilot evidence: $output" } else { Write-Host "Release evidence: $output" }
+    }
     if ($null -ne $runner) { $runner.Dispose() }
     if ($null -ne $guardian) { $guardian.Dispose() }
     foreach ($lock in $locks) { $lock.Dispose() }
@@ -583,33 +747,47 @@ public static class ClueGatedReleasePipe {
         $checkoutCleanup = if ($removed) { 'REMOVED' } else { 'RETAINED' }
         if (!$removed) { Write-Host "Isolated checkout retained: $checkoutParent" }
     }
+    if ($ProofPilot -and $result -eq 0 -and $checkoutCleanup -cne 'REMOVED') {
+        $result = 2
+        $phase = 'P03_ISOLATED_CHECKOUT_RETAINED'
+        $blocker = $phase
+    }
     if ($null -ne $reportPath) {
         $report = [ordered]@{
-            schemaVersion = 'clue-windows-reviewed-production-release/1'
+            schemaVersion = if ($ProofPilot) { 'clue-windows-p03-proof-pilot/1' } else { 'clue-windows-reviewed-production-release/1' }
             checkedAt = [DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ss.fffZ', [Globalization.CultureInfo]::InvariantCulture)
-            state = if ($result -eq 0) { 'RELEASE' } else { 'BLOCKED' }
+            state = if ($result -ne 0) { 'BLOCKED' } elseif ($ProofPilot) { 'PASS' } else { 'RELEASE' }
             blocker = $blocker
-            phase = if ($result -eq 0) { 'RELEASE_COMPLETE' } else { $phase }
+            phase = if ($result -ne 0) { $phase } elseif ($ProofPilot) { 'P03_NATIVE_PROOF_COMPLETE' } else { 'RELEASE_COMPLETE' }
             sourceCommit = $commit
             supervisorSha256 = if ($null -ne $reviewed) { $reviewed.wrapperSha } else { $null }
             faultReport = if ($null -ne $reviewed) { $reviewed.bundlePath } else { $null }
             faultReportSha256 = if ($null -ne $reviewed) { $reviewed.bundleSha } else { $null }
             qualificationReceipt = if ($null -ne $receipt) { $receipt.path } else { $null }
             qualificationReceiptSha256 = if ($null -ne $receipt) { $receipt.sha256 } else { $null }
-            releaseEvidenceDirectory = $output
-            gateExitCode = $gateExit
-            gates = $gateOutcome
             isolatedCheckoutCleanup = $checkoutCleanup
+        }
+        if ($ProofPilot) {
+            $report['scope'] = 'disposable-synthetic-local-target'
+            $report['patchManifestSha256'] = $patchManifestSha
+            $report['nativeExitCode'] = $gateExit
+            $report['nativeFailureStage'] = $pilotFailureStage
+            $report['nativeProof'] = $gateOutcome
+        } else {
+            $report['releaseEvidenceDirectory'] = $output
+            $report['gateExitCode'] = $gateExit
+            $report['gates'] = $gateOutcome
         }
         try {
             Assert-ExactPath $evidence $true
-            $bytes = [Text.UTF8Encoding]::new($false).GetBytes(($report | ConvertTo-Json -Depth 8) + [Environment]::NewLine)
+            $depth = if ($ProofPilot) { 24 } else { 8 }
+            $bytes = [Text.UTF8Encoding]::new($false).GetBytes(($report | ConvertTo-Json -Depth $depth) + [Environment]::NewLine)
             $outStream = [IO.File]::Open($reportPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::Read)
             try { $outStream.Write($bytes, 0, $bytes.Length) }
             finally { $outStream.Dispose() }
             Write-Host "Send this result report: $reportPath"
         } catch {
-            Write-Host 'CLU-E Windows release could not save the launcher result report.'
+            Write-Host "CLU-E Windows $operation could not save the launcher result report."
             if ($result -eq 0) { $result = 2 }
         }
     }

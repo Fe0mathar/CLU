@@ -1,0 +1,61 @@
+{
+  "schemaVersion": 1,
+  "patchId": "P03",
+  "baseCommits": [
+    "5c3a6a4854e96951e1cbcc8619e6902f59b077de"
+  ],
+  "baseFiles": [],
+  "files": [
+    {
+      "path": "CLU-E-P03-Native-Proof-Pilot.md",
+      "sha256": "97ab833ab16316d9579d6a17225a986e902d2a199772033ef13c85988665cf1e",
+      "baseSha256": null
+    },
+    {
+      "path": "CLUE-Windows-P03-Proof-Pilot.bat",
+      "sha256": "9ea6cb17725da2926d5816fae1c3f894559eeba6b01eabd622263feb14335488",
+      "baseSha256": null
+    },
+    {
+      "path": "selftest/p03-native-proof-pilot.test.ts",
+      "sha256": "22fc207015025b63b9c57bb0fc82860431f3bbf4c27c6cd25ab3e5971511069b",
+      "baseSha256": null
+    },
+    {
+      "path": "selftest/proof-cli-fixture.ts",
+      "sha256": "b4c545bfd9f957304196a86b291228894ccd4508c65084d36029b5ff9d849f3f",
+      "baseSha256": null
+    },
+    {
+      "path": "selftest/proof-cli.test.ts",
+      "sha256": "6efe567c628fd57b9189a2412a66b3b1bf6b36349923ca5a747c98cb15e8d696",
+      "baseSha256": "a7205ada8e7a469c2757fd07923d1a24af8b98326c4a35e4a2283335207bd409"
+    },
+    {
+      "path": "selftest/release-packaging.test.ts",
+      "sha256": "2d3ee10e8143a6382e118ac3b2db71293eccb1975c4f669be5b3fe525852c153",
+      "baseSha256": "2ff74cd9c3be6ea19ef93588b45e9d6cbf94f8fdc7366b615011b36c09427c17"
+    },
+    {
+      "path": "tools/release.mjs",
+      "sha256": "cbbe1238d615bb632ef54adc82d0b2abc28c574941d30a759a68b8cb3e4983ff",
+      "baseSha256": "1b46d7c732b7274fc2f729e3cef9932e2eb218ed10ef72e22c1d16ac14bac024"
+    },
+    {
+      "path": "tools/verify-patch.mjs",
+      "sha256": "3d49d32caf744d5d953a1b9b1f6cc2e780940efe8b514f702fc22916edacc70e",
+      "baseSha256": "cb4a63d712667c68863f8808f017716c381922033262fd4e0bf552d894681a73"
+    },
+    {
+      "path": "tools/windows-supervisor/ReviewedProductionQualification.ps1",
+      "sha256": "548b8ec60665e63dd794c78a2fb8eb98584a42fb74d1b8f04904f027e6b81a97",
+      "baseSha256": "7ae35e8e33a091f54ada99998a5befe2f40f318aeb16599521691cfb8c21c177"
+    },
+    {
+      "path": "tools/windows-supervisor/RunReviewedProductionRelease.ps1",
+      "sha256": "7db071da20e1c276b52935ca3a33e183837808499c3b3e98f4704f46ed3053d5",
+      "baseSha256": "ee2d9e8450ff7a33f4fa5276b31c2f14679c96b6b899e8f3929897f18328fe14"
+    }
+  ],
+  "gate": "native-proof-p03"
+}

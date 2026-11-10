@@ -99,6 +99,7 @@ const REQUIRED_OPERATOR_PATHS = [
   'CLUE-Windows-Qualify-Proof-Supervisor.bat',
   'CLUE-Windows-Production-Network-Fault.bat',
   'CLUE-Windows-Reviewed-Release.bat',
+  'CLUE-Windows-P03-Proof-Pilot.bat',
   'AUDIT_AND_UPGRADE.md',
   'CONFIG-EDIT.md',
   'MANIFEST.txt',

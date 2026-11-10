@@ -33,6 +33,7 @@ const operatorPaths = [
   'CLUE-Windows-WFP-BFE-Lab.bat',
   'CLUE-Windows-Production-Network-Fault.bat',
   'CLUE-Windows-Reviewed-Release.bat',
+  'CLUE-Windows-P03-Proof-Pilot.bat',
   'templates/project-profiles/governed-document.operator-input.template.json',
   'templates/project-profiles/project-profile.operator-input.template.json',
 ];

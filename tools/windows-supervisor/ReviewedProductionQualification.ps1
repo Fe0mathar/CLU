@@ -150,16 +150,22 @@ function Get-ReviewedProductionEvidence([string] $Evidence) {
     }
 }
 
-function New-ReviewedProductionQualification($Reviewed, [string] $Evidence, [string] $Commit) {
+function New-ReviewedProductionQualification($Reviewed, [string] $Evidence, [string] $Commit, [switch] $ProofPilot) {
     if ($Commit -cnotmatch '\A(?:[a-f0-9]{40}|[a-f0-9]{64})\z') { throw 'RELEASE_GIT_HEAD_UNVERIFIED' }
     Write-Host ''
     Write-Host "Supervisor $($Reviewed.wrapperSha)"
     Write-Host "Committed source $Commit"
     Write-Host 'Evidence passed production request admission, seven native canaries, and the live network fault test.'
     Write-Host 'Scope: one primary guardian loss with BFE running, host loopback and the same-PC virtual IPv4 TCP peer.'
-    Write-Host 'Physical off-host LAN was untested. The release gates use the committed source shown above.'
-    $answer = Read-Host 'Type QUALIFY AND RELEASE to authorize this scope and run the formal gates'
-    if ($answer -cne 'QUALIFY AND RELEASE') { throw 'RELEASE_OPERATOR_AUTHORIZATION_DECLINED' }
+    if ($ProofPilot) {
+        Write-Host 'Physical off-host LAN was untested. P03 uses the committed source and a disposable local proof target.'
+        $answer = Read-Host 'Type QUALIFY AND RUN P03 to authorize this scope and run the native proof pilot'
+        if ($answer -cne 'QUALIFY AND RUN P03') { throw 'P03_OPERATOR_AUTHORIZATION_DECLINED' }
+    } else {
+        Write-Host 'Physical off-host LAN was untested. The release gates use the committed source shown above.'
+        $answer = Read-Host 'Type QUALIFY AND RELEASE to authorize this scope and run the formal gates'
+        if ($answer -cne 'QUALIFY AND RELEASE') { throw 'RELEASE_OPERATOR_AUTHORIZATION_DECLINED' }
+    }
 
     $cases = [ordered]@{}
     foreach ($name in $script:reviewedNativeCases) { $cases[$name] = $Reviewed.qualification['cases'][$name] }
@@ -193,7 +199,8 @@ function New-ReviewedProductionQualification($Reviewed, [string] $Evidence, [str
     finally { $sha.Dispose() }
     $stamp = [DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss-fff', [Globalization.CultureInfo]::InvariantCulture)
     $nonce = [Guid]::NewGuid().ToString('N')
-    $path = Join-Path $Evidence "P2_WINDOWS_SUPERVISOR_PRODUCTION_QUALIFICATION_$stamp-$nonce.json"
+    $prefix = if ($ProofPilot) { 'P03' } else { 'P2' }
+    $path = Join-Path $Evidence "${prefix}_WINDOWS_SUPERVISOR_PRODUCTION_QUALIFICATION_$stamp-$nonce.json"
     Assert-ExactPath $Evidence $true
     $stream = [IO.File]::Open($path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
     try {
