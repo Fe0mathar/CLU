@@ -17,11 +17,11 @@ const QUALIFICATION_PATH = 'CLU_WINDOWS_SUPERVISOR_QUALIFICATION';
 const QUALIFICATION_SHA256 = 'CLU_WINDOWS_SUPERVISOR_QUALIFICATION_SHA256';
 const EXPECTED_SOURCE = {
   'src/analysis/source/navigatorEvents.ts': 'a2946cd2cb3f433742f9f3d7fcac0eb78b271bca73dad73128345fca92e13c1a',
-  'src/control/recognitionRun.ts': '4773784156ca093acaadd59f20a2a855f1e832641c928d1fbe273a4b62504f6c',
+  'src/control/recognitionRun.ts': 'c155d6fecaedcba82cea7cc4b886b7f86e2bce5924c0b7759e8df3e056cf7c93',
   'src/status/statusFromRuntime.ts': '30a125131f1f0ee5c4a411bf4515015082745760550ed2224d6892d218096270',
   'src/status/statusProjector.ts': 'c6d1963172f4e087add7e50c7e1fe71164fefc9fd48676f24fd73f7441febf21',
   'tools/dashboard-status-probe.js': '59a27b1e35ce366bf12aa18cd4ad70b533cc4c9b78070e7a7136789145d5fac7',
-  'ui/clue-dashboard/app.js': 'a58e664a210cd5ab24e4cea008142624a4c3ef6e5ae92b6b8f52784d4cf661db',
+  'ui/clue-dashboard/app.js': 'abb3a7551ca02f6cb98c697f44f0d923e28af3c3e34ceba6d4210096c87273e7',
 };
 const CHILD_ENV_KEYS = new Set([
   'PATH', 'PATHEXT', 'SYSTEMROOT', 'WINDIR', 'COMSPEC', 'HOME', 'USERPROFILE', 'HOMEDRIVE',

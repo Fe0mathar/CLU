@@ -628,6 +628,27 @@ export class ProjectionStore {
     return { ...this.catchUp(log, status.lastSequence, status.headHash), rebuilt: false };
   }
 
+  /** Applies only the suffix of a verified writer's log, preserving the existing projection anchor. */
+  public catchUpVerified(log: EventLog): SyncResult {
+    if (this.readOnly || !log.isOpen) {
+      throw new Error('Projection catch-up requires writable projections and the event-log writer.');
+    }
+    const { lastSequence, headHash, indexedEvents } = this.status();
+    const head = log.getHead();
+    if (head === null && lastSequence === null && headHash === null && indexedEvents === 0) {
+      return { applied: 0, rebuilt: false, lastSequence: null };
+    }
+    if (head === null || lastSequence === null || headHash === null ||
+        !Number.isSafeInteger(lastSequence) || lastSequence < 0 || indexedEvents !== lastSequence + 1 ||
+        lastSequence > head.sequence || (lastSequence === head.sequence && headHash !== head.hash)) {
+      throw new Error('Projection catch-up refused because its event-log anchor is missing or divergent. Review the workspace before rebuilding.');
+    }
+    if (lastSequence === head.sequence) {
+      return { applied: 0, rebuilt: false, lastSequence };
+    }
+    return this.catchUp(log, lastSequence, headHash);
+  }
+
   /**
    * Clears every projection table and replays the whole log.
    *

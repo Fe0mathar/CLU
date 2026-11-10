@@ -37,7 +37,11 @@ const INSTRUCTIONS = [
 ].join('\n');
 
 type StartReceipt =
-  | { readonly started: true }
+  | {
+    readonly started: true;
+    readonly disposition?: 'started' | 'attached' | 'already-screened';
+    readonly cycleId?: string | null;
+  }
   | { readonly started: false; readonly code: string; readonly reason: string };
 
 interface AgentRun {
@@ -45,6 +49,8 @@ interface AgentRun {
   readonly phase: string | null;
   readonly exitCode: number | null;
   readonly lastLine: string | null;
+  readonly cycleId?: string | null;
+  readonly cycleStage?: string | null;
 }
 
 interface AgentOptions {
@@ -84,6 +90,8 @@ function observations(options: AgentOptions): unknown {
     state: run.state,
     phase: run.phase,
     exitCode: run.exitCode,
+    cycleId: run.cycleId ?? null,
+    cycleStage: run.cycleStage ?? null,
     detail: clean(run.lastLine),
   };
   if (current === null) return { run: runFacts, frame: null };
@@ -196,7 +204,11 @@ export function createDashboardAgent(options: AgentOptions): {
         return {
           status: 200,
           body: {
-            reply: 'CLU-E accepted the request to start. Watch the operational feed for the cycle receipt.',
+            reply: receipt.disposition === 'already-screened'
+              ? `Cycle ${receipt.cycleId ?? ''} has already reached screening. Use /status for its current checkpoint.`
+              : receipt.disposition === 'attached'
+                ? 'CLU-E attached to the active cycle. Use /status for its current checkpoint.'
+                : 'CLU-E accepted the request to start. Watch the operational feed for the cycle receipt.',
             action: 'start',
             receipt,
             callId: result.callId,

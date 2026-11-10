@@ -216,6 +216,9 @@ export interface RuntimeOptions {
    * that will checkpoint once at the end has a reason to; ordinary commands do not.
    */
   readonly checkpointEveryAppends?: number;
+  readonly measureEventAppends?: boolean;
+  /** Whether a stale heartbeat alone can qualify a live, unverifiable PID for takeover. */
+  readonly allowStaleHeartbeatReclaim?: boolean;
   /** Overrides root discovery. Used by the self-tests. */
   readonly repoRoot?: string;
   /**
@@ -1008,6 +1011,7 @@ function assembleRuntime(
     try {
       const opened = EventLog.open(eventLogRoot, {
         verifyOnOpen: options.verifyLog ?? 'tail',
+        measureAppends: options.measureEventAppends ?? false,
         // DEV-P1-01 follow-up: the event log's seventh guarantee — a committed head found
         // behind a durable checkpoint is refused as lost history — needs a checkpoint to
         // exist. The mechanism was implemented and proven, but every production open used
@@ -1018,7 +1022,9 @@ function assembleRuntime(
         // proven (no readable process start time, e.g. Windows) was unreachable at the
         // default of Infinity. A bounded window makes it reachable there, while a
         // same-host PID whose start time *can* be read is still never stolen from.
-        lockStaleAfterMs: LOCK_STALE_AFTER_MS,
+        lockStaleAfterMs: options.allowStaleHeartbeatReclaim === false
+          ? Number.POSITIVE_INFINITY
+          : LOCK_STALE_AFTER_MS,
         ...(projectIdentity === null ? {} : { projectIdentity }),
       });
       log = opened.log;

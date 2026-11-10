@@ -33,6 +33,7 @@
  *                      the families that were unavailable, named
  */
 
+import { z } from 'zod';
 import type { Runtime } from '../control/runtime.js';
 import { runRecognition } from '../control/recognitionRun.js';
 import {
@@ -85,11 +86,12 @@ export type CandidateArmResult =
       readonly evidence?: readonly string[];
       readonly recorded_event?: string;
     };
-import { canonicalJson, hashCanonicalJson, nowIso, type Sha256 } from '../shared/ids.js';
+import { canonicalJson, hashCanonicalJson, nowIso, requireSha256, type Sha256 } from '../shared/ids.js';
 import { computeAllMetrics, type MetricInput } from '../analysis/metrics/families.js';
 import { DEFAULT_WEIGHTS, rank } from '../analysis/metrics/ranking.js';
 import {
   cycleInputsLockedSchema,
+  sha256Schema,
   type ArtifactRef,
   type CycleInputLock,
   type CycleRecord,
@@ -117,6 +119,26 @@ export interface DriveResult {
 }
 
 const TARGET: CycleStage = 'SCREENED';
+const RECOVERABLE_DRIVE_STAGES: ReadonlySet<CycleStage> = new Set([
+  'OPENED', 'INPUTS_LOCKED', 'OPENING_EVIDENCE', 'RECOGNIZED',
+]);
+
+const openingCheckpointSchema = z.object({
+  stage: z.literal('OPENING_EVIDENCE'),
+  cycle_id: z.string(),
+  lock_digest: sha256Schema,
+  snapshot_id: sha256Schema,
+  capture_id: sha256Schema,
+});
+
+const recognitionCheckpointSchema = z.object({
+  stage: z.literal('RECOGNIZED'),
+  cycle_id: z.string(),
+  snapshot_id: sha256Schema,
+  capture_id: sha256Schema,
+  result_hash: sha256Schema,
+  run_key: sha256Schema.optional(),
+});
 
 export class CycleOrchestrator {
   private readonly runtime: Runtime;
@@ -895,14 +917,24 @@ export class CycleOrchestrator {
    * live pre-SCREENED stage; refuses a suspended cycle (the operator resumes those); a
    * cycle already at or past SCREENED performs nothing and is returned as it stands.
    */
-  public drive(navigatorPath: string | null = null): DriveResult {
+  public drive(
+    navigatorPath: string | null = null,
+    options: { readonly verifyRecovery?: boolean } = {},
+  ): DriveResult {
     const performed: DriveStep[] = [];
     let lock: CycleInputLock | null = null;
+    let openingSnapshotId: string | null = null;
 
     let cycle = this.registry.current();
     if (cycle === null) {
       cycle = this.registry.open();
       performed.push({ to: 'OPENED', evidence: null, summary: `${cycle.id} opened` });
+    } else if (options.verifyRecovery === true) {
+      if (RECOVERABLE_DRIVE_STAGES.has(cycle.stage)) {
+        openingSnapshotId = this.verifyDriveCheckpoint(cycle);
+      } else if (cycle.stage !== 'SUSPENDED' && cycle.mission_version !== this.runtime.currentMissionId()) {
+        throw new Error(`Cycle ${cycle.id} at ${cycle.stage} belongs to a different mission.`);
+      }
     }
 
     for (;;) {
@@ -922,15 +954,17 @@ export class CycleOrchestrator {
           break;
         }
         case 'INPUTS_LOCKED': {
-          performed.push(this.stepOpeningEvidence(cycle));
+          const { snapshotId, ...step } = this.stepOpeningEvidence(cycle, options.verifyRecovery === true);
+          if (options.verifyRecovery === true) openingSnapshotId = snapshotId;
+          performed.push(step);
           break;
         }
         case 'OPENING_EVIDENCE': {
-          performed.push(this.stepRecognition(cycle, navigatorPath));
+          performed.push(this.stepRecognition(cycle, navigatorPath, openingSnapshotId));
           break;
         }
         case 'RECOGNIZED': {
-          performed.push(this.stepScreening(cycle));
+          performed.push(this.stepScreening(cycle, openingSnapshotId));
           break;
         }
       }
@@ -944,6 +978,64 @@ export class CycleOrchestrator {
   }
 
   /* ------------------------------- steps ------------------------------- */
+
+  private verifyDriveCheckpoint(cycle: CycleRecord): string | null {
+    const verification = verifyResume(this.runtime, cycle, { allowUnsealedOpened: true });
+    const label = `Recovery refused for ${cycle.id} at ${cycle.stage}`;
+    if (!verification.ok) {
+      const failures = verification.checks.filter((check) => !check.ok);
+      throw new Error(`${label}: ${failures.map((check) => `${check.name}: ${check.detail}`).join('\n')}`);
+    }
+
+    const lock = this.tryLockOf(cycle.id);
+    if ((lock?.digest ?? null) !== cycle.lock_digest) {
+      throw new Error(`${label}: the projected lock differs from the cycle's recorded lock.`);
+    }
+    if (cycle.stage === 'OPENED' || cycle.stage === 'INPUTS_LOCKED') return null;
+
+    const ref = this.evidenceRefsOf(cycle.id)['OPENING_EVIDENCE'];
+    if (!ref) throw new Error(`${label}: the opening checkpoint has no evidence reference.`);
+    const checkpoint = openingCheckpointSchema.parse(
+      this.runtime.artifacts.getJson(requireSha256(ref.hash, 'opening checkpoint')),
+    );
+    const snapshots = this.runtime.snapshots;
+    const manifest = snapshots?.manifestOf(checkpoint.snapshot_id);
+    const capture = snapshots?.captures(checkpoint.snapshot_id).find(
+      (entry) => entry.captureId === checkpoint.capture_id && entry.origin === 'canonical',
+    );
+    if (checkpoint.cycle_id !== cycle.id || checkpoint.lock_digest !== cycle.lock_digest ||
+        manifest?.id !== checkpoint.snapshot_id || !capture) {
+      throw new Error(`${label}: opening evidence does not bind this cycle, lock, and canonical snapshot.`);
+    }
+    if (cycle.stage === 'OPENING_EVIDENCE') {
+      const recognition = resolveProjectRecognition(this.runtime);
+      const source = captureSnapshot({
+        root: recognition.targetRoot, sourceRoots: recognition.sourceRoots, exclude: recognition.excludedPaths,
+      });
+      if (source.id !== checkpoint.snapshot_id) {
+        throw new Error(`${label}: source changed since opening evidence. Restore the opened source or restart the cycle with a new lock.`);
+      }
+    }
+    return checkpoint.snapshot_id;
+  }
+
+  private verifyRecognitionCheckpoint(cycle: CycleRecord, openingSnapshotId: string): void {
+    const label = `Recovery refused for ${cycle.id} at ${cycle.stage}`;
+    const ref = this.evidenceRefsOf(cycle.id)['RECOGNIZED'];
+    if (!ref) throw new Error(`${label}: the recognition checkpoint has no evidence reference.`);
+    const checkpoint = recognitionCheckpointSchema.parse(
+      this.runtime.artifacts.getJson(requireSha256(ref.hash, 'recognition checkpoint')),
+    );
+    const record = this.runtime.requireGraph().recognition(openingSnapshotId);
+    const capture = this.runtime.snapshots?.captures(openingSnapshotId).find(
+      (entry) => entry.captureId === checkpoint.capture_id && entry.origin === 'canonical',
+    );
+    if (checkpoint.cycle_id !== cycle.id || checkpoint.snapshot_id !== openingSnapshotId ||
+        !capture || record?.result_hash !== checkpoint.result_hash ||
+        (checkpoint.run_key !== undefined && record.run_key !== checkpoint.run_key)) {
+      throw new Error(`${label}: recognition evidence does not match the opened snapshot and recorded graph run.`);
+    }
+  }
 
   private stepLock(cycle: CycleRecord): CycleInputLock {
     const missionRegistry = this.runtime.requireMission();
@@ -963,16 +1055,22 @@ export class CycleOrchestrator {
     return lock;
   }
 
-  private stepOpeningEvidence(cycle: CycleRecord): DriveStep {
+  private stepOpeningEvidence(
+    cycle: CycleRecord,
+    bindRecognition: boolean,
+  ): DriveStep & { readonly snapshotId: string } {
     const snapshots = this.runtime.snapshots;
     if (snapshots === null) {
       throw new Error('The snapshot registry is unavailable in this runtime; cannot open evidence.');
     }
+    const recognition = bindRecognition ? resolveProjectRecognition(this.runtime) : null;
+    const identity = recognition?.projectRecognitionIdentity ?? undefined;
     const captured = snapshots.capture({
       origin: 'canonical',
-      root: this.runtime.config.project.root,
-      sourceRoots: this.runtime.config.project.source_roots,
-      exclude: this.runtime.config.project.exclude,
+      root: recognition?.targetRoot ?? this.runtime.config.project.root,
+      sourceRoots: recognition?.sourceRoots ?? this.runtime.config.project.source_roots,
+      exclude: recognition?.excludedPaths ?? this.runtime.config.project.exclude,
+      ...(identity === undefined ? {} : { projectRecognition: identity }),
     });
     const evidence = this.runtime.artifacts.putJson(
       {
@@ -990,12 +1088,21 @@ export class CycleOrchestrator {
     return {
       to: 'OPENING_EVIDENCE',
       evidence,
+      snapshotId: captured.record.id,
       summary: `snapshot ${captured.record.id.slice(0, 12)}… (${captured.record.file_count} files)`,
     };
   }
 
-  private stepRecognition(cycle: CycleRecord, navigatorPath: string | null): DriveStep {
-    const outcome = runRecognition(this.runtime, { force: false, navigatorPath });
+  private stepRecognition(
+    cycle: CycleRecord,
+    navigatorPath: string | null,
+    openingSnapshotId: string | null,
+  ): DriveStep {
+    const outcome = runRecognition(this.runtime, {
+      force: false,
+      navigatorPath,
+      ...(openingSnapshotId === null ? {} : { expectedSnapshotId: openingSnapshotId }),
+    });
     const evidence = this.runtime.artifacts.putJson(
       {
         stage: 'RECOGNIZED',
@@ -1004,6 +1111,7 @@ export class CycleOrchestrator {
         capture_id: outcome.captureId,
         run_id: outcome.runId,
         result_hash: outcome.recorded.record.result_hash,
+        run_key: outcome.recorded.record.run_key,
         unit_count: outcome.recorded.record.unit_count,
         edge_count: outcome.recorded.record.edge_count,
         unresolved_count: outcome.recorded.record.unresolved_count,
@@ -1022,26 +1130,33 @@ export class CycleOrchestrator {
     };
   }
 
-  private stepScreening(cycle: CycleRecord): DriveStep {
+  private stepScreening(cycle: CycleRecord, openingSnapshotId: string | null): DriveStep {
     const graph = this.runtime.requireGraph();
     const metrics = this.runtime.metrics;
     const snapshots = this.runtime.snapshots;
     if (metrics === null || snapshots === null) {
       throw new Error('Metric or snapshot registry unavailable; cannot screen.');
     }
-    const latest = snapshots.latest('canonical');
-    if (latest === null) {
+    const snapshotId = openingSnapshotId ?? snapshots.latest('canonical')?.id;
+    if (snapshotId === undefined) {
       throw new Error('No canonical snapshot to screen against.');
     }
-    const snapshotId = latest.id;
+    if (openingSnapshotId !== null) this.verifyRecognitionCheckpoint(cycle, openingSnapshotId);
     const recognition = resolveProjectRecognition(this.runtime);
     const inputs = captureExactRunInputs(recognition.targetRoot);
     const source = captureSnapshot({
       root: recognition.targetRoot, sourceRoots: recognition.sourceRoots, exclude: recognition.excludedPaths,
     });
-    if (source.id !== snapshotId) throw new Error('Recognized source changed before screening. Capture and recognize the current tree.');
+    if (source.id !== snapshotId) {
+      throw new Error(openingSnapshotId === null
+        ? 'Recognized source changed before screening. Capture and recognize the current tree.'
+        : 'Recognized source changed before screening. Restore the opened source or restart the cycle with a new lock.');
+    }
     assertExactRunInputs(recognition.targetRoot, inputs, 'Screened project');
-    const stored = graph.resultOf(snapshotId);
+    const stored = graph.resultOf(
+      snapshotId,
+      openingSnapshotId === null ? undefined : recognition.projectRecognitionIdentity ?? undefined,
+    );
     if (stored === null) {
       throw new Error(`No recognition for snapshot ${snapshotId.slice(0, 12)}…; drive recognition first.`);
     }

@@ -41,6 +41,7 @@ import {
   type Runtime,
 } from '../src/control/runtime.js';
 import { PROJECTION_SCHEMA_VERSION } from '../src/memory/db.js';
+import { CycleRegistry } from '../src/cycle/cycleRegistry.js';
 
 interface HttpResult {
   readonly status: number;
@@ -570,14 +571,18 @@ test('DEV-P1-15: a timed-out pipeline records one phase receipt and can be start
   try {
     await withServer(
       root,
-      { childTimeoutMs: 120, childKillGraceMs: 50 },
+      { childTimeoutMs: 350, childKillGraceMs: 50 },
       async ({ port }) => {
         const started = await request(port, '/api/control/start', { method: 'POST' });
         assert.equal(started.status, 202);
+        const firstStart = JSON.parse(started.body);
+        assert.equal(firstStart.disposition, 'started');
+        assert.equal(firstStart.cycleId, null);
+        assert.ok(firstStart.dispatchId);
 
         const duplicate = await request(port, '/api/control/start', { method: 'POST' });
-        assert.equal(duplicate.status, 409);
-        assert.equal((JSON.parse(duplicate.body) as { code: string }).code, 'RUN_IN_PROGRESS');
+        assert.equal(duplicate.status, 202);
+        assert.deepEqual(JSON.parse(duplicate.body), { ...firstStart, disposition: 'attached' });
 
         const timedOut = await waitForRunState(port, 'timeout');
         assert.equal(timedOut['phase'], null);
@@ -591,6 +596,7 @@ test('DEV-P1-15: a timed-out pipeline records one phase receipt and can be start
 
         const restarted = await request(port, '/api/control/start', { method: 'POST' });
         assert.equal(restarted.status, 202, restarted.body);
+        assert.notEqual(JSON.parse(restarted.body).dispatchId, firstStart.dispatchId);
         const secondTimeout = await waitForRunState(port, 'timeout');
         assert.ok(Array.isArray(secondTimeout['receipts']));
         assert.equal(secondTimeout['receipts'].length, 1, 'receipts are scoped to this start');
@@ -603,23 +609,83 @@ test('DEV-P1-15: a timed-out pipeline records one phase receipt and can be start
 
 test('dashboard START dispatches the governed cycle with Navigator and no inherited OpenAI key', async () => {
   const root = makeRepo(`
-console.log(JSON.stringify({ args: process.argv.slice(2), credential: !!process.env.OPENAI_API_KEY }));
+console.log(JSON.stringify({
+  args: process.argv.slice(2), credential: !!process.env.OPENAI_API_KEY,
+  operatorCredential: !!process.env.CLUE_AGENT_OPENAI_API_KEY,
+}));
+process.stdout.write('{"eventAppends":');
+process.stdout.write('{"count":3,"totalMs":2,"maxMs":1}}\\n');
 `);
   const previousKey = process.env['OPENAI_API_KEY'];
+  const previousAgentKey = process.env['CLUE_AGENT_OPENAI_API_KEY'];
   process.env['OPENAI_API_KEY'] = 'test-credential-sentinel';
+  process.env['CLUE_AGENT_OPENAI_API_KEY'] = 'test-operator-credential-sentinel';
   try {
     await withServer(root, {}, async ({ port }) => {
       const started = await request(port, '/api/control/start', { method: 'POST' });
       assert.equal(started.status, 202, started.body);
       const completed = await waitForRunState(port, 'completed');
-      const detail = JSON.parse(String(completed['lastLine'])) as { args: string[]; credential: boolean };
+      const detail = JSON.parse(String(completed['lastLine'])) as { args: string[]; credential: boolean; operatorCredential: boolean };
       assert.deepEqual(detail.args.slice(0, 4), ['cycle', 'drive', '--navigator', '--expect-runtime']);
       assert.match(detail.args[4] ?? '', /^[a-f0-9]{64}$/u);
+      assert.equal(detail.args[5], '--verify-recovery');
       assert.equal(detail.credential, false);
+      assert.equal(detail.operatorCredential, false);
+      assert.deepEqual(completed['eventAppends'], { count: 3, totalMs: 2, maxMs: 1 });
     });
   } finally {
     if (previousKey === undefined) delete process.env['OPENAI_API_KEY'];
     else process.env['OPENAI_API_KEY'] = previousKey;
+    if (previousAgentKey === undefined) delete process.env['CLUE_AGENT_OPENAI_API_KEY'];
+    else process.env['CLUE_AGENT_OPENAI_API_KEY'] = previousAgentKey;
+    rmSync(root, { recursive: true, force: true, maxRetries: 3 });
+  }
+});
+
+test('dashboard restart recovers one durable cycle ID and refuses Start when explicitly suspended', async () => {
+  const root = makeRepo();
+  try {
+    const writeCycle = <T>(work: (cycles: CycleRegistry) => T): T =>
+      withRuntime({ withLog: true, repoRoot: root }, (runtime) => {
+        assert.ok(runtime.log);
+        return work(new CycleRegistry({
+          log: runtime.log,
+          projections: runtime.projections,
+          missionVersion: runtime.currentMissionId,
+        }));
+      });
+    const { id } = writeCycle((cycles) => cycles.open());
+    const checkpoint = await withServer(root, {}, async ({ port }) => {
+      const run = await request(port, '/api/run');
+      assert.equal(run.status, 200, run.body);
+      const view = JSON.parse(run.body);
+      assert.equal(view.runId, id);
+      assert.equal(view.cycleStage, 'OPENED');
+      assert.equal(view.recoveryRequired, true);
+      return view.checkpoints;
+    });
+    await withServer(root, {}, async ({ port }) => {
+      const run = await request(port, '/api/run');
+      assert.equal(run.status, 200, run.body);
+      assert.deepEqual(JSON.parse(run.body).checkpoints, checkpoint);
+      const resumed = await request(port, '/api/control/start', { method: 'POST' });
+      assert.equal(resumed.status, 202, resumed.body);
+      assert.equal(JSON.parse(resumed.body).runId, id);
+      await waitForRunState(port, 'completed');
+    });
+    writeCycle((cycles) => cycles.suspend(id, 'operator paused the pilot'));
+    await withServer(root, {}, async ({ port }) => {
+      const run = await request(port, '/api/run');
+      const view = JSON.parse(run.body);
+      assert.equal(view.cycleId, id);
+      assert.equal(view.cycleStage, 'SUSPENDED');
+      assert.equal(view.suspendedFrom, 'OPENED');
+      assert.equal(view.recoveryRequired, false);
+      const start = await request(port, '/api/control/start', { method: 'POST' });
+      assert.equal(start.status, 409, start.body);
+      assert.equal(JSON.parse(start.body).code, 'CYCLE_SUSPENDED');
+    });
+  } finally {
     rmSync(root, { recursive: true, force: true, maxRetries: 3 });
   }
 });
@@ -890,7 +956,7 @@ test('Q1 SURF/DIVE: Navigator tail detects truncate-and-regrow even when the rep
   }
 });
 
-test('Q4 Master Agent requires same-origin bounded JSON and refuses malformed input', async () => {
+test('Q4 operator agent routes require same-origin bounded JSON and expose no command bridge', async () => {
   const root = makeRepo();
   try {
     await withServer(root, {}, async ({ port }) => {
@@ -915,6 +981,19 @@ test('Q4 Master Agent requires same-origin bounded JSON and refuses malformed in
         method: 'POST', headers, body: JSON.stringify({ message: 'x'.repeat(33 * 1024) }),
       });
       assert.equal(tooBig.status, 413);
+      const arbitrary = await request(port, '/api/agent/console', {
+        method: 'POST', headers, body: JSON.stringify({ line: '/cycle drive' }),
+      });
+      assert.equal(arbitrary.status, 200);
+      assert.equal((JSON.parse(arbitrary.body) as { ok: boolean }).ok, false);
+      const injectedTool = await request(port, '/api/agent/console', {
+        method: 'POST', headers, body: JSON.stringify({ line: 'A message', tool: 'command_run' }),
+      });
+      assert.equal(injectedTool.status, 400);
+      const nonlocal = await request(port, '/api/agent/state', { headers: { Origin: 'https://attacker.invalid' } });
+      assert.equal(nonlocal.status, 403);
+      const agents = await request(port, '/api/agent/agents');
+      assert.deepEqual(JSON.parse(agents.body), { agents: ['clue'] });
       const run = await request(port, '/api/run');
       assert.equal((JSON.parse(run.body) as { state: string }).state, 'idle');
     });

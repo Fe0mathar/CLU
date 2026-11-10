@@ -13,6 +13,7 @@
   "files": [
     "dist/",
     "src/",
+    "agents/clue/identity.md",
     "selftest/",
     "ui/",
     "schemas/",

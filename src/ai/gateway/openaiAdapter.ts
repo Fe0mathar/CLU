@@ -376,13 +376,13 @@ async function fetchWithTimeout<T>(
 
 export class OpenAiResponsesAdapter {
   readonly #apiKey: string;
-  readonly #routing: GatewayRoutingPolicy;
+  readonly #routing: Pick<GatewayRoutingPolicy, 'api'>;
   readonly #fetch: GatewayFetch;
   readonly #timeoutMs: number;
 
   public constructor(options: {
     readonly apiKey: string;
-    readonly routing: GatewayRoutingPolicy;
+    readonly routing: Pick<GatewayRoutingPolicy, 'api'>;
     readonly fetchImpl?: GatewayFetch;
   }) {
     if (options.apiKey.length === 0) throw new Error('OpenAI API key is empty.');

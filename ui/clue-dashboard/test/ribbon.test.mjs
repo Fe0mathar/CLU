@@ -82,6 +82,27 @@ test('status preserves stream and run as separate detail and gives failures prio
   assert.equal(projectRibbonStatus({ stream: true, run: { state: 'idle' }, sealConsistent: false }).state, 'failed');
 });
 
+test('status reports the durable screening checkpoint and how to continue a saved cycle', () => {
+  const screened = projectRibbonStatus({ stream: true, run: {
+    state: 'completed', cycleId: 'CYCLE-000004', cycleStage: 'SCREENED', checkpointAt: '2026-11-09T22:00:00Z',
+  } });
+  assert.match(screened.summary, /Screening reached \(SCREENED\)/);
+  assert.match(screened.checks[1].detail, /Cycle CYCLE-000004.*Checkpoint 2026-11-09T22:00:00Z/);
+  assert.doesNotMatch(projectRibbonStatus({ stream: true, run: { state: 'completed' } }).summary, /Screening reached/);
+
+  const interrupted = projectRibbonStatus({ stream: true, run: {
+    state: 'idle', cycleId: 'CYCLE-000004', cycleStage: 'RECOGNIZED', recoveryRequired: true,
+  } });
+  assert.equal(interrupted.state, 'pending');
+  assert.match(interrupted.checks[1].detail, /RECOGNIZED.*Enter \/start to continue/);
+
+  const suspended = projectRibbonStatus({ stream: true, run: {
+    state: 'idle', cycleId: 'CYCLE-000004', cycleStage: 'SUSPENDED', recoveryRequired: true,
+  } });
+  assert.equal(suspended.state, 'pending');
+  assert.match(suspended.checks[1].detail, /SUSPENDED.*cycle resume.*then enter \/start/);
+});
+
 test('the actual ribbon markup exposes five bulbs, an original vector wordmark, and seal glyphs', () => {
   const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
   const ribbon = html.slice(html.indexOf('<header id="rail"'), html.indexOf('</header>'));

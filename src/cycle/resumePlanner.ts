@@ -55,11 +55,15 @@ export interface ResumeVerification {
 }
 
 /**
- * Runs §21.2's verification for a suspended cycle. Pure over the runtime's services;
+ * Runs §21.2's verification for a suspended or interrupted cycle. Pure over the runtime's services;
  * writes nothing — the caller records the receipt and decides (the orchestrator refuses
  * the resume when `ok` is false, quoting the failed checks).
  */
-export function verifyResume(runtime: Runtime, cycle: CycleRecord): ResumeVerification {
+export function verifyResume(
+  runtime: Runtime,
+  cycle: CycleRecord,
+  options: { readonly allowUnsealedOpened?: boolean } = {},
+): ResumeVerification {
   const checks: ResumeCheck[] = [];
 
   // Mission: the cycle's authority must still be the authority (§21.4 otherwise).
@@ -81,7 +85,13 @@ export function verifyResume(runtime: Runtime, cycle: CycleRecord): ResumeVerifi
 
   // Cycle lock: is this still the world the cycle locked?
   if (cycle.lock_digest === null) {
-    checks.push({ name: 'lock', ok: false, detail: 'the cycle carries no lock digest' });
+    const unsealedOpened = (options.allowUnsealedOpened === true && cycle.stage === 'OPENED') ||
+      (cycle.stage === 'SUSPENDED' && cycle.suspended_from === 'OPENED');
+    checks.push({
+      name: 'lock',
+      ok: unsealedOpened,
+      detail: unsealedOpened ? 'inputs have yet to be locked at OPENED' : 'the cycle carries no lock digest',
+    });
   } else if (mission === null) {
     checks.push({ name: 'lock', ok: false, detail: 'not recomputable without a mission' });
   } else {

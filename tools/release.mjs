@@ -79,6 +79,7 @@ const DOCUMENTATION_PACKS = {
 
 const REQUIRED_OPERATOR_PATHS = [
   'CLUE-Dashboard.bat',
+  'agents/clue/identity.md',
   'CLUE-Windows-Setup.bat',
   'CLUE-Windows-Supervisor.bat',
   'CLUE-Windows-WFP-Diagnostic.bat',

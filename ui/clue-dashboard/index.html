@@ -105,6 +105,7 @@
 
 </style>
 <link rel="stylesheet" href="/ui/configuration/configuration.css" />
+<link rel="stylesheet" href="/ui/configuration/agentsPanel.css" />
 <link rel="stylesheet" href="/ui/components/ribbon.css" />
 <link rel="stylesheet" href="/ui/quadrants/q4Terminal.css" />
 </head>
@@ -174,18 +175,18 @@
         <section class="q4-operation-pane" aria-label="Operational feed" tabindex="0">
           <h2 class="q4-pane-title">Operational feed</h2>
           <div id="work"><div class="empty" style="grid-column:1/-1">No current work contract</div></div>
-          <ol id="q4-command-receipts" class="q4-command-receipts" aria-label="Command receipts" hidden></ol>
+          <ol id="q4-command-receipts" class="q4-command-receipts" aria-label="CLUE activity and command receipts" hidden></ol>
           <div id="feed"><div class="empty">No operational traffic recorded. Enter /start in the console to begin.</div></div>
         </section>
         <section class="q4-command-pane" aria-labelledby="q4-terminal-title">
           <div class="q4-terminal-heading">
-            <h2 id="q4-terminal-title" class="q4-pane-title">Master Agent console</h2>
-            <span class="q4-terminal-help" id="q4-terminal-help"><code>/help</code> for CLU-E commands</span>
+            <h2 id="q4-terminal-title" class="q4-pane-title">CLUE</h2>
+            <span class="q4-terminal-help" id="q4-terminal-help"><code>/help</code> for commands · ask CLUE about dashboard status</span>
           </div>
           <ol id="q4-terminal-log" class="q4-terminal-log" role="log" aria-label="Command and conversation history" aria-live="polite" tabindex="0"></ol>
           <form id="q4-terminal-form" class="q4-terminal-form" aria-label="CLU-E command or message" aria-busy="false">
             <label for="q4-terminal-input" class="q4-terminal-prompt" aria-label="CLU-E command or message">CLU-E<span aria-hidden="true">›</span></label>
-            <input id="q4-terminal-input" type="text" maxlength="2048" aria-label="CLU-E command or message" aria-describedby="q4-terminal-help" autocomplete="off" spellcheck="false" placeholder="/start or ask the Master Agent…" />
+            <input id="q4-terminal-input" type="text" maxlength="2048" aria-label="CLU-E command or message" aria-describedby="q4-terminal-help" autocomplete="off" spellcheck="false" placeholder="/status, /start, or ask CLUE a question…" />
             <button type="submit" id="q4-terminal-submit" aria-label="Submit to CLU-E" title="Submit (Enter)">↵</button>
           </form>
         </section>

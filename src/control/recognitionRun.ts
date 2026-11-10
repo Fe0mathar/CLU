@@ -65,6 +65,8 @@ export interface RecognitionRunOptions {
   readonly navigatorPath: string | null;
   /** True only for the first recognition run explicitly requested by a profile activation. */
   readonly activated?: boolean;
+  /** If present, the capture must match the opening evidence of the active cycle. */
+  readonly expectedSnapshotId?: string;
 }
 
 export interface RecognitionRunOutcome {
@@ -187,6 +189,9 @@ export function runRecognition(
       ...(projectRecognition === undefined ? {} : { projectRecognition }),
     });
     const snapshotId = captured.record.id;
+    if (options.expectedSnapshotId !== undefined && snapshotId !== options.expectedSnapshotId) {
+      throw new Error('Source changed since opening evidence. Restore the opened source or restart the cycle with a new lock.');
+    }
     // DEV-P0-03: the recognition basis must bind the exact capture it assesses and the toolchain that
     // produced it, so a stored result proves which durable bytes and dependencies it drew conclusions
     // from — not merely that it described *some* live program.

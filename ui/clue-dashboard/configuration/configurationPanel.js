@@ -3,50 +3,56 @@
  *
  * Browser state is a draft/interaction aid only. Every canonical path, hash, uniqueness check,
  * durable generation, readiness verdict and activation receipt comes from the backend API.
+ *
+ * This module is composition and request routing. It owns one piece of state the backend never
+ * sees — `ui`: which section is on screen, the search text, the open dialog — and nothing else.
+ * The profile draft and every stale-response guard remain in configurationState.js, unchanged.
+ *
+ * The markup itself is shellView.js: a profile context bar, a section sidebar, one section at a
+ * time in the main pane, and a save bar that is always on screen. Rendering is one HTML string per
+ * state change; uiContinuity.js carries focus, scroll, open disclosures and half-typed inputs
+ * across the replacement.
  */
 
 import { createConfigurationState, recordMatchesActive } from './configurationState.js';
-import { renderProjectSelector, renderStartupBinding } from './projectSelector.js';
+import { findCredentialLeak } from './actionContracts.js';
+import { renderSelectionBadges } from './projectSelector.js';
 import {
+  newProjectSuggestions,
   normalizeProjectIdDraft,
   projectDraftProblems,
-  renderProjectEditor,
+  renderPreparationFooter,
 } from './projectEditor.js';
-import {
-  canonicalAdditionalDocuments,
-  nextAdditionalOrder,
-  renderAuthorityEditor,
-} from './authorityEditor.js';
-import { renderRecognitionEditor } from './recognitionEditor.js';
-import { canTestConsole, renderHostEditor } from './hostEditor.js';
-import { renderGitEditor } from './gitEditor.js';
-import { canTestChrome, renderBrowserEditor } from './browserEditor.js';
-import { availableGatewayModels, CREDENTIAL_REFERENCE_PATTERN, renderGatewayEditor } from './gatewayEditor.js';
-import { renderBenchmarkRuntimeEditor } from './benchmarkRuntimeEditor.js';
-import { renderProjectReadinessPanel } from './projectReadinessPanel.js';
+import { canonicalAdditionalDocuments, distinguishedPathInputId, nextAdditionalOrder } from './authorityEditor.js';
+import { canTestConsole } from './hostEditor.js';
+import { canTestChrome } from './browserEditor.js';
+import { availableGatewayModels, CREDENTIAL_REFERENCE_PATTERN } from './gatewayEditor.js';
+import { renderNavigationList, resolveSection, sectionAvailable } from './navigation.js';
+import { CAPABILITY_SECTIONS, DEFAULT_SECTION } from './sectionRegistry.js';
+import { exactDeletePhrase } from './configurationDialogs.js';
+import { changedSections, draftChanges } from './draftChanges.js';
+import { draftIssues } from './draftIssues.js';
+import { HOSTED_LAYOUT_CONTROL_ID, renderSaveBar, renderShell } from './shellView.js';
+import { captureContinuity, describeActiveFocus, restoreContinuity } from './uiContinuity.js';
 import {
   cloneValue,
   escapeHtml,
   integer,
+  isBusy,
   lines,
   nullableText,
   readPath,
   unwrapApiData,
-  writePath,
 } from './viewPrimitives.js';
 
 export { escapeHtml };
-
-const CAPABILITY_SECTIONS = Object.freeze({
-  git: 'git', ai: 'gpt-gateway', chrome: 'browser', console: 'powershell-host',
-});
+export { configurationRows, renderConfigurationRows } from './installationRows.js';
 
 export function focusCapabilitySection(root, capability, result) {
   if (!Object.hasOwn(CAPABILITY_SECTIONS, capability)) return false;
   const section = root.querySelector(`[data-section="${CAPABILITY_SECTIONS[capability]}"]`);
   if (!section) return false;
-  const commandBar = root.querySelector('.cfg-command-bar');
-  section.style.scrollMarginTop = `${Math.ceil(commandBar?.getBoundingClientRect().height ?? 0) + 12}px`;
+  section.style.scrollMarginTop = '12px';
   if (typeof result?.summary === 'string' && result.summary) {
     let detail = section.querySelector('[data-ribbon-check]');
     if (!detail) {
@@ -114,8 +120,9 @@ function basenameWithoutMd(path) {
   return (parts.at(-1) ?? 'governed-document').replace(/\.md$/iu, '');
 }
 
-function exactDeletePhrase(record) {
-  return `DELETE PROFILE ${record.profile.projectId} ${record.generation} ${record.projectProfileHash.slice(0, 12)}`;
+/** A form control, recognised by shape so the handlers also work outside a browser. */
+function isFormControl(target) {
+  return Boolean(target) && typeof target === 'object' && target.dataset !== undefined && 'value' in target;
 }
 
 function valueFromControl(control, path) {
@@ -127,54 +134,6 @@ function valueFromControl(control, path) {
   return control.value;
 }
 
-function renderMetricCatalogue(catalogue) {
-  const current = catalogue.activeSource || 'canonical';
-  const list = Array.isArray(catalogue.entries) ? catalogue.entries : null;
-  const defaultOption = `<option value="canonical"${current === 'canonical' ? ' selected' : ''}>Default Metric Catalogue</option>`;
-  const options = defaultOption + (list === null
-    ? '<option value="" disabled>SERVER LIST UNAVAILABLE</option>'
-    : list.length === 0
-      ? '<option value="">NO SERVER CATALOGUES</option>'
-      : `<option value=""${current === 'canonical' ? '' : ' selected'}>— SERVER CATALOGUE —</option>${list.map((entry) => `<option value="${escapeHtml(entry.id)}">${escapeHtml(entry.catalogueId || entry.id)} (${entry.metricCount ?? '?'})</option>`).join('')}`);
-  return `<section class="cfg-card cfg-metric-card" data-section="metric-catalogue">
-    <header class="cfg-card-head"><div><span class="cfg-kicker">METRIC CATALOGUE</span><h3>Global measurement authority</h3></div><span class="cfg-badge is-good">UNCHANGED</span></header>
-    <p class="cfg-card-copy">The Metric Catalogue remains installation-global. Project Authority does not duplicate or override it.</p>
-    <div class="cfg-catalogue-controls"><span class="cfg-hash">ACTIVE · ${escapeHtml(current)}</span><select id="cfgCatalogueSelector">${options}</select><button type="button" data-cfg-action="local-catalogue">LOCAL .JSON…</button></div>
-  </section>`;
-}
-
-function renderNotice(snapshot) {
-  if (!snapshot.notice) return '';
-  const tone = ['good', 'bad', 'local'].includes(snapshot.notice.tone) ? snapshot.notice.tone : 'neutral';
-  return `<div class="cfg-notice is-${tone}" role="status">${escapeHtml(snapshot.notice.message)}</div>`;
-}
-
-function renderShell(snapshot, catalogue) {
-  const phase = String(snapshot.phase ?? 'idle').replaceAll('-', ' ').toUpperCase();
-  return `<div class="cfg-shell" data-phase="${escapeHtml(snapshot.phase)}" aria-busy="${!['idle', 'ready'].includes(snapshot.phase)}">
-    <header class="cfg-shell-head"><div><span class="cfg-kicker">CONFIGURATION</span><h2>PROJECT PROFILE CONTROL PLANE</h2><p>One selected profile defines one complete target operating context. Drafts are local; the backend owns all authority and persistence.</p></div><div class="cfg-shell-status"><span class="cfg-badge is-neutral">REGISTRY g${snapshot.registryGeneration ?? '—'}</span><span class="cfg-badge is-local">${escapeHtml(phase)}</span></div></header>
-    ${renderProjectSelector(snapshot)}
-    ${renderStartupBinding(snapshot)}
-    ${renderNotice(snapshot)}
-    <div class="cfg-layout">
-      <div class="cfg-column">
-        ${renderProjectEditor(snapshot)}
-        ${renderAuthorityEditor(snapshot)}
-        ${renderRecognitionEditor(snapshot)}
-        ${renderBenchmarkRuntimeEditor(snapshot)}
-      </div>
-      <div class="cfg-column">
-        ${renderProjectReadinessPanel(snapshot)}
-        ${renderHostEditor(snapshot)}
-        ${renderGitEditor(snapshot)}
-        ${renderBrowserEditor(snapshot)}
-        ${renderGatewayEditor(snapshot)}
-        ${renderMetricCatalogue(catalogue)}
-      </div>
-    </div>
-  </div>`;
-}
-
 /**
  * Mounts the complete Configuration surface.
  *
@@ -182,32 +141,313 @@ function renderShell(snapshot, catalogue) {
  * @param {HTMLElement} options.root
  * @param {{invoke: Function}} options.actionClient
  * @param {(url:string, init?:object)=>Promise<unknown>} [options.fetchJson]
- * @param {(message:string, initial?:string)=>string|null} [options.promptText]
- * @param {(message:string)=>boolean} [options.confirmAction]
+ * @param {(message:string, initial?:string)=>string|null} [options.promptText] when supplied, text is
+ *   asked through it instead of the built-in dialogs and inline inputs (a host or test seam)
+ * @param {(message:string)=>boolean} [options.confirmAction] when supplied, discarding a draft is
+ *   confirmed through it instead of the built-in dialog
  * @param {(record:object, validation:object)=>boolean|void} [options.onActivationPending]
  * @param {()=>void} [options.onActivationCancelled]
  * @param {(detail:object)=>void} [options.onActiveProjectChanged]
+ * @param {(host:HTMLElement)=>{destroy?:Function}|void} [options.mountAgents]
  */
 export function mountConfigurationPanel(options) {
   const root = options.root;
   const actionClient = options.actionClient;
   const state = createConfigurationState();
   const fetchJson = options.fetchJson ?? (async () => { throw new Error('fetchJson unavailable'); });
-  const promptText = options.promptText ?? ((message, initial = '') => window.prompt(message, initial));
-  const confirmAction = options.confirmAction ?? ((message) => window.confirm(message));
+  const promptText = typeof options.promptText === 'function' ? options.promptText : null;
+  const confirmAction = typeof options.confirmAction === 'function' ? options.confirmAction : null;
   const catalogue = { activeSource: globalThis.window?.__clueMetricsMeta?.source ?? 'canonical', entries: null };
   const legacyConnections = { ai: null, git: null, busy: null };
   let readinessReceipts = {};
   let destroyed = false;
 
+  /** Presentation-only state. Nothing here is persisted or sent to the backend. */
+  const ui = {
+    section: DEFAULT_SECTION,
+    search: '',
+    dialog: null,
+    ribbonChecks: {},
+    templateRoots: null,
+    returnFocus: null,
+    pendingFocus: null,
+    pendingReveal: null,
+    dropTransient: new Set(),
+  };
+  let renderedSection = null;
+
+  const query = (selector) => {
+    try {
+      return typeof root.querySelector === 'function' ? root.querySelector(selector) : null;
+    } catch {
+      return null;
+    }
+  };
+
+  /** The snapshot the renderers see: backend-derived state plus the facts computed from it. */
+  function view(snapshot = state.snapshot()) {
+    const issues = snapshot.draft ? draftIssues(snapshot.draft) : [];
+    const changes = snapshot.draftMode === 'update' && snapshot.selectedRecord
+      ? draftChanges(snapshot.selectedRecord.profile, snapshot.draft)
+      : [];
+    ui.section = resolveSection(ui.section, snapshot);
+    return {
+      ...snapshot,
+      legacyConnections,
+      readinessReceipts,
+      issues,
+      changes,
+      changedPaths: changes.map((change) => change.path),
+      changedSections: changedSections(changes),
+      ui: {
+        section: ui.section,
+        search: ui.search,
+        dialog: ui.dialog,
+        ribbonChecks: ui.ribbonChecks,
+        templateRoots: ui.templateRoots,
+      },
+    };
+  }
+
+  /** Opens the disclosure that hides a field, then focuses the field. DOM only. */
+  function revealField(path) {
+    const escaped = String(path).replace(/"/gu, '\\"');
+    const target = query(`[data-profile-path="${escaped}"]`)
+      ?? query(`[data-cfg-override="${escaped}"]`)
+      ?? query(`[data-field-path="${escaped}"] input, [data-field-path="${escaped}"] select, [data-field-path="${escaped}"] textarea`)
+      ?? query(`[data-pane="${ui.section}"] [data-section]`);
+    if (!target) return;
+    let parent = typeof target.closest === 'function' ? target.closest('details') : null;
+    while (parent) {
+      parent.open = true;
+      parent = parent.parentElement && typeof parent.parentElement.closest === 'function' ? parent.parentElement.closest('details') : null;
+    }
+    try {
+      if (target.tabIndex < 0 && !('value' in target)) target.tabIndex = -1;
+      target.focus({ preventScroll: true });
+      target.scrollIntoView({ block: 'center', inline: 'nearest' });
+    } catch { /* focus is a convenience */ }
+  }
+
+  /** An open dialog always holds keyboard focus, so Escape and Tab keep working. DOM only. */
+  function keepFocusInDialog() {
+    if (ui.dialog === null) return;
+    const dialog = query('.cfg-dialog');
+    const active = root.ownerDocument?.activeElement ?? null;
+    if (!dialog || typeof dialog.contains !== 'function' || dialog.contains(active)) return;
+    try { dialog.focus({ preventScroll: true }); } catch { /* focus is a convenience */ }
+  }
+
+  /** Keeps controls that depend on what is typed in a dialog in step with it. DOM only. */
+  function syncDialogControls() {
+    if (ui.dialog?.kind !== 'delete') return;
+    const input = query('#cfgDialogConfirmInput');
+    const confirm = query('[data-cfg-action="confirm-delete-profile"]');
+    if (input && confirm && !isBusy(state.snapshot())) confirm.disabled = input.value !== input.getAttribute('data-confirm-phrase');
+  }
+
+  /**
+   * Hosts the dashboard shell's window-composition control in the Dashboard layout section.
+   *
+   * The shell (app.js) creates that control, owns its state and handles its clicks, and puts it at
+   * the top of the Configuration panel. This moves the same element — listeners and all — into the
+   * section's slot after every paint, so replacing the markup never destroys it. If the element is
+   * not there, the section says so and nothing else changes. DOM only.
+   */
+  let hostedLayoutControl = null;
+  let hostedAgentsPanel = null;
+  let agentsController = null;
+  let hostedAgentsBinding = null;
+
+  function focusInsideHostedControl() {
+    const active = root.ownerDocument?.activeElement ?? null;
+    return active && [hostedLayoutControl, hostedAgentsPanel].some((host) => host?.contains?.(active)) ? active : null;
+  }
+
+  function adoptLayoutControl() {
+    const document_ = root.ownerDocument;
+    if (typeof document_?.getElementById !== 'function') return;
+    const slot = query('[data-cfg-slot="layout-switch"]');
+    if (!slot || typeof slot.appendChild !== 'function') return;
+    // Connected: the shell's element, wherever it currently sits. Otherwise the one this paint
+    // has just detached by replacing the markup around it.
+    const control = document_.getElementById(HOSTED_LAYOUT_CONTROL_ID) ?? hostedLayoutControl;
+    if (!control) return;
+    hostedLayoutControl = control;
+    if (control.parentElement !== slot) slot.appendChild(control);
+    const fallback = typeof slot.querySelector === 'function' ? slot.querySelector('[data-cfg-slot-fallback]') : null;
+    if (fallback) fallback.hidden = true;
+  }
+
+  function disposeAgentsPanel() {
+    agentsController?.destroy?.();
+    agentsController = null;
+    hostedAgentsPanel = null;
+    hostedAgentsBinding = null;
+  }
+
+  function adoptAgentsPanel(snapshot) {
+    const slot = query('[data-cfg-slot="agents"]');
+    if (typeof slot?.appendChild !== 'function' || typeof options.mountAgents !== 'function') return;
+    const active = snapshot.active;
+    const binding = JSON.stringify([active?.projectId, active?.profileGeneration, active?.projectProfileHash]);
+    if (hostedAgentsPanel && hostedAgentsBinding !== binding) disposeAgentsPanel();
+    if (!hostedAgentsPanel) {
+      if (ui.section !== 'agents' || typeof root.ownerDocument?.createElement !== 'function') return;
+      const host = root.ownerDocument.createElement('div');
+      agentsController = options.mountAgents(host);
+      hostedAgentsPanel = host;
+      hostedAgentsBinding = binding;
+    }
+    if (hostedAgentsPanel.parentElement !== slot) slot.appendChild(hostedAgentsPanel);
+    const fallback = slot.querySelector?.('[data-cfg-slot-fallback]');
+    if (fallback) fallback.hidden = true;
+  }
+
+  /**
+   * When the markup may be replaced.
+   *
+   * The surface renders by replacing one HTML string, which replaces every control. Doing that at
+   * the wrong moment breaks the interaction in progress, so three moments are excluded:
+   *
+   *   1. While a replacement is already running. Removing the focused control makes a browser fire
+   *      its pending `change` event during the removal; the handler asks for another render.
+   *   2. While a `change` handler runs. `change` fires in the middle of a focus move (Tab, or a
+   *      click on another control). Replacing the markup there destroys the control focus was
+   *      moving to: Tab lands on nothing, and a click on SAVE never becomes a click.
+   *   3. While a pointer button is down. A click is a press and a release on the same element; a
+   *      replacement between the two means no click is ever delivered.
+   *
+   * A render asked for in one of those moments is recorded and performed as soon as it is safe,
+   * from the then-current state. Outside a browser none of them occurs and rendering is immediate.
+   */
+  const liveDom = typeof root.contains === 'function' && typeof root.querySelectorAll === 'function'
+    && typeof globalThis.setTimeout === 'function';
+  let rendering = false;
+  let renderRequested = false;
+  let changeDepth = 0;
+  let pointerHeld = false;
+  let pointerTimer = null;
+
   function render(snapshot = state.snapshot()) {
-    catalogue.activeSource = globalThis.window?.__clueMetricsMeta?.source ?? 'canonical';
     if (destroyed) return;
-    root.innerHTML = renderShell({ ...snapshot, legacyConnections, readinessReceipts }, catalogue);
+    if (rendering || (liveDom && (changeDepth > 0 || pointerHeld))) {
+      renderRequested = true;
+      return;
+    }
+    rendering = true;
+    try {
+      paint(snapshot);
+    } finally {
+      rendering = false;
+    }
+    if (renderRequested) {
+      renderRequested = false;
+      render();
+    }
+  }
+
+  function flushRender() {
+    if (!renderRequested || destroyed) return;
+    renderRequested = false;
+    render();
+  }
+
+  function releasePointer() {
+    if (pointerTimer !== null) globalThis.clearTimeout(pointerTimer);
+    pointerTimer = null;
+    if (!pointerHeld) return;
+    pointerHeld = false;
+    // The click that follows a release is delivered in the same task; render after it.
+    globalThis.setTimeout(flushRender, 0);
+  }
+
+  function paint(snapshot) {
+    catalogue.activeSource = globalThis.window?.__clueMetricsMeta?.source ?? 'canonical';
+    try {
+      const model = view(snapshot);
+      const memo = captureContinuity(root);
+      const hostedFocus = focusInsideHostedControl();
+      root.innerHTML = renderShell(model, catalogue);
+      adoptLayoutControl();
+      adoptAgentsPanel(snapshot);
+      if (hostedFocus && ui.pendingFocus === null && root.contains?.(hostedFocus)) {
+        try { hostedFocus.focus({ preventScroll: true }); } catch { /* focus is a convenience */ }
+      }
+      restoreContinuity(root, memo, {
+        resetScroll: renderedSection !== null && renderedSection !== ui.section ? ['main'] : [],
+        dropTransient: ui.dropTransient,
+        focus: ui.pendingFocus,
+      });
+      renderedSection = ui.section;
+      ui.pendingFocus = null;
+      ui.dropTransient = new Set();
+      if (ui.pendingReveal !== null) {
+        const path = ui.pendingReveal;
+        ui.pendingReveal = null;
+        revealField(path);
+      }
+      syncDialogControls();
+      keepFocusInDialog();
+    } catch (error) {
+      // A renderer that throws must not leave a silently stale page: say so, where it can be seen.
+      globalThis.console?.error?.('[Configuration] render failed', error);
+      root.innerHTML = `<div class="cfg-shell"><div class="cfg-notice is-bad" role="alert"><span>CONFIGURATION_RENDER_FAILED: ${escapeHtml(error instanceof Error ? error.message : String(error))}. Reload the dashboard; no profile data was changed.</span></div></div>`;
+    }
+  }
+
+  /** Refreshes only the parts that reflect the draft, so the control being typed in is untouched. */
+  function patchDraftRegions() {
+    if (destroyed || typeof root.querySelector !== 'function') return;
+    const model = view();
+    const regions = [
+      ['savebar', () => renderSaveBar(model)],
+      ['navlist', () => renderNavigationList(model)],
+      ['selection-badges', () => renderSelectionBadges(model)],
+      ['prepare-footer', () => renderPreparationFooter(model)],
+    ];
+    for (const [name, html] of regions) {
+      const element = query(`[data-cfg-region="${name}"]`);
+      if (element) element.innerHTML = html();
+    }
   }
 
   const unsubscribe = state.subscribe(render);
   render();
+
+  /* ----------------------------- dialogs ------------------------------ */
+
+  function openDialog(dialog) {
+    ui.returnFocus = describeActiveFocus(root);
+    ui.dialog = dialog;
+    ui.pendingFocus = [
+      '.cfg-dialog input:not([readonly])',
+      '.cfg-dialog select',
+      '.cfg-dialog [data-cfg-dialog-primary]:not([disabled])',
+      '.cfg-dialog .cfg-dialog-actions button:not([disabled])',
+      '.cfg-dialog',
+    ];
+    render();
+  }
+
+  function closeDialog({ rerender = true } = {}) {
+    if (ui.dialog === null) return;
+    ui.dialog = null;
+    if (ui.returnFocus) ui.pendingFocus = [ui.returnFocus];
+    ui.returnFocus = null;
+    if (rerender) render();
+  }
+
+  function goSection(id, { focusPane = false } = {}) {
+    const snapshot = state.snapshot();
+    const target = resolveSection(id, snapshot);
+    if (!sectionAvailable(target, snapshot)) return;
+    ui.section = target;
+    if (focusPane) ui.pendingFocus = [`[data-pane="${target}"] [data-section]`];
+    render();
+  }
+
+  /* ------------------------- backend operations ------------------------ */
 
   async function invoke(name, input, token, apply) {
     const result = await actionClient.invoke(name, input);
@@ -219,9 +459,19 @@ export function mountConfigurationPanel(options) {
     return apply(result.result);
   }
 
-  function confirmDiscard(snapshot, actionLabel) {
-    if (!snapshot.dirty) return true;
-    return confirmAction(`Discard the unsaved Project Profile draft and ${actionLabel}?`);
+  /** Runs `proceed` now, or after the operator agrees to lose the unsaved draft. */
+  function guardUnsaved(consequence, proceed, { allowSave = true } = {}) {
+    const snapshot = state.snapshot();
+    if (!snapshot.dirty) {
+      proceed();
+      return;
+    }
+    if (confirmAction) {
+      if (confirmAction(`Discard the unsaved Project Profile draft? ${consequence}`)) proceed();
+      else render();
+      return;
+    }
+    openDialog({ kind: 'discard', label: consequence, proceed, allowSave });
   }
 
   async function readProject(projectId) {
@@ -290,6 +540,17 @@ export function mountConfigurationPanel(options) {
     return loadProjects();
   }
 
+  /* ----------------------------- draft edits --------------------------- */
+
+  /** A draft edited back to the saved values is not a draft: clear the flag that blocks tests. */
+  function settleDraft() {
+    const snapshot = state.snapshot();
+    if (snapshot.draftMode !== 'update' || !snapshot.dirty || !snapshot.selectedRecord) return false;
+    if (draftChanges(snapshot.selectedRecord.profile, snapshot.draft).length > 0) return false;
+    state.resetDraft();
+    return true;
+  }
+
   function updateResolution(path, raw) {
     const snapshot = state.snapshot();
     const current = snapshot.draft?.benchmarkRuntime?.resolution ?? { width: null, height: null };
@@ -320,6 +581,16 @@ export function mountConfigurationPanel(options) {
     state.updateDraft(path, valueFromControl(control, path), { notify });
   }
 
+  function updateOverrideControl(control, notify = true) {
+    const path = control.dataset.cfgOverride;
+    if (!path || state.snapshot().draft === null) return;
+    state.updateDraft(path, {
+      source: 'project-override',
+      defaultKey: control.dataset.defaultKey ?? readPath(state.snapshot().draft, path)?.defaultKey ?? path,
+      value: String(control.value ?? '').trim(),
+    }, { notify });
+  }
+
   function updateNewControl(control, notify = true) {
     const field = control.dataset.newProjectField;
     if (!field) return;
@@ -327,20 +598,76 @@ export function mountConfigurationPanel(options) {
     state.updateNewProjectInput(field, value, { notify });
   }
 
+  /** Marks the field being typed in as changed without re-rendering it. DOM only. */
+  function markFieldModified(control) {
+    const shell = typeof control.closest === 'function' ? control.closest('.cfg-field') : null;
+    if (!shell?.classList) return;
+    const path = control.dataset.profilePath ?? control.dataset.cfgOverride;
+    const snapshot = state.snapshot();
+    if (snapshot.draftMode !== 'update' || !snapshot.selectedRecord) return;
+    const changed = draftChanges(snapshot.selectedRecord.profile, snapshot.draft)
+      .some((change) => change.path === path || path.startsWith(`${change.path}.`) || change.path.startsWith(`${path}.`));
+    shell.classList.toggle('is-modified', changed);
+  }
+
   root.addEventListener('input', (event) => {
     const control = event.target;
-    if (!(control instanceof HTMLInputElement || control instanceof HTMLTextAreaElement || control instanceof HTMLSelectElement)) return;
+    if (!isFormControl(control)) return;
+    if (control.id === 'cfgNavSearch') {
+      ui.search = String(control.value ?? '');
+      const list = query('[data-cfg-region="navlist"]');
+      if (list) list.innerHTML = renderNavigationList(view());
+      return;
+    }
+    if (control.id === 'cfgDialogConfirmInput') {
+      syncDialogControls();
+      return;
+    }
+    if (control.id === 'cfgDialogCredentialName') {
+      // Credential bytes never reach browser state: a key-shaped value is removed from the
+      // field the moment it appears, before anything reads it.
+      if (findCredentialLeak(String(control.value ?? '')) !== null) {
+        control.value = '';
+        const message = query('#cfgDialogError');
+        if (message) {
+          message.hidden = false;
+          message.textContent = 'That looked like an API key and was cleared. Enter the name of the reference, not the key.';
+        }
+      }
+      return;
+    }
     // Credential bytes are never copied into browser state. The field is accepted only on a
     // completed change after it has passed the same reference-only grammar as the backend schema.
     if (control.dataset.profilePath && control.dataset.profilePath !== 'integrations.gpt.credential.value') {
       updateProfileControl(control, false);
+      markFieldModified(control);
+      patchDraftRegions();
     }
-    if (control.dataset.newProjectField) updateNewControl(control, false);
+    if (control.dataset.cfgOverride) {
+      updateOverrideControl(control, false);
+      markFieldModified(control);
+      patchDraftRegions();
+    }
+    if (control.dataset.newProjectField) {
+      updateNewControl(control, false);
+      patchDraftRegions();
+    }
   });
 
   root.addEventListener('change', (event) => {
     const control = event.target;
-    if (!(control instanceof HTMLInputElement || control instanceof HTMLTextAreaElement || control instanceof HTMLSelectElement)) return;
+    if (!isFormControl(control)) return;
+    changeDepth += 1;
+    try {
+      handleChange(control);
+    } finally {
+      changeDepth -= 1;
+      // After the focus move that caused this event has completed.
+      if (liveDom) globalThis.setTimeout(flushRender, 0);
+    }
+  });
+
+  function handleChange(control) {
     if (control.dataset.profilePath === 'integrations.gpt.credential.value') {
       const reference = String(control.value ?? '').trim();
       if (!CREDENTIAL_REFERENCE_PATTERN.test(reference)) {
@@ -350,20 +677,25 @@ export function mountConfigurationPanel(options) {
       }
       control.value = reference;
     }
-    if (control.dataset.profilePath) updateProfileControl(control, true);
+    if (control.dataset.profilePath) {
+      updateProfileControl(control, true);
+      settleDraft();
+    }
+    if (control.dataset.cfgOverride) {
+      updateOverrideControl(control, true);
+      settleDraft();
+    }
     if (control.dataset.newProjectField) updateNewControl(control, true);
 
     if (control.id === 'cfgProjectSelector') {
-      const snapshot = state.snapshot();
       const projectId = control.value;
       if (!projectId) return;
-      if (!confirmDiscard(snapshot, `select ${projectId}`)) { render(snapshot); return; }
-      void readProject(projectId);
+      guardUnsaved(`Opening ${projectId} discards them.`, () => { void readProject(projectId); });
     }
     if (control.id === 'cfgReadinessOperation') state.setReadinessOperation(control.value);
     if (control.id === 'cfgGitHubRepository') {
-      const branch = root.querySelector('#cfgGitHubBranch');
-      if (branch) branch.value = control.selectedOptions[0]?.dataset.defaultBranch ?? '';
+      const branch = query('#cfgGitHubBranch');
+      if (branch) branch.value = control.selectedOptions?.[0]?.dataset.defaultBranch ?? '';
     }
     if (control.dataset.additionalRoleIndex) {
       const index = Number(control.dataset.additionalRoleIndex);
@@ -371,6 +703,7 @@ export function mountConfigurationPanel(options) {
       if (profile?.authority?.additionalDocuments?.[index]) {
         profile.authority.additionalDocuments[index].role = control.value;
         state.replaceDraft(profile);
+        settleDraft();
       }
     }
     if (control.dataset.additionalEnabledIndex) {
@@ -379,6 +712,7 @@ export function mountConfigurationPanel(options) {
       if (profile?.authority?.additionalDocuments?.[index]) {
         profile.authority.additionalDocuments[index].enabled = Boolean(control.checked);
         state.replaceDraft(profile);
+        settleDraft();
       }
     }
     if (control.id === 'cfgCatalogueSelector' && control.value) {
@@ -391,9 +725,21 @@ export function mountConfigurationPanel(options) {
         .then((document_) => globalThis.window?.__clueImport?.openWithCatalogue?.(document_, control.value))
         .catch(() => globalThis.window?.__clueImport?.open?.());
     }
-  });
+  }
 
-  async function prepareDocument(spec) {
+  if (liveDom) {
+    root.addEventListener('pointerdown', (event) => {
+      // A native <select> list swallows the release, so a press on one is not tracked.
+      if (String(event.target?.tagName ?? '').toLowerCase() === 'select') return;
+      pointerHeld = true;
+      if (pointerTimer !== null) globalThis.clearTimeout(pointerTimer);
+      pointerTimer = globalThis.setTimeout(releasePointer, 1500);
+    });
+    root.ownerDocument?.addEventListener?.('pointerup', releasePointer, true);
+    root.ownerDocument?.addEventListener?.('pointercancel', releasePointer, true);
+  }
+
+  async function prepareDocument(spec, clearInputs = []) {
     const snapshot = state.snapshot();
     if (!snapshot.draft) return;
     const token = state.begin('preparing-document');
@@ -428,8 +774,9 @@ export function mountConfigurationPanel(options) {
     } else {
       profile.authority[spec.field] = binding;
     }
+    for (const id of clearInputs) ui.dropTransient.add(id);
     state.replaceDraft(profile, { notify: false });
-    state.complete(token, 'good', `Bound ${binding.bindingId} at ${binding.sha256.slice(0, 12)}…`);
+    state.complete(token, 'good', `Bound ${binding.bindingId} at ${binding.sha256.slice(0, 12)}… Save to keep it.`);
   }
 
   async function validateSelected() {
@@ -515,8 +862,8 @@ export function mountConfigurationPanel(options) {
   async function connectGitHub() {
     const record = savedConnectionRecord();
     if (!record) return;
-    const repository = root.querySelector('#cfgGitHubRepository')?.value;
-    const branch = root.querySelector('#cfgGitHubBranch')?.value.trim();
+    const repository = query('#cfgGitHubRepository')?.value;
+    const branch = query('#cfgGitHubBranch')?.value.trim();
     const repositories = state.snapshot().connectionChecks.githubDirectory?.repositories;
     if (!branch || !Array.isArray(repositories) || !repositories.some((entry) => entry.nameWithOwner === repository)) {
       state.setNotice('bad', 'Select a listed GitHub repository and specify the branch checked out in this profile.');
@@ -534,7 +881,7 @@ export function mountConfigurationPanel(options) {
   async function saveProfile() {
     const snapshot = state.snapshot();
     const creating = snapshot.draftMode === 'create';
-    if (!snapshot.draft || snapshot.pending || (!creating && !snapshot.dirty) || projectDraftProblems(snapshot.draft).length) return;
+    if (!snapshot.draft || snapshot.pending || (!creating && !snapshot.dirty) || projectDraftProblems(snapshot.draft).length) return null;
     const token = state.beginSave();
     const action = creating ? 'createProject' : 'updateProject';
     const input = creating
@@ -542,26 +889,45 @@ export function mountConfigurationPanel(options) {
       : { params: { projectId: snapshot.selectedRecord.profile.projectId }, payload: { profile: snapshot.draft, expectedGeneration: snapshot.selectedRecord.generation } };
     return invoke(action, input, token, async (value) => {
       const applied = state.applySaved(token, value);
-      if (applied?.applied) await loadProjects({ readSelected: false });
+      if (applied?.applied) {
+        ui.templateRoots = null;
+        if (ui.dialog?.kind === 'changes') closeDialog({ rerender: false });
+        await loadProjects({ readSelected: false });
+      }
       return applied;
     });
   }
 
-  async function deleteProfile() {
+  async function deleteProfile(typed) {
     const snapshot = state.snapshot();
     const record = snapshot.selectedRecord;
     if (!record || snapshot.active?.projectId === record.profile.projectId) return;
     const phrase = exactDeletePhrase(record);
-    const typed = promptText(`Deleting a profile removes CLU-E-owned registration only. Type exactly:\n\n${phrase}`, '');
     if (typed !== phrase) {
-      state.setNotice('bad', 'DELETE_CONFIRMATION_REQUIRED: exact state-bound phrase did not match.');
+      if (ui.dialog?.kind === 'delete') {
+        ui.dialog = { ...ui.dialog, error: 'The phrase does not match. Enter it exactly, including capitals and spaces.' };
+        render();
+      } else {
+        state.setNotice('bad', 'DELETE_CONFIRMATION_REQUIRED: exact state-bound phrase did not match.');
+      }
       return;
     }
+    closeDialog({ rerender: false });
     const token = state.begin('deleting-project');
     return invoke('deleteProject', { params: { projectId: record.profile.projectId }, payload: { expectedGeneration: record.generation, confirmation: phrase } }, token, async (value) => {
       state.applyDeleted(token, value);
+      ui.section = 'profiles';
       await loadProjects();
+      // Opening the remaining profile clears notices; the deletion receipt must outlive that.
+      state.setNotice('good', `Deleted CLU-E profile ${record.profile.projectId}; target and workspace data were not deleted.`);
     });
+  }
+
+  /** Opens the guided activation dialog. Activation itself happens only on its confirm button. */
+  function requestActivation() {
+    const snapshot = state.snapshot();
+    if (!snapshot.selectedRecord || snapshot.dirty) return;
+    openDialog({ kind: 'activate' });
   }
 
   async function activateProfile() {
@@ -569,7 +935,7 @@ export function mountConfigurationPanel(options) {
     const record = snapshot.selectedRecord;
     if (!record || snapshot.dirty) return;
     if (snapshot.validation?.valid !== true) {
-      state.setNotice('bad', 'PROJECT_VALIDATION_REQUIRED: Validate the saved profile in the Project card before activation.');
+      state.setNotice('bad', 'PROJECT_VALIDATION_REQUIRED: Validate the saved profile before activation.');
       return;
     }
     const token = state.beginActivation();
@@ -590,6 +956,7 @@ export function mountConfigurationPanel(options) {
     }
     const applied = state.applyActivated(token, result.result);
     if (applied?.applied) {
+      closeDialog({ rerender: false });
       options.onActiveProjectChanged?.({ record, pointer: applied.pointer, validation: snapshot.validation });
       await loadProjects({ readSelected: false });
     } else {
@@ -600,63 +967,222 @@ export function mountConfigurationPanel(options) {
   function setInheritedPath(path, defaultKey, mode, promptLabel) {
     if (mode === 'global') {
       state.updateDraft(path, { source: 'global-default', defaultKey, value: null });
+      settleDraft();
       return;
     }
     const current = readPath(state.snapshot().draft, path);
-    const value = promptText(promptLabel, current?.source === 'project-override' ? current.value : '');
-    if (value === null || value.trim() === '') return;
-    state.updateDraft(path, { source: 'project-override', defaultKey, value: value.trim() });
+    if (promptText) {
+      const value = promptText(promptLabel, current?.source === 'project-override' ? current.value : '');
+      if (value === null || value.trim() === '') return;
+      state.updateDraft(path, { source: 'project-override', defaultKey, value: value.trim() });
+      return;
+    }
+    // Switch to a custom value and hand the operator the field to type it in.
+    ui.pendingFocus = [`[data-cfg-override="${path}"]`];
+    if (current?.source === 'project-override') render();
+    else state.updateDraft(path, { source: 'project-override', defaultKey, value: '' });
+  }
+
+  function applyCredentialReference(reference) {
+    const trimmed = String(reference ?? '').trim();
+    if (!CREDENTIAL_REFERENCE_PATTERN.test(trimmed)) return false;
+    state.updateDraft('integrations.gpt.credential', { source: 'project-override', defaultKey: 'gateway.credential', value: trimmed });
+    return true;
   }
 
   function setCredential(mode) {
     if (mode === 'global') {
       state.updateDraft('integrations.gpt.credential', { source: 'global-default', defaultKey: 'gateway.credential', value: null });
+      settleDraft();
+      return;
+    }
+    if (!promptText) {
+      openDialog({ kind: 'credential', error: null });
       return;
     }
     const current = state.snapshot().draft?.integrations?.gpt?.credential;
     const value = promptText('Credential reference only (env:NAME or credential-store:ID). Raw secret bytes are forbidden.', current?.source === 'project-override' ? current.value : 'env:OPENAI_API_KEY');
     if (value === null) return;
-    const trimmed = value.trim();
-    if (!CREDENTIAL_REFERENCE_PATTERN.test(trimmed)) {
+    if (!applyCredentialReference(value)) {
       state.setNotice('bad', 'CREDENTIAL_REFERENCE_INVALID: raw keys and ungoverned values are refused before transport.');
-      return;
     }
-    state.updateDraft('integrations.gpt.credential', { source: 'project-override', defaultKey: 'gateway.credential', value: trimmed });
   }
 
+  function confirmCredentialReference() {
+    const kind = query('#cfgDialogCredentialKind')?.value === 'credential-store' ? 'credential-store' : 'env';
+    const input = query('#cfgDialogCredentialName');
+    const typed = String(input?.value ?? '').trim();
+    // Accept a complete reference pasted into the name field as well as a bare name.
+    const reference = CREDENTIAL_REFERENCE_PATTERN.test(typed) ? typed : `${kind}:${typed}`;
+    if (!applyCredentialReference(reference)) {
+      if (input) input.value = '';
+      ui.dialog = {
+        kind: 'credential',
+        error: 'CREDENTIAL_REFERENCE_INVALID: an environment variable is capitals, digits and underscore (OPENAI_API_KEY); a credential-store ID starts with a letter or digit. The field was cleared.',
+      };
+      ui.pendingFocus = ['#cfgDialogCredentialName'];
+      render();
+      return;
+    }
+    closeDialog();
+  }
+
+  function revertChange(path) {
+    const snapshot = state.snapshot();
+    if (!path || !snapshot.selectedRecord || snapshot.draftMode !== 'update') return;
+    const saved = readPath(snapshot.selectedRecord.profile, path);
+    if (saved === undefined) return;
+    state.updateDraft(path, cloneValue(saved));
+    settleDraft();
+  }
+
+  function beginNewProfile() {
+    const profile = state.snapshot().selectedRecord?.profile ?? null;
+    ui.templateRoots = profile ? {
+      projectId: profile.projectId,
+      workspaceRoot: profile.workspaceRoot,
+      shadowRoot: profile.shadowRoot,
+      browserProfileDirectory: profile.integrations?.chrome?.dedicatedProfileDirectory ?? '',
+    } : null;
+    ui.section = 'project';
+    ui.pendingFocus = ['[data-new-project-field="projectId"]'];
+    state.beginNewPreparation();
+  }
+
+  function cancelNewProfile() {
+    const snapshot = state.snapshot();
+    const selected = snapshot.active?.projectId ?? snapshot.projects[0]?.projectId ?? null;
+    ui.templateRoots = null;
+    state.selectProject(selected);
+    if (selected) void readProject(selected);
+    else render();
+  }
+
+  function discardDraft() {
+    const snapshot = state.snapshot();
+    if (snapshot.draftMode === 'prepare' || snapshot.draftMode === 'create') {
+      guardUnsaved('Discarding the new profile cannot be undone.', cancelNewProfile, { allowSave: false });
+      return;
+    }
+    if (!snapshot.dirty) return;
+    guardUnsaved('Discarding cannot be undone.', () => state.resetDraft(), { allowSave: false });
+  }
+
+  /* -------------------------------- clicks ----------------------------- */
+
   root.addEventListener('click', (event) => {
-    const button = event.target.closest?.('[data-cfg-action], [data-config-action]');
+    const button = event.target?.closest?.('[data-cfg-action], [data-config-action]');
     if (!button) return;
     const action = button.dataset.cfgAction ?? button.dataset.configAction;
-    event.preventDefault();
+    event.preventDefault?.();
     const snapshot = state.snapshot();
 
     switch (action) {
-      case 'show-startup-binding': {
-        const binding = root.querySelector('#cfgStartupBinding');
-        const instructions = binding?.querySelector('details');
-        if (instructions) instructions.open = true;
-        binding?.focus({ preventScroll: true });
-        binding?.scrollIntoView({ block: 'center' });
+      /* ---- navigation and presentation ---- */
+      case 'go-section':
+        goSection(button.dataset.sectionTarget);
+        break;
+      case 'go-issue': {
+        if (ui.dialog !== null) closeDialog({ rerender: false });
+        ui.section = resolveSection(button.dataset.sectionTarget, snapshot);
+        ui.pendingFocus = null;
+        ui.pendingReveal = button.dataset.issuePath ?? '';
+        render();
         break;
       }
+      case 'clear-search':
+        ui.search = '';
+        ui.pendingFocus = ['#cfgNavSearch'];
+        render();
+        break;
+      case 'dismiss-notice':
+        state.setNotice('neutral', '');
+        break;
+      case 'show-startup-binding': {
+        ui.section = resolveSection('startup', snapshot);
+        ui.pendingFocus = ['#cfgStartupBinding'];
+        render();
+        const instructions = query('#cfgStartupBinding details');
+        if (instructions) instructions.open = true;
+        break;
+      }
+      case 'reload-installation':
+        void loadLegacyConfiguration();
+        break;
+
+      /* ---- dialogs ---- */
+      case 'dialog-cancel':
+        closeDialog();
+        break;
+      case 'dialog-discard': {
+        const proceed = ui.dialog?.proceed;
+        closeDialog({ rerender: false });
+        if (typeof proceed === 'function') proceed();
+        render();
+        break;
+      }
+      case 'dialog-save-continue': {
+        const proceed = ui.dialog?.proceed;
+        closeDialog({ rerender: false });
+        void saveProfile().then(() => {
+          if (state.snapshot().dirty === false && typeof proceed === 'function') proceed();
+        });
+        break;
+      }
+      case 'open-changes':
+        openDialog({ kind: 'changes' });
+        break;
+      case 'revert-change':
+        revertChange(button.dataset.changePath);
+        break;
+      case 'discard-draft':
+        discardDraft();
+        break;
+      case 'confirm-delete-profile':
+        void deleteProfile(String(query('#cfgDialogConfirmInput')?.value ?? ''));
+        break;
+      case 'confirm-activate-project':
+        void activateProfile();
+        break;
+      case 'confirm-credential-reference':
+        confirmCredentialReference();
+        break;
+
+      /* ---- profiles ---- */
       case 'reload-projects':
-        if (confirmDiscard(snapshot, 'reload authoritative state')) void loadProjects();
+        guardUnsaved('Reloading the profiles discards them.', () => { void loadProjects(); });
         break;
       case 'new-project':
-        if (confirmDiscard(snapshot, 'create a new project')) state.beginNewPreparation();
+        guardUnsaved('Starting a new profile discards them.', beginNewProfile);
         break;
-      case 'cancel-new-project': {
-        const selected = snapshot.active?.projectId ?? snapshot.projects[0]?.projectId ?? null;
-        state.selectProject(selected);
-        if (selected) void readProject(selected);
+      case 'edit-profile': {
+        const projectId = button.dataset.projectId;
+        if (!projectId) break;
+        guardUnsaved(`Opening ${projectId} discards them.`, () => {
+          ui.section = 'overview';
+          void readProject(projectId);
+        });
+        break;
+      }
+      case 'cancel-new-project':
+        guardUnsaved('Discarding the new profile cannot be undone.', cancelNewProfile, { allowSave: false });
+        break;
+      case 'fill-new-suggestions': {
+        const suggestions = newProjectSuggestions(snapshot.newProjectInput, ui.templateRoots);
+        const fields = Object.entries(suggestions);
+        fields.forEach(([field, value], index) => {
+          state.updateNewProjectInput(field, value, { notify: index === fields.length - 1 });
+        });
         break;
       }
       case 'pick-new-path': {
         const field = button.dataset.newPathField;
-        const current = snapshot.newProjectInput?.[field] ?? '';
-        const value = promptText(`Enter ${field} path. The backend will canonicalize and validate it.`, current);
-        if (value !== null) state.updateNewProjectInput(field, value.trim());
+        if (promptText) {
+          const value = promptText(`Enter ${field} path. The backend will canonicalize and validate it.`, snapshot.newProjectInput?.[field] ?? '');
+          if (value !== null) state.updateNewProjectInput(field, value.trim());
+        } else {
+          query(`[data-new-project-field="${field}"]`)?.focus?.();
+        }
         break;
       }
       case 'prepare-new-project': {
@@ -668,15 +1194,33 @@ export function mountConfigurationPanel(options) {
           projectId: normalizeProjectIdDraft(input.projectId),
           displayName: nullableText(input.displayName),
           browserProfileDirectory: nullableText(input.browserProfileDirectory),
-        }, token, (value) => state.applyPreparedDraft(token, value));
+        }, token, (value) => {
+          const applied = state.applyPreparedDraft(token, value);
+          if (applied?.applied) goSection('overview');
+          return applied;
+        });
         break;
       }
-      case 'reset-profile': state.resetDraft(); break;
+      case 'reset-profile':
+        if (ui.dialog?.kind === 'changes') closeDialog({ rerender: false });
+        state.resetDraft();
+        break;
       case 'save-profile': void saveProfile(); break;
-      case 'delete-profile': void deleteProfile(); break;
+      case 'delete-profile': {
+        const record = snapshot.selectedRecord;
+        if (!record || snapshot.active?.projectId === record.profile.projectId) break;
+        if (promptText) {
+          void deleteProfile(promptText(`Deleting a profile removes CLU-E-owned registration only. Type exactly:\n\n${exactDeletePhrase(record)}`, ''));
+        } else {
+          openDialog({ kind: 'delete', error: null });
+        }
+        break;
+      }
       case 'validate-profile': void validateSelected(); break;
       case 'read-readiness': void readinessSelected(); break;
-      case 'activate-project': void activateProfile(); break;
+      case 'activate-project': requestActivation(); break;
+
+      /* ---- connections ---- */
       case 'test-console': void testSessionCapability({ capability: 'console', label: 'Console', canTest: canTestConsole, action: 'runConsoleTest', kind: 'host' }); break;
       case 'test-git': void testConnection('git', 'testProjectGit'); break;
       case 'sign-in-github': void testConnection('githubDirectory', 'signInProjectGitHub', 'opening-github-sign-in'); break;
@@ -695,30 +1239,47 @@ export function mountConfigurationPanel(options) {
       case 'use-browser-override': setInheritedPath('integrations.chrome.executable', 'browser.executable', 'override', 'Absolute Chrome executable path'); break;
       case 'use-gateway-global': setCredential('global'); break;
       case 'use-gateway-override': setCredential('override'); break;
+
+      /* ---- governing documents ---- */
       case 'prepare-distinguished-document': {
-        const path = promptText(`Select ${button.dataset.authorityKind} Markdown path. Relative paths resolve against Target Root.`, '');
-        if (!path) break;
+        const field = button.dataset.authorityField;
+        const inputId = distinguishedPathInputId(field);
+        const path = promptText
+          ? promptText(`Select ${button.dataset.authorityKind} Markdown path. Relative paths resolve against Target Root.`, '')
+          : String(query(`#${inputId}`)?.value ?? '').trim();
+        if (!path) {
+          if (!promptText) {
+            ui.pendingFocus = [`#${inputId}`];
+            state.setNotice('bad', 'GOVERNED_DOCUMENT_PATH_REQUIRED: type the path of the Markdown file in the box next to the button, then press it again.');
+          }
+          break;
+        }
         void prepareDocument({
-          field: button.dataset.authorityField,
+          field,
           kind: button.dataset.authorityKind,
           bindingId: button.dataset.bindingId,
           role: button.dataset.bindingRole,
           order: Number(button.dataset.bindingOrder),
           enabled: true,
           path,
-        });
+        }, [inputId]);
         break;
       }
       case 'remove-distinguished-document': {
         const profile = cloneValue(snapshot.draft);
         profile.authority[button.dataset.authorityField] = null;
         state.replaceDraft(profile);
+        settleDraft();
         break;
       }
       case 'add-additional-document': {
-        const path = root.querySelector('#cfgAdditionalDocumentPath')?.value?.trim();
-        if (!path) { state.setNotice('bad', 'GOVERNED_DOCUMENT_PATH_REQUIRED'); break; }
-        const requestedId = root.querySelector('#cfgAdditionalBindingId')?.value;
+        const path = query('#cfgAdditionalDocumentPath')?.value?.trim();
+        if (!path) {
+          ui.pendingFocus = ['#cfgAdditionalDocumentPath'];
+          state.setNotice('bad', 'GOVERNED_DOCUMENT_PATH_REQUIRED: type the path of the Markdown file to add.');
+          break;
+        }
+        const requestedId = query('#cfgAdditionalBindingId')?.value;
         const existing = new Set((snapshot.draft?.authority?.additionalDocuments ?? []).map((item) => item.bindingId));
         let bindingId = normalizeBindingId(requestedId, basenameWithoutMd(path));
         let suffix = 2;
@@ -727,11 +1288,11 @@ export function mountConfigurationPanel(options) {
           field: null,
           kind: 'additional',
           bindingId,
-          role: root.querySelector('#cfgAdditionalRole')?.value ?? 'other',
-          enabled: Boolean(root.querySelector('#cfgAdditionalEnabled')?.checked),
+          role: query('#cfgAdditionalRole')?.value ?? 'other',
+          enabled: Boolean(query('#cfgAdditionalEnabled')?.checked),
           order: nextAdditionalOrder(snapshot.draft?.authority?.additionalDocuments),
           path,
-        });
+        }, ['cfgAdditionalDocumentPath', 'cfgAdditionalBindingId']);
         break;
       }
       case 'remove-additional-document':
@@ -747,6 +1308,7 @@ export function mountConfigurationPanel(options) {
         }
         profile.authority.additionalDocuments = canonicalAdditionalDocuments(documents);
         state.replaceDraft(profile);
+        settleDraft();
         break;
       }
       case 'local-catalogue':
@@ -754,6 +1316,84 @@ export function mountConfigurationPanel(options) {
         break;
       default:
         state.setNotice('bad', `UNDECLARED_CONFIGURATION_ACTION: ${action}`);
+    }
+  });
+
+  /* ------------------------------- keyboard ---------------------------- */
+
+  function isTypingTarget(target) {
+    const tag = String(target?.tagName ?? '').toLowerCase();
+    return tag === 'input' || tag === 'textarea' || tag === 'select' || target?.isContentEditable === true;
+  }
+
+  root.addEventListener('keydown', (event) => {
+    const key = event.key;
+    if ((event.ctrlKey || event.metaKey) && !event.altKey && String(key).toLowerCase() === 's') {
+      event.preventDefault?.();
+      if (hostedAgentsPanel?.contains?.(event.target)) return;
+      // Commit the field being typed in first, exactly as leaving it would.
+      const active = root.ownerDocument?.activeElement;
+      if (isFormControl(active) && typeof active.blur === 'function' && typeof root.contains === 'function' && root.contains(active)) {
+        active.blur();
+        active.focus?.({ preventScroll: true });
+      }
+      void saveProfile();
+      return;
+    }
+    if (ui.dialog !== null) {
+      if (key === 'Escape') {
+        event.preventDefault?.();
+        if (state.snapshot().phase !== 'activating-project') closeDialog();
+        return;
+      }
+      if (key === 'Enter' && String(event.target?.tagName ?? '').toLowerCase() === 'input') {
+        event.preventDefault?.();
+        const primary = query('.cfg-dialog [data-cfg-dialog-primary]');
+        if (primary && !primary.disabled) primary.click?.();
+        return;
+      }
+      if (key === 'Tab') {
+        // Keep keyboard focus inside the dialog while it is open.
+        const dialog = query('.cfg-dialog');
+        const focusable = dialog && typeof dialog.querySelectorAll === 'function'
+          ? Array.from(dialog.querySelectorAll('button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled])'))
+          : [];
+        if (focusable.length === 0) return;
+        const active = root.ownerDocument?.activeElement;
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        if (event.shiftKey && (active === first || !dialog.contains(active))) {
+          event.preventDefault?.();
+          last.focus();
+        } else if (!event.shiftKey && (active === last || !dialog.contains(active))) {
+          event.preventDefault?.();
+          first.focus();
+        }
+      }
+      return;
+    }
+    if (key === '/' && !isTypingTarget(event.target) && !event.ctrlKey && !event.metaKey && !event.altKey) {
+      const search = query('#cfgNavSearch');
+      if (search) {
+        event.preventDefault?.();
+        search.focus();
+        search.select?.();
+      }
+      return;
+    }
+    if (key === 'Escape' && event.target?.id === 'cfgNavSearch' && ui.search !== '') {
+      event.preventDefault?.();
+      ui.search = '';
+      render();
+      return;
+    }
+    if ((key === 'ArrowDown' || key === 'ArrowUp') && (event.target?.id === 'cfgNavSearch' || event.target?.classList?.contains?.('cfg-nav-item'))) {
+      const items = typeof root.querySelectorAll === 'function' ? Array.from(root.querySelectorAll('.cfg-nav-item:not([disabled])')) : [];
+      if (items.length === 0) return;
+      event.preventDefault?.();
+      const index = items.indexOf(event.target);
+      const next = key === 'ArrowDown' ? (index + 1) % items.length : (index <= 0 ? items.length - 1 : index - 1);
+      items[next].focus();
     }
   });
 
@@ -766,7 +1406,20 @@ export function mountConfigurationPanel(options) {
 
   return Object.freeze({
     load,
-    focusCapability: (capability, result) => focusCapabilitySection(root, capability, result),
+    /**
+     * Opens the section that configures one ribbon capability and focuses it. The ribbon's own
+     * check summary is kept with the section until the panel is reloaded.
+     */
+    focusCapability(capability, result) {
+      if (!Object.hasOwn(CAPABILITY_SECTIONS, capability)) return false;
+      if (typeof result?.summary === 'string' && result.summary) ui.ribbonChecks = { ...ui.ribbonChecks, [capability]: result.summary };
+      if (ui.dialog !== null) return false;
+      ui.section = resolveSection(CAPABILITY_SECTIONS[capability], state.snapshot());
+      ui.search = '';
+      render();
+      return typeof root.querySelector === 'function' ? focusCapabilitySection(root, capability) : false;
+    },
+    showSection: (id) => goSection(id, { focusPane: true }),
     reload: loadProjects,
     snapshot: state.snapshot,
     state,
@@ -774,56 +1427,16 @@ export function mountConfigurationPanel(options) {
       destroyed = true;
       unsubscribe();
       globalThis.window?.removeEventListener?.('beforeunload', beforeUnload);
+      if (liveDom) {
+        root.ownerDocument?.removeEventListener?.('pointerup', releasePointer, true);
+        root.ownerDocument?.removeEventListener?.('pointercancel', releasePointer, true);
+        if (pointerTimer !== null) globalThis.clearTimeout(pointerTimer);
+      }
+      // Hand the shell's control back to where the shell put it.
+      if (hostedLayoutControl && typeof root.parentElement?.prepend === 'function') root.parentElement.prepend(hostedLayoutControl);
+      hostedLayoutControl = null;
+      disposeAgentsPanel();
       root.innerHTML = '';
     },
   });
-}
-
-/* ------------------------------------------------------------------------- */
-/* Legacy installation-readiness rows retained as a stable compatibility API. */
-/* ------------------------------------------------------------------------- */
-
-function value(label, text) { return { kind: 'value', label, text: String(text) }; }
-function absent(label, reason) { return { kind: 'absent', label, reason }; }
-function check(label, ok, note) { return { kind: 'check', label, ok: Boolean(ok), ...(note === undefined ? {} : { note }) }; }
-function readString(source, key) { const raw = source?.[key]; return typeof raw === 'string' && raw.length > 0 ? raw : null; }
-
-export function configurationRows(config) {
-  if (config === null || config === undefined || typeof config !== 'object') {
-    return Object.freeze([absent('configuration', 'the daemon returned no configuration body')]);
-  }
-  const body = config;
-  const project = body.project ?? {};
-  const rows = [];
-  const id = readString(project, 'id');
-  rows.push(id === null ? absent('project id', 'the configuration declares no project id') : value('project id', id));
-  const root = readString(project, 'root');
-  rows.push(root === null ? absent('project root', 'the configuration declares no project root') : check('project root', project.rootPresent, root));
-  rows.push(check('tsconfig.json', body.tsconfigPresent));
-  rows.push(check('workspace initialised', body.workspaceInitialised));
-  const documents = body.trackedDocuments;
-  if (!Array.isArray(documents)) rows.push(absent('tracked documents', 'the configuration lists no tracked documents'));
-  else for (const document of documents) {
-    const path = readString(document, 'path');
-    rows.push(path === null ? absent('tracked document', 'a tracked document has no path') : check(path, document?.present));
-  }
-  const graph = body.committedGraphPointer;
-  if (graph === null || graph === undefined || typeof graph !== 'object') rows.push(absent('committed graph', 'no graph has been committed yet'));
-  else {
-    const hash = readString(graph, 'resultHash');
-    const run = readString(graph, 'runId');
-    rows.push(hash === null ? absent('committed graph', 'the pointer carries no result hash') : value('committed graph', `${hash.slice(0, 12)} · run ${run === null ? 'unknown' : run.slice(0, 8)}`));
-  }
-  rows.push(check('startable', body.startable));
-  return Object.freeze(rows);
-}
-
-export function renderConfigurationRows(rows) {
-  return rows.map((row) => {
-    const label = escapeHtml(row.label);
-    if (row.kind === 'value') return `<div class="row"><span>${label}</span><span class="mono">${escapeHtml(row.text)}</span></div>`;
-    if (row.kind === 'check') return `<div class="row"><span>${label}</span><span>${row.note === undefined ? '' : `<span class="mono">${escapeHtml(row.note)}</span> `}${row.ok ? '<span class="ok">OK</span>' : '<span class="fail">FAIL</span>'}</span></div>`;
-    if (row.kind === 'absent') return `<div class="row"><span>${label}</span><span class="mono" title="${escapeHtml(row.reason)}">UNKNOWN — ${escapeHtml(row.reason)}</span></div>`;
-    return `<div class="row"><span>${label}</span><span class="fail">MALFORMED ROW</span></div>`;
-  }).join('');
 }

@@ -189,6 +189,8 @@ export interface EventLogOptions {
    * is the entire point of this file. Bulk importers may disable it and fsync once.
    */
   readonly fsyncOnAppend?: boolean;
+  /** Collect write-and-fsync latency for this writer invocation. */
+  readonly measureAppends?: boolean;
   /**
    * Milliseconds after which a stale lock whose holder cannot be proven live (no
    * readable process start time, e.g. Windows) may be reclaimed based on heartbeat age.
@@ -265,6 +267,12 @@ export function computeEventHash(record: UnhashedEventRecord): Sha256 {
 /* Event log                                                                  */
 /* ------------------------------------------------------------------------- */
 
+export interface EventAppendTiming {
+  readonly count: number;
+  readonly totalMs: number;
+  readonly maxMs: number;
+}
+
 const CHUNK_BYTES = 256 * 1024;
 const NEWLINE = 0x0a;
 
@@ -288,6 +296,7 @@ export class EventLog {
   private ownerToken: string | null = null;
   private acquiredAt = '';
   private appendsSinceCheckpoint = 0;
+  private readonly timing: { count: number; totalMs: number; maxMs: number } | null;
 
   private constructor(
     filePath: string,
@@ -295,6 +304,7 @@ export class EventLog {
     lockStaleAfterMs: number,
     checkpointEveryAppends: number,
     projectIdentity: ProjectOperationIdentity | null,
+    measureAppends: boolean,
   ) {
     this.filePath = filePath;
     this.lockPath = `${filePath}.lock`;
@@ -304,6 +314,7 @@ export class EventLog {
     this.lockStaleAfterMs = lockStaleAfterMs;
     this.checkpointEveryAppends = checkpointEveryAppends;
     this.boundProjectIdentity = projectIdentity;
+    this.timing = measureAppends && fsyncOnAppend ? { count: 0, totalMs: 0, maxMs: 0 } : null;
     this.host = hostname();
     this.startTime = readProcessStartTime(process.pid);
   }
@@ -325,6 +336,7 @@ export class EventLog {
       options.projectIdentity === undefined
         ? null
         : canonicalProjectOperationIdentity(options.projectIdentity),
+      options.measureAppends ?? false,
     );
 
     mkdirSync(dirname(filePath), { recursive: true });
@@ -419,12 +431,24 @@ export class EventLog {
     // Validate before writing: an invalid record must never reach the file.
     const validated = parseOrThrow(eventRecordSchema, record, `event ${record.id}`);
 
-    writeAllSync(fd, Buffer.from(`${JSON.stringify(validated)}\n`, 'utf8'));
+    const bytes = Buffer.from(`${JSON.stringify(validated)}\n`, 'utf8');
+    const startedAt = this.timing === null ? 0n : process.hrtime.bigint();
+    writeAllSync(fd, bytes);
     if (this.fsyncOnAppend) fsyncSync(fd);
+    if (this.timing !== null) {
+      const elapsedMs = Number(process.hrtime.bigint() - startedAt) / 1_000_000;
+      this.timing.count++;
+      this.timing.totalMs += elapsedMs;
+      this.timing.maxMs = Math.max(this.timing.maxMs, elapsedMs);
+    }
 
     this.head = { sequence: validated.sequence, hash: requireSha256(validated.hash, 'event hash') };
     this.maybeCheckpoint();
     return validated;
+  }
+
+  public appendTiming(): EventAppendTiming | null {
+    return this.timing === null ? null : { ...this.timing };
   }
 
   /** Forces buffered appends to disk. Only needed when fsyncOnAppend is disabled. */

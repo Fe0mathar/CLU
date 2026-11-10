@@ -154,3 +154,12 @@
   #q4 .q4-terminal-heading { padding-block: 3px; }
   #q4 .q4-terminal-form { padding-block: 2px; }
 }
+
+/* CLUE console (ADR-0021): CORE receipts, the basis line of an agent reply, and the activity strip. */
+#q4 .q4-terminal-log li[data-kind='ok'] { color: #b5f5c8; }
+#q4 .q4-terminal-log li[data-kind='meta'] { color: #7f9db2; font-size: 10.5px; }
+#q4 .q4-terminal-form[aria-busy='true'] .q4-terminal-prompt { color: #a8ffdc; }
+#q4 .q4-command-receipts { max-height: 34%; overflow-y: auto; flex: 0 0 auto; }
+#q4 .q4-command-receipts li[data-tone='ok'] { color: #b5f5c8; }
+#q4 .q4-command-receipts li[data-tone='error'] { color: #ffc0bf; }
+#q4 .q4-command-receipts li[data-tone='info'] { color: #b9e4fc; }

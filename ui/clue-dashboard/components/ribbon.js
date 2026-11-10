@@ -1,5 +1,6 @@
 import { mountRibbonWordmark } from './ribbonWordmark.js';
 import { mountRibbonSeal } from './ribbonSeal.js';
+import { describeDashboardRun } from '../state/runPresentation.js';
 
 const names = Object.freeze({ status: 'STATUS', git: 'GIT', ai: 'AI', chrome: 'CHROME', console: 'CONSOLE' });
 const sessionCapabilities = Object.freeze({ chrome: 'Chrome', console: 'Console' });
@@ -12,13 +13,12 @@ function projectKey(identity, generation) {
 }
 
 export function projectRibbonStatus({ stream = null, run = null, notice = null, sealConsistent = null, project = null } = {}) {
-  const state = String(run?.state ?? 'unknown').toLowerCase();
+  const { processState: state, processLabel, stageLabel, guidance, detail } = describeDashboardRun(run);
   const running = state === 'running';
   const runFailed = state === 'failed' || state === 'timeout';
-  const runText = state === 'unknown' ? 'Awaiting run telemetry' : state[0].toUpperCase() + state.slice(1);
   const streamText = stream === true ? 'Live' : stream === false ? 'Reconnecting' : 'Awaiting connection';
   const status = sealConsistent === false || runFailed || notice?.state === 'failed' ? 'failed'
-    : stream === false || notice?.state === 'pending' ? 'pending'
+    : stream === false || guidance || notice?.state === 'pending' ? 'pending'
     : stream === null && run === null ? 'unknown'
     : running ? 'working'
     : stream === true && run !== null ? 'ready'
@@ -27,10 +27,10 @@ export function projectRibbonStatus({ stream = null, run = null, notice = null, 
     state: status,
     summary: notice?.text || (sealConsistent === false
       ? 'The sealed status reports an integrity problem.'
-      : `Stream ${streamText.toLowerCase()} · Run ${runText.toLowerCase()}`),
+      : [`Stream ${streamText.toLowerCase()}`, `Run ${processLabel.toLowerCase()}`, stageLabel].filter(Boolean).join(' · ')),
     checks: [
       { label: 'Stream', state: streamText },
-      { label: 'Run', state: runText, detail: [run?.phase, run?.lastLine].filter(Boolean).join(' · ') },
+      { label: 'Run', state: processLabel, detail },
       ...(project ? [{ label: 'Project', detail: project }] : []),
     ],
   };

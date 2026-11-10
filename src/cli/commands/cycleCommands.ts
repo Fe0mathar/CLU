@@ -77,8 +77,22 @@ function commandCycleStatus(): number {
 /* clue cycle drive                                                           */
 /* ------------------------------------------------------------------------- */
 
-function commandCycleDrive(options: { navigator?: boolean; expectRuntime?: string }): number {
-  return withRuntime({ withLog: true, verifyLog: 'tail' }, (runtime) => {
+interface CycleDriveOptions {
+  readonly navigator?: boolean;
+  readonly expectRuntime?: string;
+  readonly verifyRecovery?: boolean;
+}
+
+function commandCycleDrive(options: CycleDriveOptions): number {
+  const verifyRecovery = options.verifyRecovery === true;
+  return withRuntime({
+    withLog: true,
+    verifyLog: verifyRecovery ? 'full' : 'tail',
+    measureEventAppends: verifyRecovery,
+    allowStaleHeartbeatReclaim: !verifyRecovery,
+    // Recovery must first restore a verified lagging projection before checking mission authority.
+    ...(verifyRecovery ? { requireMission: false } : {}),
+  }, (runtime) => {
     if (options.expectRuntime !== undefined && options.expectRuntime !== hashCanonicalJson([
       runtime.config.project.root,
       runtime.workspaceRoot,
@@ -86,30 +100,39 @@ function commandCycleDrive(options: { navigator?: boolean; expectRuntime?: strin
     ])) {
       throw new Error('Active project or workspace changed after the dashboard started. Restart the dashboard before driving a cycle.');
     }
+    if (verifyRecovery) {
+      if (runtime.log === null) throw new Error('Cycle recovery requires the event-log writer.');
+      runtime.projections.catchUpVerified(runtime.log);
+      runtime.requireFreshProjections();
+      runtime.requireMission();
+    }
     const orchestrator = new CycleOrchestrator(runtime);
     const result = orchestrator.drive(resolveNavigatorPath(
       options.navigator === true, undefined, runtime.repoRoot, runtime.workspaceRoot,
-    ));
+    ), { verifyRecovery });
     if (result.performed.length === 0) {
       write(`Cycle ${result.cycle.id} already at ${result.cycle.stage}; nothing to drive.`);
-      return 0;
-    }
-    if (result.lock !== null) {
-      write(
-        `locked ${result.lock.grade} — ${result.lock.absent.length} absence(s): ` +
-          result.lock.absent.join('; '),
+    } else {
+      if (result.lock !== null) {
+        write(
+          `locked ${result.lock.grade} — ${result.lock.absent.length} absence(s): ` +
+            result.lock.absent.join('; '),
+        );
+      }
+      printChecks(
+        result.performed.map((step) => ({
+          level: 'ok' as const,
+          label: step.to,
+          detail:
+            step.summary + (step.evidence === null ? '' : `  [evidence ${short(step.evidence.hash)}]`),
+        })),
       );
+      write('');
+      write(`Cycle ${result.cycle.id} at ${result.cycle.stage} (${result.cycle.grade ?? 'ungraded'}).`);
     }
-    printChecks(
-      result.performed.map((step) => ({
-        level: 'ok' as const,
-        label: step.to,
-        detail:
-          step.summary + (step.evidence === null ? '' : `  [evidence ${short(step.evidence.hash)}]`),
-      })),
-    );
-    write('');
-    write(`Cycle ${result.cycle.id} at ${result.cycle.stage} (${result.cycle.grade ?? 'ungraded'}).`);
+    if (verifyRecovery) {
+      write(JSON.stringify({ eventAppends: runtime.log?.appendTiming() ?? null }));
+    }
     return 0;
   });
 }
@@ -222,7 +245,8 @@ export function registerCycleCommands(program: Command): void {
     .description('advance the cycle to SCREENED through lock, snapshot, recognition and screening')
     .option('--navigator', 'publish the recognition stream to the workspace Navigator')
     .option('--expect-runtime <hash>', 'refuse if the project and workspace binding differ from the caller')
-    .action((options: { navigator?: boolean; expectRuntime?: string }) => {
+    .option('--verify-recovery', 'verify the cycle and its evidence before continuing an interrupted drive')
+    .action((options: CycleDriveOptions) => {
       process.exitCode = runGuarded(() => commandCycleDrive(options));
     });
   cycle

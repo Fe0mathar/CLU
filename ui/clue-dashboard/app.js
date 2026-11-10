@@ -32,6 +32,7 @@ import { createTabShell } from './components/tabShell.js';
 import { mountConfigurationPanel } from './configuration/configurationPanel.js';
 import { createStatusStore } from './state/statusStore.js';
 import { createSelectionBus } from './state/selectionBus.js';
+import { describeDashboardRun, describeStartReceipt } from './state/runPresentation.js';
 import { mountQuadrantStatus } from './quadrants/statusPresentation.js';
 import { deriveTelemetry, formatObservedUsd, normalizeAiProviderStatus, projectAiGauge } from './quadrants/q3Gauges.js';
 import { q2PanelDecision } from './quadrants/q2Field.js';
@@ -46,6 +47,7 @@ import {
 } from './quadrants/q1Navigator.js';
 import { mountRibbon } from './components/ribbon.js';
 import { mountQ4Terminal } from './quadrants/q4Terminal.js';
+import { mountAgentsPanel } from './configuration/agentsPanel.js';
 import { createFullscreenContract } from './fullscreen/fullscreenContract.js';
 import { createActionClient } from './configuration/actionContracts.js';
 import { mountProofBoard } from './workspaces/proofBoard.js';
@@ -10719,6 +10721,7 @@ for(var i=1;i<5;i++){let o=u.xy*f32(i);acc+=textureSample(tx,sm,in.uv+o).rgb*w[i
 let runPollBusy = false;
 let lastRunSignature = '';
 let lastCycleReceipt = null;
+let lastRunCheckpoint = '';
 let runGeneration = 0;
 
 async function pollRun() {
@@ -10728,23 +10731,39 @@ async function pollRun() {
   try {
     const run = await fetchJson('/api/run', { cache: 'no-store' });
     if (generation !== runGeneration) return;
-    const state = String(run?.state ?? 'unknown').toLowerCase();
+    const { processState: state, stage, stageLabel, guidance, detail } = describeDashboardRun(run);
     if (state === 'running') ribbon.notice(null);
     ribbon.updateRun(run);
     document.body.dataset.clueRunState = state;
-    const signature = `${state}|${run?.phase ?? ''}|${run?.lastLine ?? ''}`;
+    const signature = `${state}|${detail}`;
     if (signature !== lastRunSignature) {
       lastRunSignature = signature;
       if (state === 'running') ClueInterface.pulse('q4');
     }
+    const checkpoint = stage && `${run.cycleId || run.runId}|${stage}|${run.checkpointAt ?? ''}|${guidance}`;
+    if (checkpoint && checkpoint !== lastRunCheckpoint) {
+      lastRunCheckpoint = checkpoint;
+      terminal.recordReceipt?.({
+        action: 'Cycle checkpoint',
+        state: stageLabel,
+        cycleId: run.cycleId,
+        runId: run.runId,
+        detail: [run.checkpointAt, guidance].filter(Boolean).join(' · '),
+      });
+    }
     const receipt = run?.receipts?.at(-1);
     if (receipt?.finishedAt && receipt.finishedAt !== lastCycleReceipt) {
       lastCycleReceipt = receipt.finishedAt;
-      terminal.recordReceipt?.({
-        action: 'Cycle drive',
-        state: receipt.timedOut ? 'timeout' : receipt.exitCode === 0 ? 'completed' : 'failed',
-        detail: receipt.lastLine || `Process exit ${receipt.exitCode ?? 'unavailable'}`,
-      });
+      if (receipt.timedOut || receipt.exitCode !== 0 || !stage) {
+        terminal.recordReceipt?.({
+          action: 'Cycle process',
+          state: receipt.timedOut ? 'timeout' : receipt.exitCode === 0 ? 'exited' : 'failed',
+          cycleId: run.cycleId,
+          runId: run.runId,
+          dispatchId: run.dispatchId,
+          detail: receipt.lastLine || `Process exit ${receipt.exitCode ?? 'unavailable'}`,
+        });
+      }
     }
   } catch {
     if (generation !== runGeneration) return;
@@ -10793,7 +10812,9 @@ function clearProjectBoundDashboard(reason = 'PROJECT SWITCH · AWAITING PROJECT
   ClueInterface.setPanelState('q4', 'connecting', reason);
   ribbon.updateFrame(null);
   ribbon.updateRun(null);
+  lastRunSignature = '';
   lastCycleReceipt = null;
+  lastRunCheckpoint = '';
   terminal.reset();
 }
 
@@ -10847,6 +10868,11 @@ function loadConfiguration() {
       onActivationPending: onProjectActivationPending,
       onActivationCancelled: onProjectActivationCancelled,
       onActiveProjectChanged,
+      mountAgents(host) {
+        const panel = mountAgentsPanel({ root: host, actionClient });
+        void panel.load();
+        return panel;
+      },
     });
   }
   configurationLoad = configurationController.load();
@@ -10888,20 +10914,25 @@ function commandReceipt(action, state, detail) {
   return { reply: detail, receipt: { action, state, detail } };
 }
 
-const terminal = mountQ4Terminal({
-  root: $('q4'),
+function acceptedStart(result) {
+  const { state, detail } = describeStartReceipt(result);
+  return { reply: detail, receipt: { ...result, action: 'Cycle drive', state, detail } };
+}
+
+const terminalActions = {
   async start({ signal }) {
     if (projectTransition) return commandReceipt('Cycle drive', 'refused', 'Project activation is in progress.');
     const invoked = await actionClient.invoke('start', undefined, { signal });
     if (!invoked.ok || invoked.result?.started !== true) {
-      const detail = invoked.serverDetails?.message ?? invoked.reason ?? 'Cycle dispatch could not be confirmed.';
+      const refusal = invoked.serverDetails ?? invoked.result;
+      const detail = refusal?.message ?? refusal?.reason ?? invoked.reason ?? 'Cycle dispatch could not be confirmed.';
       ribbon.notice(detail, 'failed');
       return commandReceipt('Cycle drive', 'refused', detail);
     }
     ribbon.notice(null);
     ClueInterface.pulse('q4');
     void pollRun();
-    return commandReceipt('Cycle drive', 'accepted', 'Cycle drive accepted. Execution updates appear in the operational feed.');
+    return acceptedStart(invoked.result);
   },
   async gitSync({ signal }) {
     if (projectTransition) return commandReceipt('Git sync', 'refused', 'Project activation is in progress.');
@@ -10918,13 +10949,36 @@ const terminal = mountQ4Terminal({
   async status({ signal }) {
     if (projectTransition) return 'Project activation is in progress.';
     const run = requireAction(await actionClient.invoke('readRun', undefined, { signal }));
-    return `Run ${run?.state ?? 'unknown'}${run?.phase ? ` · ${run.phase}` : ''}${run?.lastLine ? ` · ${run.lastLine}` : ''}`;
+    const { processState, detail } = describeDashboardRun(run);
+    return [`Run ${processState}`, detail].filter(Boolean).join(' · ');
   },
-  async chat({ message, history, signal }) {
-    if (projectTransition) return { ok: false, reply: 'Project activation is in progress.' };
-    const invoked = await actionClient.invoke('talkToAgent', { message, history }, { signal });
-    if (invoked.ok) return invoked.result;
-    return { ...invoked.serverDetails, ok: false, reply: invoked.serverDetails?.reply ?? invoked.reason };
+};
+
+function terminalCore(result) {
+  const text = typeof result === 'string' ? result : result.reply;
+  const receipt = result?.receipt;
+  const ok = receipt?.state !== 'refused';
+  return { kind: 'core', ok, lines: [{ source: 'CORE', tone: ok ? 'info' : 'error', text }], receipts: receipt ? [receipt] : [] };
+}
+
+const terminal = mountQ4Terminal({
+  root: $('q4'),
+  async send({ line, command, signal }) {
+    if (projectTransition) return terminalCore(commandReceipt('Console', 'refused', 'Project activation is in progress.'));
+    if (command === '/start') return terminalCore(await terminalActions.start({ signal }));
+    if (command === '/git sync') return terminalCore(await terminalActions.gitSync({ signal }));
+    if (command === '/status' || command === '/cycle status') return terminalCore(await terminalActions.status({ signal }));
+    const invoked = await actionClient.invoke('agentConsole', { line }, { signal });
+    return invoked.ok ? invoked.result
+      : terminalCore(commandReceipt('CLUE', 'refused', invoked.serverDetails?.reason ?? invoked.reason));
+  },
+  async activity({ after, signal }) {
+    if (projectTransition) return null;
+    return requireAction(await actionClient.invoke('readAgentActivity', { query: { after } }, { signal }));
+  },
+  async dialogue({ signal }) {
+    if (projectTransition) return null;
+    return requireAction(await actionClient.invoke('readAgentDialogue', undefined, { signal }));
   },
 });
 setInterval(pollRun, 1000);

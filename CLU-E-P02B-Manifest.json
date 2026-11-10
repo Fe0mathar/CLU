@@ -1,0 +1,311 @@
+{
+  "schemaVersion": 1,
+  "patchId": "P02B",
+  "baseCommits": [
+    "2b848d5e394e0892264c85b254f25d040d2b5edb"
+  ],
+  "baseFiles": [
+    {
+      "path": "CLU-E-P02-Durable-Start-Recovery.md",
+      "sha256": "b0e809a1eca44074a8479e10379d8408315869994a2c18f1926385c35d39be72"
+    },
+    {
+      "path": "CLU-E-P02-Manifest.json",
+      "sha256": "18f2e4c808787e16b156edf47b9af880b4c930b5ac0ec06a3cac85da4f8a81fb"
+    },
+    {
+      "path": "selftest/dashboard-cycle-progress.test.ts",
+      "sha256": "1cf726ee630827b910ebf665138fbef61533d3fe86ba0ad7315c6295d594f945"
+    },
+    {
+      "path": "selftest/resume-planner.test.ts",
+      "sha256": "ec155910aa219d15d4f97173a1eef743a9c92ece37389513fa8072a31f62877c"
+    },
+    {
+      "path": "src/cli/commands/cycleCommands.ts",
+      "sha256": "0662c423881abed6e50240ff6b20915f86f86c3c0ac6888886565afdb6ef998a"
+    },
+    {
+      "path": "src/control/recognitionRun.ts",
+      "sha256": "c155d6fecaedcba82cea7cc4b886b7f86e2bce5924c0b7759e8df3e056cf7c93"
+    },
+    {
+      "path": "src/control/runtime.ts",
+      "sha256": "409dd6f170e1be8dfd97fb8e11b34a419e45041476dec08bc3981de79ebe41dd"
+    },
+    {
+      "path": "src/cycle/cycleOrchestrator.ts",
+      "sha256": "ccf9568ae19940d86ab5320da4df7a0311523f26c3266da1d6061f51fb682c5b"
+    },
+    {
+      "path": "src/cycle/resumePlanner.ts",
+      "sha256": "fe4c3dde72d778d740faa777a9440029060b34b5b725b68cbbaea000aa0a46c2"
+    },
+    {
+      "path": "src/daemon/dashboardAgent.ts",
+      "sha256": "19cbf83297bee21a2cb7ee3a8af5c0752ac0151cd942375e05d4c673df67a3f8"
+    },
+    {
+      "path": "src/daemon/dashboardCycleProgress.ts",
+      "sha256": "5d62cbf1e2643b5831ac1cfce16a69926f1b5811591b4bd16c3d72a112795be3"
+    },
+    {
+      "path": "src/memory/db.ts",
+      "sha256": "f263fc1546c436dcc098598e15f4cbf1369f9d45942634de236e9ef427bc5d7c"
+    },
+    {
+      "path": "src/memory/eventLog.ts",
+      "sha256": "692e9ca58fa8e968fa1ef1b1dd040488891e1982f9a1d59a93b614faf5451383"
+    },
+    {
+      "path": "ui/clue-dashboard/components/ribbon.js",
+      "sha256": "e806f562c5bc3de5458d74b35f9bcfc1c35dddce879b24cc2c893f10e0699b75"
+    },
+    {
+      "path": "ui/clue-dashboard/state/runPresentation.js",
+      "sha256": "bb99c2bf5a10d9614feafef4086c6c6d12828b1ea27a814cc318d84e4ad22a6a"
+    },
+    {
+      "path": "ui/clue-dashboard/test/ribbon.test.mjs",
+      "sha256": "af57e12aef67bf78844f66b5da392ffb9340d50142de186c9b91e2ca3f6ec6bb"
+    }
+  ],
+  "files": [
+    {
+      "path": "CLU-E-P02B-Dashboard-Integration.md",
+      "sha256": "682b8c78d3021148079dfa22f3fb726d48909527e17dbaa64d3ca3db5f7880a0",
+      "baseSha256": null
+    },
+    {
+      "path": "CLUE-Verify-Patch.bat",
+      "sha256": "a077b1e333f408a69966a3e160662a7e51b6f02797d1806c77cda9ba8b1fd713",
+      "baseSha256": null
+    },
+    {
+      "path": "agents/clue/identity.md",
+      "sha256": "8676ff1b427ae0603502a97eda82f9451809d5c4ad06f649c24d2de9d238d7ef",
+      "baseSha256": null
+    },
+    {
+      "path": "package.json",
+      "sha256": "bdad9b877af8434ef077e2580e3f2ec025f50de5203a09bc7d1f86a0f57aed44",
+      "baseSha256": "cba743ba8c317b3d71ad8e1142cc8e696da8f5976add5b491b9bfd415cfa6f21"
+    },
+    {
+      "path": "selftest/clue-agent.test.ts",
+      "sha256": "c22ed7565e3bebe325a91398f341b9e0d820a40d365f90202b699bcbc6a4d201",
+      "baseSha256": null
+    },
+    {
+      "path": "selftest/clue-dashboard-server-authority.test.ts",
+      "sha256": "1b8b2c869aad38563280bfa9cdf7289952bd494ba1638887df29e2ae162cb030",
+      "baseSha256": "dc1ac989f23a5ad691c3e1f8e5b1e528c089685f0b9f00495d171212fc923214"
+    },
+    {
+      "path": "selftest/release-packaging.test.ts",
+      "sha256": "2ff74cd9c3be6ea19ef93588b45e9d6cbf94f8fdc7366b615011b36c09427c17",
+      "baseSha256": "ec9f0aa12eff18f8b558dac991f0c817923aef89867b9c352c7129c60e7f6449"
+    },
+    {
+      "path": "src/agent/clueAgent.ts",
+      "sha256": "c8dcfd05305be083de1468b80acb7a088b62aa1d2699727f01b3f6da21ece969",
+      "baseSha256": null
+    },
+    {
+      "path": "src/agent/identityDocument.ts",
+      "sha256": "333bb8d950a61e9640f553ea3782dd88be921558f2d56952ba13a36b91a2963b",
+      "baseSha256": null
+    },
+    {
+      "path": "src/ai/gateway/openaiAdapter.ts",
+      "sha256": "8a002c58a4c2f85d2e2c5e131ed28f30ddc7b822460772b3d1ed63074e365f4b",
+      "baseSha256": "613a1943ead51d1ea22634ff62ce587e75f59f62ced66a90d05129baa6c09cf5"
+    },
+    {
+      "path": "src/daemon/agentApi.ts",
+      "sha256": "46f4959086defbfda40f64588a7a5f3281dd12d9b481aa7ba65b14fe54d184c3",
+      "baseSha256": null
+    },
+    {
+      "path": "src/daemon/clueDashboardServer.ts",
+      "sha256": "9d87da59059b4e7dfdd6aa1814415a30d644b84722f49a060b2dabddee973bdb",
+      "baseSha256": "7de621ea8c0091b1df67fdc4a17000693058dd986f9d6c7b5ab49913ae119920"
+    },
+    {
+      "path": "tools/p2-windows-readiness-probe.mjs",
+      "sha256": "edc588ff6c353a61bbc2f55da7f0c911f522b328e1ee82f6beb39075eb133fc2",
+      "baseSha256": "9e37b78b2400bf5158e5a631cb001440b712ab5d981093f91780b57ba4503e93"
+    },
+    {
+      "path": "tools/release.mjs",
+      "sha256": "1b46d7c732b7274fc2f729e3cef9932e2eb218ed10ef72e22c1d16ac14bac024",
+      "baseSha256": "c3aa59b4b7e467f4aa041b3724762c043c9ea6dd5b4a88d97e0d6e692a90fbc3"
+    },
+    {
+      "path": "tools/verify-patch.mjs",
+      "sha256": "cb4a63d712667c68863f8808f017716c381922033262fd4e0bf552d894681a73",
+      "baseSha256": null
+    },
+    {
+      "path": "ui/clue-dashboard/app.js",
+      "sha256": "abb3a7551ca02f6cb98c697f44f0d923e28af3c3e34ceba6d4210096c87273e7",
+      "baseSha256": "3a434430daac267715a257c7d955883286832610f6bf75f2f63f46051acde45a"
+    },
+    {
+      "path": "ui/clue-dashboard/configuration/actionContracts.js",
+      "sha256": "0ab450aefeaa306c0688b8eff3e20bf73f04bd2c70a0174d8baa5d3c2e140219",
+      "baseSha256": "2e400a95f06d7d38d9bffb8b39d81bf2469485908a815bae2cebb5304494ec8c"
+    },
+    {
+      "path": "ui/clue-dashboard/configuration/agentsPanel.css",
+      "sha256": "90774cb97faf1ea2738736a28471cc113ba987c2fe3d066a695b4845717fea58",
+      "baseSha256": null
+    },
+    {
+      "path": "ui/clue-dashboard/configuration/agentsPanel.js",
+      "sha256": "eb40d981b451fe34d3b978357ae6a5f5a39b6b5ec8b8134e4742672abb888195",
+      "baseSha256": null
+    },
+    {
+      "path": "ui/clue-dashboard/configuration/authorityEditor.js",
+      "sha256": "7a1cfdd6d306525e7b657939c0530a802e3bd46239d374de1438c2c76da70dc9",
+      "baseSha256": "88e1cd0a238710c7a0a21bd647e82161a2a4829d3174db997a9cb66e4a1339f3"
+    },
+    {
+      "path": "ui/clue-dashboard/configuration/benchmarkRuntimeEditor.js",
+      "sha256": "b669c981365f74d367fc8ab450ae44935eab4f47c78b883e9a5d72ac7baae5e9",
+      "baseSha256": "0d954b07c7e9a9d7f75a4e8ec7a6cd9edd028f846bf03168f7de514c186c2b78"
+    },
+    {
+      "path": "ui/clue-dashboard/configuration/browserEditor.js",
+      "sha256": "2df56c4f70c3b1e602692f251f1eafd1e342f9eb0e620f90da7d4d58061dc7a1",
+      "baseSha256": "016d20aa9cd7e5ceccace4f0396ee48925bed5bffb3b41ecd4a22cc89cd673cb"
+    },
+    {
+      "path": "ui/clue-dashboard/configuration/configuration.css",
+      "sha256": "80d195948151761753f70a8bb92e6c546d25b743e72a3ff8ddacdd6eceb8bc5c",
+      "baseSha256": "719b58b9fa757ea9fa50c8df987eeb5c8882b0fd3f176e18774e54303153e806"
+    },
+    {
+      "path": "ui/clue-dashboard/configuration/configurationDialogs.js",
+      "sha256": "977504337486bcacd5637d9228a8d30a29cc2350fb62b923b7e50729d38a034a",
+      "baseSha256": null
+    },
+    {
+      "path": "ui/clue-dashboard/configuration/configurationPanel.js",
+      "sha256": "e88a227a0895819d1348b06b3475b745ae5e8122add7952c0fde74ba9d199a81",
+      "baseSha256": "3da4eeaaa0b930d39ac34cc44b04c377d3bed217977708bd983db02c6b1c65d4"
+    },
+    {
+      "path": "ui/clue-dashboard/configuration/draftChanges.js",
+      "sha256": "36deb59c525ca6289119f02b3856fe4f0d7af2f8f6662ceb041b5f76f75e49d3",
+      "baseSha256": null
+    },
+    {
+      "path": "ui/clue-dashboard/configuration/draftIssues.js",
+      "sha256": "37d95c893aed693e4f77181a66a00429be02b956642f026e2a966ef9b88c9bd6",
+      "baseSha256": null
+    },
+    {
+      "path": "ui/clue-dashboard/configuration/gatewayEditor.js",
+      "sha256": "fc87ce7a70faae2b10e31fcf1baf578be61eea719319055f4cc542ce2f2e8e32",
+      "baseSha256": "c0284b87b83c6e25887f31b196e42e4f27cc69ad81c0d56faff1a078c4fe884d"
+    },
+    {
+      "path": "ui/clue-dashboard/configuration/gitEditor.js",
+      "sha256": "cdbaa141c84650c60881e1f730bd112a14936170d882d73633708f7d6516253e",
+      "baseSha256": "fa8a9473ee6f51c1ca94972901b494c8b484bb575b994e33d3b0a0814164b22b"
+    },
+    {
+      "path": "ui/clue-dashboard/configuration/hostEditor.js",
+      "sha256": "d3c819c304b36668d669e4411859cbce1d8b60614467a1d4c2c89df2acdb5fbe",
+      "baseSha256": "fc7d4266e5363c133bbedab9820d7072d82a6b39cf9ae4b96bbb855264965905"
+    },
+    {
+      "path": "ui/clue-dashboard/configuration/installationRows.js",
+      "sha256": "873474b63026e098c702d1dfb1624bc1822209fb886088d203c2931a2cbcad1b",
+      "baseSha256": null
+    },
+    {
+      "path": "ui/clue-dashboard/configuration/navigation.js",
+      "sha256": "39fd217af9f705e2010d4bb17caf5f619bf4440811e1ca1491b3c86a714e0711",
+      "baseSha256": null
+    },
+    {
+      "path": "ui/clue-dashboard/configuration/overviewPanel.js",
+      "sha256": "8fb7728b0ba10859f9df6618caec7a27718eeae4011c4f20def3acc065646b31",
+      "baseSha256": null
+    },
+    {
+      "path": "ui/clue-dashboard/configuration/projectEditor.js",
+      "sha256": "d54182f48b2153440860ca524e94080aa61275414bb46df9090baa0a93a408a1",
+      "baseSha256": "e9379b8e3bba2f148eea632041ea2a521f6d1f4f91b5f16a7782158a3ec911fa"
+    },
+    {
+      "path": "ui/clue-dashboard/configuration/projectReadinessPanel.js",
+      "sha256": "a2e31ff322639e4d90549e9d22e27ea35a6d03efc082d9dab791a337c5b1d352",
+      "baseSha256": "332ebd42f2fe8bbdef2fda1819dcd63658f7566e8aca6e8e073b84c1e000b119"
+    },
+    {
+      "path": "ui/clue-dashboard/configuration/projectSelector.js",
+      "sha256": "12eabcbb9f0c6eb9ded7f708a507e59e5f9e9eecfc37a3029f681ac92bb2625d",
+      "baseSha256": "8afa5529d40a2508f80b63ad6fdcb97464c259104761a7666d3834f05140e99e"
+    },
+    {
+      "path": "ui/clue-dashboard/configuration/recognitionEditor.js",
+      "sha256": "105a55b3c396da809b6ad578f094a5bb38113dd8f0b52b64b04cbf8bf7c139f0",
+      "baseSha256": "aab1df7e149ea5fd92e585fab31b38cfe7f73de3235d39700de6409109e55637"
+    },
+    {
+      "path": "ui/clue-dashboard/configuration/sectionRegistry.js",
+      "sha256": "323b2949bb40697fd04c88149a9f23be8ae2524cad0903c88bd72aeb8269c79c",
+      "baseSha256": null
+    },
+    {
+      "path": "ui/clue-dashboard/configuration/shellView.js",
+      "sha256": "55168ce086104e0508e18fe23296e3728659565ab551c2cbddff910094019a04",
+      "baseSha256": null
+    },
+    {
+      "path": "ui/clue-dashboard/configuration/uiContinuity.js",
+      "sha256": "8b8359ed885d64f1c0074642711368d19e2bf890df11db9d31c439e875394d1e",
+      "baseSha256": null
+    },
+    {
+      "path": "ui/clue-dashboard/configuration/viewPrimitives.js",
+      "sha256": "04aa9ecf62a35e9e11580e7705a2501ac8a985192556bd7977a52a09206576f0",
+      "baseSha256": "57fd95366a0ef8d6d92ec5149be56b033dfdeb7fa1eaa210e41374e482b1999e"
+    },
+    {
+      "path": "ui/clue-dashboard/index.html",
+      "sha256": "c8f3aa7c657d79f81ece2028d8a230b263acb0fba742c1b11682cb96e71cd4b3",
+      "baseSha256": "ecafd576787f2d55da2ffa670c14f00823c21cdb264bd20e3f866cafa4d62a13"
+    },
+    {
+      "path": "ui/clue-dashboard/quadrants/q4Terminal.css",
+      "sha256": "646e65bfc811606d3862fb9ca51235cbbd735548a25775bd03a7202d318d2b50",
+      "baseSha256": "1a7872a070502d6e6a9c00061bb3e009b1e2e1442069f4f11bf4293d32b5b97e"
+    },
+    {
+      "path": "ui/clue-dashboard/quadrants/q4Terminal.js",
+      "sha256": "95e07a97b69e013358ce5b4d733f32c9cd1773e7063243601a176a44e96be73f",
+      "baseSha256": "534c83b0a482e324e8efde1c68972714e31c142f4e17712cfbb810762b65bb7c"
+    },
+    {
+      "path": "ui/clue-dashboard/test/agentsPanel.test.mjs",
+      "sha256": "e1ec13ec6e93b6761720e14d953f5a0120b3dd5cee7c0187d1a374a005e5cfd6",
+      "baseSha256": null
+    },
+    {
+      "path": "ui/clue-dashboard/test/configurationUx.test.mjs",
+      "sha256": "758b35cbd574118b6cb75f9657de5a1534574032daceb9939aabf022ad6c88e2",
+      "baseSha256": null
+    },
+    {
+      "path": "ui/clue-dashboard/test/q4Terminal.test.mjs",
+      "sha256": "190cb2bf57efe7d688d2d0e3702918853ab734268118c5ce0795563ba7c861a1",
+      "baseSha256": "27006c835a96140910a6caba4819b8c8bead8626339c082054547753586e8420"
+    }
+  ],
+  "gate": "dashboard-p02b"
+}

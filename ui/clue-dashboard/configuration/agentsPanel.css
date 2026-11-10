@@ -1,0 +1,20 @@
+/* Configuration → Agents (ADR-0021). The profile-specific Identity Document editor for CLUE. */
+.agents-panel details { border: 1px solid #17384d; border-radius: 10px; background: rgba(6, 20, 32, .72); }
+.agents-panel summary { display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px; padding: 10px 14px; cursor: pointer; list-style: none; }
+.agents-panel summary::-webkit-details-marker { display: none; }
+.agents-panel .agents-title { font-size: 12px; letter-spacing: .14em; color: #e8f5ff; font-weight: 700; }
+.agents-panel .agents-state { font: 11px/1.4 ui-monospace, Consolas, monospace; color: #9fc3d8; }
+.agents-panel .agents-state[data-state='ready'], .agents-panel .agents-state[data-state='working'] { color: #b5f5c8; }
+.agents-panel .agents-state[data-state='halted'], .agents-panel .agents-state[data-state='invalid'],
+.agents-panel .agents-state[data-state='brain_paused'], .agents-panel .agents-state[data-state='unavailable'] { color: #ffc0bf; }
+.agents-panel .agents-state[data-state='unbound'], .agents-panel .agents-state[data-state='credential_missing'] { color: #ffe1a6; }
+.agents-panel .agents-body { display: grid; gap: 10px; padding: 4px 14px 14px; }
+.agents-panel .agents-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.agents-panel .agents-facts { font: 11px/1.5 ui-monospace, Consolas, monospace; color: #9fc3d8; overflow-wrap: anywhere; }
+.agents-panel textarea.agents-text { width: 100%; min-height: 420px; font: 12px/1.5 ui-monospace, Consolas, monospace; tab-size: 2; white-space: pre; overflow: auto; }
+.agents-panel input.agents-note { flex: 1 1 260px; min-width: 0; }
+.agents-panel .agents-message { margin: 0; padding: 0; list-style: none; font: 11px/1.5 ui-monospace, Consolas, monospace; color: #9fc3d8; }
+.agents-panel .agents-message[data-tone='ok'] { color: #b5f5c8; }
+.agents-panel .agents-message[data-tone='error'] { color: #ffc0bf; }
+.agents-panel .agents-dirty { color: #ffe1a6; font-size: 10px; letter-spacing: .08em; }
+.agents-panel .agents-guidance { margin: 0; color: #b5ccda; font-size: 12px; line-height: 1.5; }

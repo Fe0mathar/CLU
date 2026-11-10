@@ -24,11 +24,13 @@
  */
 
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { randomUUID } from 'node:crypto';
 import { createReadStream, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { open } from 'node:fs/promises';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { isIP } from 'node:net';
 import { extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { createInterface } from 'node:readline';
 
 import { ConsoleStateService } from './consoleStateService.js';
 import { parseConsoleSnapshot, type ConsoleSnapshot } from '../ui/viewModel.js';
@@ -66,7 +68,9 @@ import {
 } from './projectProfilesApi.js';
 import type { Actor, ProjectProfileRecord } from '../shared/schemas.js';
 import { hashCanonicalJson } from '../shared/ids.js';
-import { createDashboardAgent, DASHBOARD_AGENT_BODY_LIMIT } from './dashboardAgent.js';
+import { createAgentApi } from './agentApi.js';
+import { createDashboardCycleProgress } from './dashboardCycleProgress.js';
+import type { EventAppendTiming } from '../memory/eventLog.js';
 
 
 /** Controlled-pause gate shared by the start endpoint and its regression test. */
@@ -203,11 +207,13 @@ interface Frame {
 
 interface RunState {
   state: 'idle' | 'running' | 'completed' | 'failed' | 'timeout';
+  dispatchId: string | null;
   phase: string | null;
   startedAt: string | null;
   finishedAt: string | null;
   exitCode: number | null;
   lastLine: string | null;
+  eventAppends: EventAppendTiming | null;
   /** One receipt per launched phase, in order (`DEV-P1-15`, Directory §19.4). */
   receipts: PhaseReceipt[];
 }
@@ -322,13 +328,17 @@ export async function startClueDashboard(
 
   const run: RunState = {
     state: 'idle',
+    dispatchId: null,
     phase: null,
     startedAt: null,
     finishedAt: null,
     exitCode: null,
     lastLine: null,
+    eventAppends: null,
     receipts: [],
   };
+  const cycleProgress = createDashboardCycleProgress(runtime);
+  let precedingClosedCycleId: string | null = null;
   let child: ChildProcess | null = null;
   let stopping = false;
   const activeReadinessChecks = new Set<ReadinessCapability>();
@@ -393,9 +403,11 @@ export async function startClueDashboard(
     run.phase = phase;
     const startedAt = new Date().toISOString();
     const startedMs = Date.now();
-    const args = [cliEntry, 'cycle', 'drive', '--navigator', '--expect-runtime', expectedRuntime];
+    const args = [cliEntry, 'cycle', 'drive', '--navigator', '--expect-runtime', expectedRuntime, '--verify-recovery'];
     const env = { ...process.env };
-    const credentials = new Set(['OPENAI_API_KEY', runtime.config.gateway.api_key_env.toUpperCase()]);
+    const credentials = new Set([
+      'OPENAI_API_KEY', 'CLUE_AGENT_OPENAI_API_KEY', runtime.config.gateway.api_key_env.toUpperCase(),
+    ]);
     for (const name of Object.keys(env)) {
       if (credentials.has(name.toUpperCase())) delete env[name];
     }
@@ -404,15 +416,30 @@ export async function startClueDashboard(
 
     let timedOut = false;
     let phaseLastLine: string | null = null;
-    const consume = (chunk: Buffer): void => {
-      const text = chunk.toString('utf8').trim();
+    const consume = (line: string): void => {
+      const text = line.trim();
       if (text.length > 0) {
-        phaseLastLine = text.split('\n').at(-1) ?? text;
+        phaseLastLine = runtime.secrets.redact(text).slice(0, 1000);
         run.lastLine = phaseLastLine;
       }
     };
-    spawned.stdout?.on('data', consume);
-    spawned.stderr?.on('data', consume);
+    if (spawned.stdout !== null) {
+      createInterface({ input: spawned.stdout }).on('line', (line) => {
+        if (line.startsWith('{"eventAppends":') && line.length <= 256) {
+          try {
+            const timing = JSON.parse(line).eventAppends as EventAppendTiming | null;
+            if (timing !== null && Number.isSafeInteger(timing.count) && timing.count >= 0 &&
+                Number.isFinite(timing.maxMs) && timing.maxMs >= 0 &&
+                Number.isFinite(timing.totalMs) && timing.totalMs >= timing.maxMs) {
+              run.eventAppends = { count: timing.count, totalMs: timing.totalMs, maxMs: timing.maxMs };
+              return;
+            }
+          } catch { /* ordinary worker output */ }
+        }
+        consume(line);
+      });
+    }
+    if (spawned.stderr !== null) createInterface({ input: spawned.stderr }).on('line', consume);
     spawned.once('error', (error) => {
       phaseLastLine = `Cycle process could not start: ${error.message}`;
       run.lastLine = phaseLastLine;
@@ -457,16 +484,78 @@ export async function startClueDashboard(
   }
 
   type StartResult =
-    | { readonly started: true }
+    | {
+      readonly started: true;
+      readonly disposition: 'started' | 'attached' | 'already-screened';
+      readonly runId: string | null;
+      readonly cycleId: string | null;
+      readonly dispatchId: string | null;
+    }
     | { readonly started: false; readonly code: string; readonly reason: string; readonly message: string };
 
   function startRefused(code: string, reason: string): StartResult {
     return { started: false, code, reason, message: reason };
   }
 
+  function runSnapshot() {
+    const latest = cycleProgress.read();
+    const cycle = latest?.cycleId === precedingClosedCycleId ? null : latest;
+    return {
+      ...run,
+      runId: cycle?.cycleId ?? null,
+      cycleId: cycle?.cycleId ?? null,
+      missionId: cycle?.missionId ?? null,
+      cycleCurrent: cycle?.current ?? null,
+      cycleMissionMatches: cycle?.missionMatches ?? null,
+      cycleStage: cycle?.stage ?? null,
+      cycleGrade: cycle?.grade ?? null,
+      suspendedFrom: cycle?.suspendedFrom ?? null,
+      checkpointAt: cycle?.checkpoint?.occurredAt ?? null,
+      checkpoints: cycle?.checkpoints ?? [],
+      recoveryRequired: cycle?.recoverable === true && run.state !== 'running',
+    };
+  }
+
+  function startAccepted(
+    disposition: 'started' | 'attached' | 'already-screened',
+    cycleId: string | null,
+  ): StartResult {
+    return {
+      started: true,
+      disposition,
+      runId: cycleId,
+      cycleId,
+      dispatchId: disposition === 'already-screened' ? null : run.dispatchId,
+    };
+  }
+
+  function cycleProjectionIsFresh(): boolean {
+    try {
+      runtime.requireFreshProjections();
+      return true;
+    } catch {
+      // The cycle writer catches up committed events before deciding what to drive.
+      return false;
+    }
+  }
+
   function startPipeline(): StartResult {
     if (stopping) return startRefused('DASHBOARD_STOPPING', 'The dashboard is stopping.');
-    if (run.state === 'running') return startRefused('RUN_IN_PROGRESS', 'A cycle drive is already in progress.');
+    if (!dashboardProfileCurrent()) {
+      return startRefused('DASHBOARD_RUNTIME_CHANGED', 'Project settings changed. Restart the dashboard before starting a cycle.');
+    }
+    if (run.state === 'running') return startAccepted('attached', runSnapshot().cycleId);
+    const cycle = cycleProgress.read();
+    const useCurrentCycle = cycle?.current === true && cycleProjectionIsFresh();
+    if (useCurrentCycle) {
+      if (!cycle.missionMatches || cycle.checkpoint === null) {
+        return startRefused('CYCLE_CHECKPOINT_UNVERIFIED', 'The current cycle has no checkpoint for the active mission. Inspect the cycle before starting again.');
+      }
+      if (cycle.stage === 'SUSPENDED') {
+        return startRefused('CYCLE_SUSPENDED', 'The cycle is suspended. Use the CLU-E cycle resume CLI command to verify and resume it before using Start.');
+      }
+      if (!cycle.recoverable) return startAccepted('already-screened', cycle.cycleId);
+    }
     // Provider billing authority is fail-closed. Finish any already durable write, but refuse
     // a new pipeline before spawning a child while the event-backed controlled pause is active.
     if (runtime.config.gateway.enabled) {
@@ -483,11 +572,14 @@ export async function startClueDashboard(
         );
       }
     }
+    precedingClosedCycleId = cycle?.current === false ? cycle.cycleId : null;
+    run.dispatchId = randomUUID();
     run.state = 'running';
     run.startedAt = new Date().toISOString();
     run.finishedAt = null;
     run.exitCode = null;
     run.lastLine = null;
+    run.eventAppends = null;
     run.receipts.length = 0;
     try {
       launchCycle();
@@ -498,20 +590,39 @@ export async function startClueDashboard(
       run.lastLine = error instanceof Error ? error.message : String(error);
       return startRefused('CYCLE_LAUNCH_FAILED', run.lastLine);
     }
-    return { started: true };
+    return startAccepted('started', useCurrentCycle ? cycle.cycleId : null);
   }
 
-  const dashboardAgent = createDashboardAgent({
-    gateway: {
-      repoRoot: runtime.repoRoot,
-      expectedRuntimeDigest: expectedRuntime,
-      ...(runtime.projectProfile === null ? {} : { projectProfile: runtime.projectProfile }),
-    },
-    snapshot: () => sink.current?.snapshot ?? null,
-    run: () => run,
+  const agentCredential = runtime.projectProfile?.profile.integrations.gpt.credential;
+  const operatorAgent = createAgentApi({
+    repoRoot: runtime.repoRoot,
+    workspaceRoot: runtime.workspaceRoot,
+    scope: hashCanonicalJson([
+      runtime.config.project.id,
+      runtime.projectIdentity?.targetRootIdentity ?? runtime.config.project.root,
+    ]),
+    profileCredential: agentCredential?.source === 'project-override'
+      ? agentCredential.value
+      : `env:${runtime.config.gateway.api_key_env}`,
+    local: isLoopbackHost(host),
+    readBody: readRequestBody,
+    profileCurrent: dashboardProfileCurrent,
     stopping: () => stopping,
-    start: startPipeline,
     redact: (text) => runtime.secrets.redact(text),
+    observe: () => {
+      const current = runSnapshot();
+      const frame = sink.current?.snapshot;
+      return {
+        cycleId: current.cycleId,
+        cycleStage: current.cycleStage,
+        recoveryRequired: current.recoveryRequired,
+        workerState: current.state,
+        missionId: current.missionId ?? frame?.shell.identity.missionId ?? null,
+        statusHash: frame?.seal.statusHash ?? null,
+        capturedAt: frame?.seal.capturedAt ?? null,
+        readiness: frame?.dashboard.startStop.phase ?? null,
+      };
+    },
   });
 
   function dashboardProfileCurrent(): boolean {
@@ -1073,6 +1184,7 @@ export async function startClueDashboard(
     const pathname = url.pathname;
 
     if (await handleProjectProfilesApiRequest(request, response, projectProfilesApi, url)) return;
+    if (await operatorAgent.handle(request, response, url)) return;
 
     if (request.method === 'GET' && pathname === '/api/frame') {
       response.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
@@ -1389,8 +1501,8 @@ export async function startClueDashboard(
         send(409, { state: 'pending', summary: 'This check is already running.', checks: [] });
         return;
       }
-      if (capability === 'ai' && (run.state === 'running' || dashboardAgent.isBusy())) {
-        send(409, { state: 'pending', summary: 'Wait for the active cycle or Master Agent turn before testing AI.', checks: [] });
+      if (capability === 'ai' && run.state === 'running') {
+        send(409, { state: 'pending', summary: 'Wait for the active cycle before testing AI.', checks: [] });
         return;
       }
       const stale = { state: 'pending', summary: 'Project settings changed. Restart the dashboard before checking this configuration.', checks: [] } as const;
@@ -1479,75 +1591,35 @@ export async function startClueDashboard(
       return;
     }
     if (request.method === 'GET' && pathname === '/api/run') {
+      const snapshot = runSnapshot();
       response.writeHead(200, {
         'content-type': 'application/json; charset=utf-8',
         'cache-control': 'no-store',
       });
-      response.end(JSON.stringify(run));
-      return;
-    }
-    if (request.method === 'POST' && pathname === '/api/control/agent') {
-      const send = (status: number, body: unknown): void => {
-        response.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
-        response.end(JSON.stringify(body));
-      };
-      if (request.headers['content-type']?.split(';', 1)[0]?.trim().toLowerCase() !== 'application/json') {
-        send(415, { code: 'AGENT_CONTENT_TYPE', reply: 'The Master Agent requires a JSON request.' });
-        return;
-      }
-      let raw: string;
-      try {
-        raw = await readRequestBody(request, DASHBOARD_AGENT_BODY_LIMIT);
-      } catch {
-        send(413, { code: 'AGENT_BODY_TOO_LARGE', reply: 'The conversation payload exceeds the 32 KiB limit.' });
-        return;
-      }
-      let payload: unknown;
-      try {
-        payload = JSON.parse(raw);
-      } catch {
-        send(400, { code: 'AGENT_INPUT_INVALID', reply: 'The conversation request is not valid JSON.' });
-        return;
-      }
-      if (activeReadinessChecks.has('ai')) {
-        send(409, { code: 'AI_READINESS_BUSY', reply: 'Wait for the active AI readiness check to finish before messaging the Master Agent.' });
-        return;
-      }
-      const stale = { code: 'DASHBOARD_RUNTIME_CHANGED', reply: 'Project settings changed. Restart the dashboard before continuing the conversation.' };
-      if (!dashboardProfileCurrent()) {
-        send(409, stale);
-        return;
-      }
-      const result = await dashboardAgent.ask(payload, () => !response.destroyed && dashboardProfileCurrent());
-      if (!dashboardProfileCurrent()) {
-        send(409, stale);
-        return;
-      }
-      send(result.status, result.body);
+      response.end(JSON.stringify(snapshot));
       return;
     }
     if (request.method === 'POST' && pathname === '/api/control/start') {
-      const result = dashboardAgent.isBusy()
-        ? startRefused('AGENT_BUSY', 'Wait for the Master Agent to finish its current response before starting a cycle.')
-        : activeReadinessChecks.has('ai')
-          ? startRefused('AI_READINESS_BUSY', 'Wait for the active AI readiness check to finish before starting a cycle.')
-          : startPipeline();
+      const result = activeReadinessChecks.has('ai')
+        ? startRefused('AI_READINESS_BUSY', 'Wait for the active AI readiness check to finish before starting a cycle.')
+        : startPipeline();
       response.writeHead(result.started ? 202 : 409, {
         'content-type': 'application/json; charset=utf-8',
+        'cache-control': 'no-store',
       });
       response.end(JSON.stringify(result));
       return;
     }
     if (request.method === 'POST' && pathname === '/api/control/git-sync') {
-      if (run.state === 'running' || dashboardAgent.isBusy() || activeReadinessChecks.has('ai')) {
+      if (run.state === 'running' || activeReadinessChecks.has('ai')) {
         response.writeHead(200, {
           'content-type': 'application/json; charset=utf-8',
           'cache-control': 'no-store',
         });
         response.end(JSON.stringify({
           state: 'refused',
-          code: run.state === 'running' ? 'PIPELINE_RUNNING' : dashboardAgent.isBusy() ? 'AGENT_BUSY' : 'AI_READINESS_BUSY',
-          detail: 'Wait for the active cycle, Master Agent response or AI readiness check before syncing Git.',
+          code: run.state === 'running' ? 'PIPELINE_RUNNING' : 'AI_READINESS_BUSY',
+          detail: 'Wait for the active cycle or AI readiness check before syncing Git.',
           governedGitLifecycle: false,
         }));
         return;
@@ -1618,6 +1690,7 @@ export async function startClueDashboard(
     url: `http://${httpHost(host)}:${boundPort}/`,
     stop: async (): Promise<void> => {
       stopping = true;
+      operatorAgent.close();
       clearInterval(refreshTimer);
       for (const stream of eventStreams) stream.end();
       eventStreams.clear();

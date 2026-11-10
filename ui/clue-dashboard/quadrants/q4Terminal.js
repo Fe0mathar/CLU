@@ -1,41 +1,68 @@
+import { findCredentialLeak } from '../configuration/actionContracts.js';
+import { runIdentity } from '../state/runPresentation.js';
+
+/** Only these typed operator commands are routed. CLUE receives ordinary conversation separately. */
+const COMMANDS = new Set(['/start', '/git sync', '/status', '/cycle status', '/halt', '/resume', '/forget']);
+const HELP = [
+  '/start — drive or recover the governed cycle through screening',
+  '/git sync — synchronize Git on explicit request',
+  '/status or /cycle status — show the cycle checkpoint and process status',
+  '/halt [reason] — pause CLUE and stop its active turn',
+  '/resume — resume CLUE conversation',
+  '/forget — clear CLUE’s conversation context',
+  '/help — list these commands',
+  'Ask CLUE about dashboard status in plain text.',
+].join('\n');
+
 const INPUT_LIMIT = 2048;
-const RESPONSE_LIMIT = 8192;
-const HISTORY_LIMIT = 8;
-const SCROLLBACK_LIMIT = 160;
+const TEXT_LIMIT = 8192;
+const SCROLLBACK_LIMIT = 240;
 const RECALL_LIMIT = 40;
-const RECEIPT_LIMIT = 12;
-const HELP = '/start — run the governed cycle\n/git sync — synchronize Git on explicit request\n/status — show run status\n/help — list CLU-E commands\nPlain text opens a conversation with the Master Agent.';
+const ACTIVITY_LIMIT = 40;
+const ACTIVITY_TAIL = 12;
+const RESTORED_TURNS = 4;
+const DEFAULT_POLL_MS = 1500;
+const READY = 'Console ready. /help lists the exact commands. Anything else is addressed to CLUE.';
 
-function parseInput(value) {
-  const message = value.trim();
-  if (!message) return null;
-  if (!message.startsWith('/')) return { command: 'chat', message };
-  return { command: message.toLowerCase().replace(/\s+/gu, ' '), message };
-}
-
-function boundedText(value, limit = RESPONSE_LIMIT) {
+function boundedText(value, limit = TEXT_LIMIT) {
   if (typeof value !== 'string') return '';
   return value.length > limit ? `${value.slice(0, limit - 1)}…` : value;
 }
 
-function responseText(result) {
-  if (typeof result === 'string') return boundedText(result);
-  return boundedText(result?.reply || result?.message || result?.reason || result?.detail || result?.receipt?.detail);
+function coreFailure(text) {
+  return { kind: 'core', ok: false, lines: [{ source: 'CORE', tone: 'error', text }], receipts: [], turnId: null, basis: null, status: null };
 }
 
-/** Mounts one in-memory, project-scoped terminal over the program's existing control callbacks. */
-export function mountQ4Terminal({ root, start, gitSync, status, chat }) {
+function lineKind(line) {
+  if (line?.tone === 'error') return 'error';
+  if (line?.source === 'CORE') return line.tone === 'ok' ? 'ok' : 'system';
+  return 'agent';
+}
+
+/**
+ * Mounts the console over two transport callbacks.
+ *
+ *   send({ line, command, signal }) → a typed operator receipt or a CLUE reply
+ *   activity({ after, signal }) → { rows, head } from the agent ledger
+ *   dialogue({ signal })        → { turns } of the durable CLUE dialogue (optional)
+ *   onSettled(result)           → called after every rendered result (optional)
+ */
+export function mountQ4Terminal({ root, send, activity, dialogue, onSettled, pollMs = DEFAULT_POLL_MS }) {
   const form = root.querySelector('#q4-terminal-form');
   const input = root.querySelector('#q4-terminal-input');
-  const send = root.querySelector('#q4-terminal-submit');
   const log = root.querySelector('#q4-terminal-log');
-  const receipts = root.querySelector('#q4-command-receipts');
+  const strip = root.querySelector('#q4-command-receipts');
   const document = root.ownerDocument;
-  const history = [];
+  const pending = new Set();
   const recall = [];
   let recallIndex = 0;
   let draft = '';
-  let active = null;
+  let turn = null;
+  let generation = 0;
+  let cursor = -ACTIVITY_TAIL;
+  let polling = null;
+  let restoring = null;
+  let timer = null;
 
   function append(kind, label, text, forceScroll = false) {
     const following = log.scrollHeight - log.clientHeight - log.scrollTop <= 24;
@@ -50,54 +77,134 @@ export function mountQ4Terminal({ root, start, gitSync, status, chat }) {
     if (forceScroll || following) log.scrollTop = log.scrollHeight;
   }
 
-  function recordReceipt(action, receipt) {
-    if (!receipt || typeof receipt !== 'object') return;
-    const label = boundedText(receipt.action || action, 90);
-    const outcome = boundedText(receipt.state || receipt.code, 90)
-      || (receipt.started === true ? 'accepted' : receipt.started === false ? 'refused' : '');
-    const detail = boundedText(receipt.detail || receipt.reason || receipt.message, 360);
-    if (!label || (!outcome && !detail)) return;
+  function stripRow(text, tone) {
+    const value = boundedText(text, 420);
+    if (!value) return;
     const row = document.createElement('li');
-    row.textContent = [label, outcome, detail].filter(Boolean).join(' · ');
-    receipts.prepend(row);
-    while (receipts.childElementCount > RECEIPT_LIMIT) receipts.lastElementChild.remove();
-    receipts.hidden = false;
+    row.dataset.tone = tone;
+    row.textContent = value;
+    strip.prepend(row);
+    while (strip.childElementCount > ACTIVITY_LIMIT) strip.lastElementChild.remove();
+    strip.hidden = false;
   }
 
-  function setBusy(value) {
-    send.disabled = value;
-    form.setAttribute('aria-busy', String(value));
+  /** A receipt the dashboard itself observed, such as a cycle drive finishing. */
+  function recordReceipt(receipt) {
+    if (!receipt || typeof receipt !== 'object') return;
+    const label = boundedText(receipt.action, 90);
+    const outcome = boundedText(receipt.state || receipt.disposition || receipt.code, 90)
+      || (receipt.started === true ? 'accepted' : receipt.started === false ? 'refused' : '');
+    const identity = boundedText(runIdentity(receipt), 140);
+    const detail = boundedText(receipt.detail || receipt.reason || receipt.message, 320);
+    if (!label || (!outcome && !identity && !detail)) return;
+    stripRow([label, outcome, identity, detail].filter(Boolean).join(' · '), outcome === 'failed' || outcome === 'refused' || outcome === 'timeout' ? 'error' : 'ok');
+  }
+
+  function render(result) {
+    const lines = Array.isArray(result?.lines) ? result.lines : [];
+    if (lines.length === 0) {
+      append('error', 'CORE', 'The dashboard returned no response.');
+      return;
+    }
+    for (const line of lines) append(lineKind(line), boundedText(line?.source, 40) || 'CORE', line?.text);
+    const receipts = Array.isArray(result?.receipts) ? result.receipts : [];
+    if (result?.kind !== 'clue') {
+      for (const receipt of receipts) recordReceipt(receipt);
+      return;
+    }
+    for (const receipt of receipts) {
+      append(receipt?.ok === false ? 'error' : 'meta', 'RECEIPT', `${receipt?.ok === false ? '✗' : '✓'} ${boundedText(receipt?.label, 200)} — ${boundedText(receipt?.detail, 400)}`);
+    }
+    const basis = typeof result?.basis?.statusHash === 'string' ? `Status ${result.basis.statusHash.slice(0, 12)}` : 'no sealed Status';
+    append('meta', 'BASIS', [result?.turnId, result?.status, basis, `${receipts.length} action${receipts.length === 1 ? '' : 's'}`].filter(Boolean).join(' · '));
+  }
+
+  async function refresh() {
+    if (polling || typeof activity !== 'function') return;
+    const controller = new AbortController();
+    polling = controller;
+    const mine = generation;
+    try {
+      const page = await activity({ after: cursor, signal: controller.signal });
+      if (mine !== generation || !page || !Array.isArray(page.rows)) return;
+      for (const row of page.rows) {
+        if (typeof row?.seq !== 'number' || (cursor >= 0 && row.seq <= cursor)) continue;
+        stripRow(`${boundedText(row.agent, 32).toUpperCase()} · ${boundedText(row.text, 360)}`, row.tone === 'error' ? 'error' : row.tone === 'ok' ? 'ok' : 'info');
+      }
+      const last = page.rows.at(-1);
+      cursor = Math.max(cursor, 0, typeof last?.seq === 'number' ? last.seq : 0, page.rows.length === 0 && typeof page.head === 'number' ? page.head : 0);
+    } catch {
+      // The strip shows what the ledger recorded; a failed poll is retried on the next tick.
+    } finally {
+      if (polling === controller) polling = null;
+    }
+  }
+
+  async function restore() {
+    if (typeof dialogue !== 'function') return;
+    const controller = new AbortController();
+    restoring = controller;
+    const mine = generation;
+    try {
+      const turns = (await dialogue({ signal: controller.signal }))?.turns;
+      if (mine !== generation || !Array.isArray(turns) || turns.length === 0 || log.childElementCount > 1) return;
+      const recent = turns.slice(-RESTORED_TURNS);
+      append('meta', 'CORE', `Restored the last ${recent.length} of ${turns.length} turn${turns.length === 1 ? '' : 's'} from the agent ledger.`);
+      for (const entry of recent) {
+        append('operator', 'YOU', entry?.message);
+        append('agent', 'CLUE', entry?.reply);
+      }
+    } catch {
+      // Without the ledger the console simply starts empty.
+    } finally {
+      if (restoring === controller) restoring = null;
+    }
+  }
+
+  function cancelRequests() {
+    generation += 1;
+    for (const controller of pending) controller.abort();
+    pending.clear();
+    polling?.abort();
+    restoring?.abort();
+    polling = null;
+    restoring = null;
+    turn = null;
   }
 
   function reset() {
-    active?.abort();
-    active = null;
-    history.length = 0;
+    cancelRequests();
     recall.length = 0;
     recallIndex = 0;
     draft = '';
+    cursor = -ACTIVITY_TAIL;
     input.value = '';
-    setBusy(false);
-    receipts.replaceChildren();
-    receipts.hidden = true;
+    form.setAttribute('aria-busy', 'false');
+    strip.replaceChildren();
+    strip.hidden = true;
     log.replaceChildren();
-    append('system', 'CLU-E', 'Console ready. Enter /help for commands, or ask the Master Agent a question.');
+    append('system', 'CORE', READY);
+    void restore();
+    void refresh();
   }
-
-  const actions = new Map([
-    ['/start', { label: 'Cycle drive', run: start }],
-    ['/git sync', { label: 'Git sync', run: gitSync }],
-    ['/status', { label: 'Status', run: status }],
-  ]);
 
   async function submit(event) {
     event.preventDefault();
-    if (active) return;
-    const parsed = parseInput(input.value);
-    if (!parsed) return;
-    const { command, message } = parsed;
+    const message = input.value.trim();
+    if (!message) return;
     if (message.length > INPUT_LIMIT) {
-      append('error', 'CLU-E', `Enter at most ${INPUT_LIMIT} characters.`);
+      append('error', 'CORE', `Enter at most ${INPUT_LIMIT} characters.`);
+      return;
+    }
+    if (findCredentialLeak(message) !== null) {
+      input.value = '';
+      append('error', 'CORE', 'Credentials belong in the configured credential store.');
+      return;
+    }
+    const normalized = message.startsWith('/') ? message.toLowerCase().replace(/\s+/gu, ' ') : null;
+    const command = normalized?.startsWith('/halt ') ? '/halt' : normalized;
+    if (command === null && turn !== null) {
+      append('error', 'CORE', 'CLUE is still working on a turn. Exact commands still run; /halt aborts the turn.');
       return;
     }
     recall.push(message);
@@ -107,49 +214,43 @@ export function mountQ4Terminal({ root, start, gitSync, status, chat }) {
     input.value = '';
     append('operator', 'YOU', message, true);
     if (command === '/help') {
-      append('system', 'CLU-E', HELP);
+      append('system', 'CORE', HELP);
       return;
     }
-
-    const action = actions.get(command);
-    const isChat = command === 'chat';
-    if (!isChat && !action) {
-      append('error', 'CLU-E', 'Unknown CLU-E command. Enter /help to list the supported commands.');
+    if (command !== null && !COMMANDS.has(command)) {
+      append('error', 'CORE', 'Unknown CLU-E command. Enter /help to list the supported commands.');
       return;
     }
-    if (isChat ? typeof chat !== 'function' : typeof action.run !== 'function') {
-      append('error', 'CLU-E', `${isChat ? 'The Master Agent' : action.label} is unavailable.`);
+    if (typeof send !== 'function') {
+      append('error', 'CORE', 'The console is not connected to the dashboard server.');
       return;
     }
 
     const controller = new AbortController();
-    active = controller;
-    setBusy(true);
+    const mine = generation;
+    pending.add(controller);
+    if (command === null) {
+      turn = controller;
+      form.setAttribute('aria-busy', 'true');
+    }
+    let result = null;
     try {
-      const result = isChat
-        ? await chat({ message, history: history.slice(), signal: controller.signal })
-        : await action.run({ signal: controller.signal });
-      if (active !== controller) return;
-      const reply = responseText(result);
-      if (!reply) {
-        append('error', 'CLU-E', 'The dashboard returned no response text.');
-      } else if (isChat) {
-        const failed = result?.ok === false;
-        append(failed ? 'error' : 'agent', failed ? 'CLU-E' : 'MASTER AGENT', reply);
-        if (!failed) {
-          history.push({ role: 'user', text: message }, { role: 'assistant', text: boundedText(reply, INPUT_LIMIT) });
-          if (history.length > HISTORY_LIMIT) history.splice(0, history.length - HISTORY_LIMIT);
-        }
-      } else {
-        append(result?.ok === false ? 'error' : 'system', 'CLU-E', reply);
-      }
-      recordReceipt(result?.action || action?.label, result?.receipt);
+      result = await send({ line: message, command, signal: controller.signal });
+      if (mine !== generation) return;
+      render(result);
     } catch (error) {
-      if (active === controller) append('error', 'CLU-E', error instanceof Error ? error.message : 'Request failed.');
+      if (mine !== generation) return;
+      result = coreFailure(error instanceof Error ? error.message : 'The request failed.');
+      render(result);
     } finally {
-      if (active === controller) {
-        active = null;
-        setBusy(false);
+      pending.delete(controller);
+      if (mine === generation) {
+        if (turn === controller) {
+          turn = null;
+          form.setAttribute('aria-busy', 'false');
+        }
+        void refresh();
+        if (typeof onSettled === 'function') onSettled(result);
       }
     }
   }
@@ -168,11 +269,15 @@ export function mountQ4Terminal({ root, start, gitSync, status, chat }) {
   form.addEventListener('submit', submit);
   input.addEventListener('keydown', recallInput);
   reset();
+  if (typeof activity === 'function' && pollMs > 0) timer = setInterval(() => { void refresh(); }, pollMs);
   return {
     reset,
-    recordReceipt(receipt) { recordReceipt(undefined, receipt); },
+    refresh,
+    recordReceipt,
     destroy() {
-      reset();
+      if (timer !== null) clearInterval(timer);
+      timer = null;
+      cancelRequests();
       form.removeEventListener('submit', submit);
       input.removeEventListener('keydown', recallInput);
     },

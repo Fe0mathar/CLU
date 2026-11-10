@@ -1,0 +1,140 @@
+{
+  "patch": "P02 Durable Start and Recovery",
+  "predecessor": {
+    "sourceCommit": "2b848d5e394e0892264c85b254f25d040d2b5edb",
+    "sourceTree": "d34401b0fac341cfe84253f55ee4212f0ca2b8bc",
+    "file": "CLU-E_Patch_P01A_Windows_Acceptance.zip",
+    "sha256": "bc31e2f564f4bbf5d0be24b4875842296fefe79fbca27b914df4b6ae43a14585"
+  },
+  "files": [
+    {
+      "path": "selftest/clue-dashboard-server-authority.test.ts",
+      "operation": "replace",
+      "expectedBeforeSha256": "fca2b35869ab3e190960c87006eb4b37c5183d92326f51f476cd748b3bdfdddd",
+      "afterSha256": "dc1ac989f23a5ad691c3e1f8e5b1e528c089685f0b9f00495d171212fc923214"
+    },
+    {
+      "path": "selftest/dashboard-cycle-progress.test.ts",
+      "operation": "add",
+      "expectedBeforeSha256": null,
+      "afterSha256": "1cf726ee630827b910ebf665138fbef61533d3fe86ba0ad7315c6295d594f945"
+    },
+    {
+      "path": "selftest/resume-planner.test.ts",
+      "operation": "replace",
+      "expectedBeforeSha256": "88bd6e7d574815ee2b66579dc6312b3748a1aa294b0779747ebdf8075e1c62f3",
+      "afterSha256": "ec155910aa219d15d4f97173a1eef743a9c92ece37389513fa8072a31f62877c"
+    },
+    {
+      "path": "src/cli/commands/cycleCommands.ts",
+      "operation": "replace",
+      "expectedBeforeSha256": "a85ded8a89fcd08530f85731ab73fbaea6ff147f1e2a292c1b629f168abbeb58",
+      "afterSha256": "0662c423881abed6e50240ff6b20915f86f86c3c0ac6888886565afdb6ef998a"
+    },
+    {
+      "path": "src/control/recognitionRun.ts",
+      "operation": "replace",
+      "expectedBeforeSha256": "4773784156ca093acaadd59f20a2a855f1e832641c928d1fbe273a4b62504f6c",
+      "afterSha256": "c155d6fecaedcba82cea7cc4b886b7f86e2bce5924c0b7759e8df3e056cf7c93"
+    },
+    {
+      "path": "src/control/runtime.ts",
+      "operation": "replace",
+      "expectedBeforeSha256": "f46ef9ad78163b04c83be0f68f61b846545bc3482b8ef65f473cff40405d89c3",
+      "afterSha256": "409dd6f170e1be8dfd97fb8e11b34a419e45041476dec08bc3981de79ebe41dd"
+    },
+    {
+      "path": "src/cycle/cycleOrchestrator.ts",
+      "operation": "replace",
+      "expectedBeforeSha256": "c04667a3300605c0546af8988248309de8230911ec494b153960878a8235550f",
+      "afterSha256": "ccf9568ae19940d86ab5320da4df7a0311523f26c3266da1d6061f51fb682c5b"
+    },
+    {
+      "path": "src/cycle/resumePlanner.ts",
+      "operation": "replace",
+      "expectedBeforeSha256": "19c6c1c3e96f3639a0f58d421d404397bd8ee40769b1fb7022987a29116404a6",
+      "afterSha256": "fe4c3dde72d778d740faa777a9440029060b34b5b725b68cbbaea000aa0a46c2"
+    },
+    {
+      "path": "src/daemon/clueDashboardServer.ts",
+      "operation": "replace",
+      "expectedBeforeSha256": "5f9cd5053a65cca9d7f9b6cc7d96779bdec70ca864595b60eb3f777a5dc1fb88",
+      "afterSha256": "7de621ea8c0091b1df67fdc4a17000693058dd986f9d6c7b5ab49913ae119920"
+    },
+    {
+      "path": "src/daemon/dashboardAgent.ts",
+      "operation": "replace",
+      "expectedBeforeSha256": "addf05e3748987b6d3ed68883e4b6a5884503f3f266b77bcd2a8b7acc9e946fb",
+      "afterSha256": "19cbf83297bee21a2cb7ee3a8af5c0752ac0151cd942375e05d4c673df67a3f8"
+    },
+    {
+      "path": "src/daemon/dashboardCycleProgress.ts",
+      "operation": "add",
+      "expectedBeforeSha256": null,
+      "afterSha256": "5d62cbf1e2643b5831ac1cfce16a69926f1b5811591b4bd16c3d72a112795be3"
+    },
+    {
+      "path": "src/memory/db.ts",
+      "operation": "replace",
+      "expectedBeforeSha256": "e88f4e347da2da267f15c74ccdae3edbc3e563c621d3a14fed826583ec0016d1",
+      "afterSha256": "f263fc1546c436dcc098598e15f4cbf1369f9d45942634de236e9ef427bc5d7c"
+    },
+    {
+      "path": "src/memory/eventLog.ts",
+      "operation": "replace",
+      "expectedBeforeSha256": "14c9ff4288a8bf11f09256ecc34d96cd1039441f4dabfce95ee0cd4507170b54",
+      "afterSha256": "692e9ca58fa8e968fa1ef1b1dd040488891e1982f9a1d59a93b614faf5451383"
+    },
+    {
+      "path": "tools/p2-windows-readiness-probe.mjs",
+      "operation": "replace",
+      "expectedBeforeSha256": "ad873deb0ac44d9c282675359a0f078ddb6c578d526fbd63af6cec9ae01f963f",
+      "afterSha256": "9e37b78b2400bf5158e5a631cb001440b712ab5d981093f91780b57ba4503e93"
+    },
+    {
+      "path": "ui/clue-dashboard/app.js",
+      "operation": "replace",
+      "expectedBeforeSha256": "a58e664a210cd5ab24e4cea008142624a4c3ef6e5ae92b6b8f52784d4cf661db",
+      "afterSha256": "3a434430daac267715a257c7d955883286832610f6bf75f2f63f46051acde45a"
+    },
+    {
+      "path": "ui/clue-dashboard/components/ribbon.js",
+      "operation": "replace",
+      "expectedBeforeSha256": "7fcdbf1c5c845d970bf87331a1750baea2a6f8bf4eb25f93db4d5dae69715819",
+      "afterSha256": "e806f562c5bc3de5458d74b35f9bcfc1c35dddce879b24cc2c893f10e0699b75"
+    },
+    {
+      "path": "ui/clue-dashboard/quadrants/q4Terminal.js",
+      "operation": "replace",
+      "expectedBeforeSha256": "8587c83d536fc57ee62ce37be3a5269d070b78cd168a4647433d58ce428aaef1",
+      "afterSha256": "534c83b0a482e324e8efde1c68972714e31c142f4e17712cfbb810762b65bb7c"
+    },
+    {
+      "path": "ui/clue-dashboard/state/runPresentation.js",
+      "operation": "add",
+      "expectedBeforeSha256": null,
+      "afterSha256": "bb99c2bf5a10d9614feafef4086c6c6d12828b1ea27a814cc318d84e4ad22a6a"
+    },
+    {
+      "path": "ui/clue-dashboard/test/q4Terminal.test.mjs",
+      "operation": "replace",
+      "expectedBeforeSha256": "4afd030a64cda622ce465c5032cead690b77619fad4996910571662bbdfc6d5b",
+      "afterSha256": "27006c835a96140910a6caba4819b8c8bead8626339c082054547753586e8420"
+    },
+    {
+      "path": "ui/clue-dashboard/test/ribbon.test.mjs",
+      "operation": "replace",
+      "expectedBeforeSha256": "76aa99c9d72e942219ecc5aaec85199e4897dceb2eb9dcf629395737ef744710",
+      "afterSha256": "af57e12aef67bf78844f66b5da392ffb9340d50142de186c9b91e2ca3f6ec6bb"
+    },
+    {
+      "path": "CLU-E-P02-Durable-Start-Recovery.md",
+      "operation": "add",
+      "expectedBeforeSha256": null,
+      "afterSha256": "b0e809a1eca44074a8479e10379d8408315869994a2c18f1926385c35d39be72"
+    }
+  ],
+  "metadataFiles": [
+    "CLU-E-P02-Manifest.json"
+  ]
+}

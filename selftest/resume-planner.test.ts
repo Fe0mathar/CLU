@@ -20,19 +20,22 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { cpSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { fileURLToPath } from 'node:url';
 import { stringify as stringifyYaml } from 'yaml';
 
 import { withRuntime } from '../src/control/runtime.js';
 import { CycleOrchestrator } from '../src/cycle/cycleOrchestrator.js';
-import { CYCLE_EVENT_TYPES } from '../src/cycle/cycleRegistry.js';
+import { CYCLE_EVENT_TYPES, CycleRegistry } from '../src/cycle/cycleRegistry.js';
+import { makeEntityId, nowIso } from '../src/shared/ids.js';
 import { cycleResumedSchema } from '../src/shared/schemas.js';
 import type { ResumeVerification } from '../src/cycle/resumePlanner.js';
 
-function writeFixture(): string {
-  const root = mkdtempSync(join(tmpdir(), 'clue-resume-'));
+function writeFixture(parent = tmpdir()): string {
+  const root = mkdtempSync(join(parent, 'clue-resume-'));
   writeFileSync(join(root, 'CLUE.md'), '# CLUE\n\nThe constitution, for test purposes.\n', 'utf8');
   writeFileSync(join(root, 'package.json'), JSON.stringify({ name: 'clue-resume-fixture', private: true }), 'utf8');
   mkdirSync(join(root, 'murugan', 'src'), { recursive: true });
@@ -243,6 +246,177 @@ test('§21.2: a successor mission refuses the resume and names §21.4', () => {
           error.message.includes('§21.3'),
       );
       return 0;
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true, maxRetries: 3 });
+  }
+});
+
+test('verified drive continues the same OPENED cycle and leaves suspension to the operator', () => {
+  const root = writeFixture();
+  try {
+    const opened = withRuntime({ withLog: true, repoRoot: root }, (runtime) => {
+      runtime.mission?.bootstrap();
+      const mission = runtime.requireMission();
+      const missionId = mission.requireCurrent().id;
+      assert.ok(runtime.log);
+      return new CycleRegistry({
+        log: runtime.log,
+        projections: runtime.projections,
+        missionVersion: () => missionId,
+      }).open();
+    });
+    withRuntime({ withLog: true, repoRoot: root }, (runtime) => {
+      const orchestrator = new CycleOrchestrator(runtime);
+      const suspended = orchestrator.suspend('operator paused before locking');
+      assert.equal(suspended.suspended_from, 'OPENED');
+      assert.throws(() => orchestrator.drive(null, { verifyRecovery: true }), /is suspended/);
+      const resumed = orchestrator.resume();
+      assert.equal(resumed.id, opened.id);
+      assert.equal(resumed.stage, 'OPENED');
+      const driven = orchestrator.drive(null, { verifyRecovery: true });
+      assert.equal(driven.cycle.id, opened.id);
+      assert.equal(driven.cycle.stage, 'SCREENED');
+      assert.deepEqual(driven.performed.map((step) => step.to), [
+        'INPUTS_LOCKED', 'OPENING_EVIDENCE', 'RECOGNIZED', 'SCREENED',
+      ]);
+      orchestrator.suspend('operator break');
+      assert.throws(() => orchestrator.drive(null, { verifyRecovery: true }), /is suspended/);
+      assert.equal(orchestrator.status()?.stage, 'SUSPENDED');
+      return 0;
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true, maxRetries: 3 });
+  }
+});
+
+test('verified drive refuses source drift at the opening checkpoint and screens its own graph', (t) => {
+  const root = writeFixture();
+  try {
+    const advance = CycleRegistry.prototype.advance;
+    const opening = t.mock.method(CycleRegistry.prototype, 'advance', function (
+      this: CycleRegistry,
+      ...args: Parameters<CycleRegistry['advance']>
+    ) {
+      const cycle = advance.apply(this, args);
+      if (cycle.stage === 'OPENING_EVIDENCE') throw new Error('simulated interruption after opening evidence');
+      return cycle;
+    });
+    const cycleId = withRuntime({ withLog: true, repoRoot: root }, (runtime) => {
+      runtime.mission?.bootstrap();
+      const orchestrator = new CycleOrchestrator(runtime);
+      assert.throws(() => orchestrator.drive(null, { verifyRecovery: true }), /simulated interruption/);
+      const cycle = orchestrator.status();
+      assert.equal(cycle?.stage, 'OPENING_EVIDENCE');
+      return cycle.id;
+    });
+    opening.mock.restore();
+
+    const source = join(root, 'murugan', 'src', 'hello.ts');
+    writeFileSync(source, 'export const answer = 1;\n', 'utf8');
+    withRuntime({ withLog: true, repoRoot: root }, (runtime) => {
+      const orchestrator = new CycleOrchestrator(runtime);
+      assert.throws(
+        () => orchestrator.drive(null, { verifyRecovery: true }),
+        /Recovery refused .* at OPENING_EVIDENCE: source changed since opening evidence/,
+      );
+      assert.equal(orchestrator.status()?.stage, 'OPENING_EVIDENCE');
+      return 0;
+    });
+    writeFileSync(source, 'export const answer = 42;\n', 'utf8');
+
+    const recognized = t.mock.method(CycleRegistry.prototype, 'advance', function (
+      this: CycleRegistry,
+      ...args: Parameters<CycleRegistry['advance']>
+    ) {
+      const cycle = advance.apply(this, args);
+      if (cycle.stage === 'RECOGNIZED') throw new Error('simulated interruption after recognition');
+      return cycle;
+    });
+    withRuntime({ withLog: true, repoRoot: root }, (runtime) => {
+      const orchestrator = new CycleOrchestrator(runtime);
+      assert.throws(() => orchestrator.drive(null, { verifyRecovery: true }), /simulated interruption/);
+      assert.equal(orchestrator.status()?.stage, 'RECOGNIZED');
+      return 0;
+    });
+    recognized.mock.restore();
+
+    withRuntime({ withLog: true, repoRoot: root }, (runtime) => {
+      const orchestrator = new CycleOrchestrator(runtime);
+      assert.ok(runtime.snapshots);
+      writeFileSync(source, 'export const answer = 1;\n', 'utf8');
+      const unrelated = runtime.snapshots.capture({
+        origin: 'canonical', root: join(root, 'murugan'), sourceRoots: ['src'],
+      });
+      assert.equal(runtime.snapshots.latest('canonical')?.id, unrelated.record.id);
+      writeFileSync(source, 'export const answer = 42;\n', 'utf8');
+
+      const driven = orchestrator.drive(null, { verifyRecovery: true });
+      assert.equal(driven.cycle.id, cycleId);
+      assert.equal(driven.cycle.stage, 'SCREENED');
+      assert.deepEqual(driven.performed.map((step) => step.to), ['SCREENED']);
+      return 0;
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true, maxRetries: 3 });
+  }
+});
+
+test('guarded CLI catches up a valid stale projection and refuses a divergent anchor', () => {
+  // The CLI resolves its installation relative to its executable. Keep the fixture below the
+  // test installation so the copied CLI resolves the same dependencies without a symlink.
+  const root = writeFixture(fileURLToPath(new URL('..', import.meta.url)));
+  try {
+    cpSync(fileURLToPath(new URL('../src', import.meta.url)), join(root, 'dist', 'src'), { recursive: true });
+    const run = (...args: string[]) => spawnSync(process.execPath, [
+      join(root, 'dist', 'src', 'cli', 'index.js'), 'cycle', 'drive', ...args,
+    ], { cwd: root, encoding: 'utf8', timeout: 30_000 });
+    const cycleId = makeEntityId('cycle', 1);
+    const oldHead = withRuntime({ withLog: true, repoRoot: root }, (runtime) => {
+      runtime.mission?.bootstrap();
+      const missionVersion = runtime.requireMission().requireCurrent().id;
+      assert.ok(runtime.log);
+      const projected = runtime.projections.status();
+      assert.ok(projected.headHash);
+      // Simulate an interruption after the event commits and before projections sync.
+      runtime.log.append({
+        type: CYCLE_EVENT_TYPES.opened, actor: 'daemon', missionVersion, subjectId: cycleId,
+        payload: { cycle_id: cycleId, mission_version: missionVersion, opened_by: 'daemon', opened_at: nowIso() },
+      });
+      return projected.headHash;
+    });
+
+    const ordinary = run();
+    assert.equal(ordinary.status, 1, ordinary.stdout + ordinary.stderr);
+    assert.match(ordinary.stdout, /Projections lag or diverge/);
+    const wrongBinding = run('--verify-recovery', '--expect-runtime', 'f'.repeat(64));
+    assert.equal(wrongBinding.status, 1, wrongBinding.stdout + wrongBinding.stderr);
+    assert.match(wrongBinding.stdout, /Active project or workspace changed/);
+
+    const divergentHead = '0'.repeat(64);
+    withRuntime({ withLog: true, repoRoot: root }, (runtime) => {
+      assert.equal(runtime.projections.status().headHash, oldHead);
+      assert.equal(new CycleOrchestrator(runtime).status(), null);
+      runtime.projections.db.prepare("UPDATE projection_state SET value = ? WHERE key = 'head_hash'").run(divergentHead);
+    });
+    const divergent = run('--verify-recovery');
+    assert.equal(divergent.status, 1, divergent.stdout + divergent.stderr);
+    assert.match(divergent.stdout, /History was rewritten/);
+    withRuntime({ withLog: true, repoRoot: root }, (runtime) => {
+      assert.equal(runtime.projections.status().headHash, divergentHead);
+      assert.equal(new CycleOrchestrator(runtime).status(), null);
+      runtime.projections.db.prepare("UPDATE projection_state SET value = ? WHERE key = 'head_hash'").run(oldHead);
+    });
+
+    const recovered = run('--verify-recovery');
+    assert.equal(recovered.status, 0, recovered.stdout + recovered.stderr);
+    assert.match(recovered.stdout, new RegExp(`Cycle ${cycleId} at SCREENED`));
+    assert.match(recovered.stdout, /"eventAppends":\{"count":[1-9]/);
+    withRuntime({ withLog: true, repoRoot: root }, (runtime) => {
+      runtime.requireFreshProjections();
+      const cycle = new CycleOrchestrator(runtime).status();
+      assert.equal(cycle?.id, cycleId);
+      assert.equal(cycle.stage, 'SCREENED');
     });
   } finally {
     rmSync(root, { recursive: true, force: true, maxRetries: 3 });
