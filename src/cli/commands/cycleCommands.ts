@@ -29,7 +29,7 @@ import {
 } from '../../control/benchmarkRun.js';
 import { CycleOrchestrator } from '../../cycle/cycleOrchestrator.js';
 import { readCurrentCycle } from '../../cycle/cycleRegistry.js';
-import { hashCanonicalJson } from '../../shared/ids.js';
+import { hashCanonicalJson, requireSha256 } from '../../shared/ids.js';
 import { resolveNavigatorPath } from './recognizeCommands.js';
 import { printChecks, short, write, type Check } from '../output/formatter.js';
 import { guarded as guardedWith } from './shared.js';
@@ -49,6 +49,7 @@ function commandCycleStatus(): number {
     }
     const checks: Check[] = [
       { level: 'ok', label: 'cycle', detail: cycle.id },
+      { level: 'info', label: 'mission', detail: cycle.mission_version },
       {
         level: cycle.stage === 'SUSPENDED' ? 'warn' : 'ok',
         label: 'stage',
@@ -64,7 +65,7 @@ function commandCycleStatus(): number {
       {
         level: 'info',
         label: 'lock digest',
-        detail: cycle.lock_digest === null ? 'none' : short(cycle.lock_digest),
+        detail: cycle.lock_digest ?? 'none',
       },
       { level: 'info', label: 'opened', detail: cycle.opened_at },
     ];
@@ -153,6 +154,24 @@ function commandCycleResume(): number {
   return withRuntime({ withLog: true, verifyLog: 'tail' }, (runtime) => {
     const cycle = new CycleOrchestrator(runtime).resume();
     write(`Cycle ${cycle.id} resumed at ${cycle.stage}.`);
+    return 0;
+  });
+}
+
+function commandCycleRestart(
+  cycleId: string,
+  options: { readonly expectMission: string; readonly expectLock: string },
+): number {
+  const lockDigest = requireSha256(options.expectLock, '--expect-lock');
+  return withRuntime({
+    withLog: true, verifyLog: 'full', allowStaleHeartbeatReclaim: false, requireMission: false,
+  }, (runtime) => {
+    runtime.projections.catchUpVerified(runtime.requireLog());
+    const { cycle, created } = new CycleOrchestrator(runtime).restart({
+      cycleId, missionVersion: options.expectMission, lockDigest,
+    });
+    write(`${cycleId} ${created ? 'superseded' : 'already superseded'} by ${cycle.id} under ${cycle.mission_version}.`);
+    write(`Cycle ${cycle.id} at ${cycle.stage} (${cycle.grade ?? 'ungraded'}).`);
     return 0;
   });
 }
@@ -267,5 +286,13 @@ export function registerCycleCommands(program: Command): void {
     .description('return a suspended cycle to the stage it remembers')
     .action(() => {
       process.exitCode = runGuarded(() => commandCycleResume());
+    });
+  cycle
+    .command('restart <cycle-id>')
+    .description('preserve a screened diagnostic cycle as history and open a new cycle for its successor mission')
+    .requiredOption('--expect-mission <mission-id>', 'require this exact current successor mission')
+    .requiredOption('--expect-lock <sha256>', 'require the complete lock digest from cycle status')
+    .action((cycleId: string, options: { expectMission: string; expectLock: string }) => {
+      process.exitCode = runGuarded(() => commandCycleRestart(cycleId, options));
     });
 }

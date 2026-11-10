@@ -98,7 +98,7 @@ import {
   type CycleStage,
 } from '../shared/schemas.js';
 import type { EventLog } from '../memory/eventLog.js';
-import { CYCLE_EVENT_TYPES, CycleRegistry } from './cycleRegistry.js';
+import { CYCLE_EVENT_TYPES, CycleRegistry, type CycleRestartExpectation } from './cycleRegistry.js';
 import { computeInputLock } from './cycleInputLock.js';
 import { verifyResume } from './resumePlanner.js';
 import { buildNextCycleVitalInput } from './nextCycleVitalInput.js';
@@ -170,6 +170,18 @@ export class CycleOrchestrator {
   /** The stage machine's record of truth, for callers that only ask. */
   public status(): CycleRecord | null {
     return this.registry.current();
+  }
+
+  public restart(expected: CycleRestartExpectation): { readonly cycle: CycleRecord; readonly created: boolean } {
+    this.runtime.requireFreshProjections();
+    const missions = this.runtime.requireMission();
+    const current = missions.requireCurrent();
+    const previous = this.registry.get(expected.cycleId);
+    if (current.id !== expected.missionVersion || previous === null ||
+        missions.get(previous.mission_version)?.superseded_by !== current.id) {
+      throw new Error('Restart requires the exact current mission to directly supersede the selected cycle mission.');
+    }
+    return this.registry.restart(expected);
   }
 
   /** The operator's suspension (§21.1): recorded with its reason, refused by the registry

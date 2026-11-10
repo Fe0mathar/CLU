@@ -1,7 +1,7 @@
 /** The proof command broker. Production execution always goes through an OS boundary. */
 import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, delimiter, dirname, isAbsolute, join, relative, sep } from 'node:path';
+import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { performance } from 'node:perf_hooks';
 
 import type { ExecFn } from './benchmarkRunner.js';
@@ -10,6 +10,11 @@ import { describeWindowsSupervisorRefusal, resolveWindowsSupervisor, type Window
 import { requireWindowsSupervisorQualification } from './windowsSupervisorQualification.js';
 import { windowsNodeEntryArgs } from './windowsNodeEntry.js';
 import { hashBytes, type Sha256 } from '../shared/ids.js';
+import {
+  BENCHMARK_PROFILE_INPUTS_FILE,
+  isBenchmarkProfileCommand,
+  type PreparedBenchmarkProfileInputs,
+} from '../control/projectProfiles/benchmarkProfileInputs.js';
 
 export type ExecutionBoundary =
   | { readonly kind: 'linux-bwrap'; readonly sha256: Sha256 }
@@ -65,6 +70,7 @@ interface Scope {
   readonly projectRoot: string;
   readonly workspaceRoot: string;
   readonly mode: 'baseline' | 'candidate';
+  readonly benchmarkProfileInputs?: PreparedBenchmarkProfileInputs;
 }
 
 /** Returns a per-run broker and its private writable temporary state. */
@@ -73,6 +79,12 @@ export function createRestrictedExecution(scope: Scope): { exec: ExecFn; dispose
   const repoRoot = directory(scope.repoRoot);
   const cwd = directory(scope.projectRoot);
   const workspaceRoot = directory(scope.workspaceRoot);
+  const profileInputs = scope.benchmarkProfileInputs;
+  if (profileInputs !== undefined && (boundary.kind !== 'windows-supervisor' || scope.mode !== 'baseline' ||
+      relative(repoRoot, cwd) !== '')) {
+    throw new Error('Profile-bound benchmark inputs require the Windows self-target baseline boundary.');
+  }
+  const profileInputsSha = profileInputs === undefined ? null : hashBytes(profileInputs.bytes);
   const node = realpathSync.native(process.execPath);
   const nodeBin = dirname(node);
   const nodeRoot = process.platform === 'linux' && basename(nodeBin) === 'bin' && !['/usr/bin', '/bin'].includes(nodeBin)
@@ -210,6 +222,17 @@ export function createRestrictedExecution(scope: Scope): { exec: ExecFn; dispose
       throw new Error('The proof command broker accepts only Node and approved npm invocations.');
     }
 
+    const [entry, ...cliArgs] = args;
+    const profileCommand = profileInputsSha !== null && operation === 'Node workload' &&
+      entry !== undefined && !entry.startsWith('-') &&
+      relative(join(repoRoot, 'dist', 'src', 'cli', 'index.js'), resolve(cwd, entry)) === '';
+    if (profileCommand) {
+      if (!isBenchmarkProfileCommand(cliArgs)) {
+        throw new Error('The profile-bound benchmark requested an unapproved CLU-E command.');
+      }
+      args = [join(repoRoot, 'dist', 'src', 'benchmark', 'benchmarkProfileWorker.js'), profileInputsSha, ...cliArgs];
+    }
+
     const timeoutMs = Math.ceil(timeoutSeconds * 1000);
     const options = { cwd, env, timeoutMs, ...(opts?.signal === undefined ? {} : { signal: opts.signal }) };
     if (boundary.kind === 'linux-bwrap') {
@@ -239,9 +262,16 @@ export function createRestrictedExecution(scope: Scope): { exec: ExecFn; dispose
     };
     const requestDir = mkdtempSync(join(requestRoot, 'request-'));
     const requestFile = join(requestDir, 'request.json');
+    const profileInputPath = join(childTemp, BENCHMARK_PROFILE_INPUTS_FILE);
+    let stagedProfile = false;
     let heartbeat: ReturnType<typeof setInterval> | undefined;
     const label = showProgress ? `[CLU-E proof ${scope.mode} #${++visibleCommandCount}] ${operation}` : null;
     try {
+      if (profileCommand && profileInputs !== undefined) {
+        profileInputs.verifyCurrent();
+        writeFileSync(profileInputPath, profileInputs.bytes, { flag: 'wx', mode: 0o600 });
+        stagedProfile = true;
+      }
       writeFileSync(requestFile, JSON.stringify(request), { flag: 'wx', mode: 0o600 });
       if (label !== null) {
         const started = performance.now();
@@ -267,7 +297,11 @@ export function createRestrictedExecution(scope: Scope): { exec: ExecFn; dispose
       return result;
     } finally {
       if (heartbeat !== undefined) clearInterval(heartbeat);
-      rmSync(requestDir, { recursive: true, force: true });
+      try {
+        if (stagedProfile) rmSync(profileInputPath, { force: true });
+      } finally {
+        rmSync(requestDir, { recursive: true, force: true });
+      }
     }
   };
   return { exec, dispose, boundary };

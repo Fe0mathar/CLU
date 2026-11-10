@@ -25,7 +25,8 @@ import {
 } from '../../shared/projectOperationIdentity.js';
 import type { WorkspaceProjectIdentityInput } from '../../memory/db.js';
 import { assertProjectProfileHash } from './profileHash.js';
-import { assertProjectStatePaths } from './projectPathIsolation.js';
+import { assertBenchmarkWorkspacePaths, assertProjectStatePaths } from './projectPathIsolation.js';
+import { isBenchmarkWorkerProfile } from './benchmarkProfileInputs.js';
 import { inspectProjectAuthority, type ProjectAuthoritySnapshot } from './projectAuthority.js';
 import { assessAuthorityConflicts, type AuthorityConflictAssessment } from './authorityConflict.js';
 import {
@@ -98,7 +99,8 @@ export function resolveProjectRuntimeBinding(
   }
 
   try {
-    assertProjectStatePaths(record.profile);
+    if (isBenchmarkWorkerProfile(record)) assertBenchmarkWorkspacePaths(record.profile);
+    else assertProjectStatePaths(record.profile);
   } catch (error) {
     throw new ProjectRuntimeBindingError(
       'PROFILE_STATE_PATH_INVALID',

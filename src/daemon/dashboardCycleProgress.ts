@@ -13,6 +13,7 @@ import {
 
 const checkpointKinds = [
   CYCLE_EVENT_TYPES.opened,
+  CYCLE_EVENT_TYPES.restarted,
   CYCLE_EVENT_TYPES.inputsLocked,
   CYCLE_EVENT_TYPES.stageAdvanced,
   CYCLE_EVENT_TYPES.suspended,

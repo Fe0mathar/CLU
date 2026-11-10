@@ -80,12 +80,13 @@ type Db = Database.Database;
  * Version 10 (PP-26): Model Gateway call/provider projections bind Project Profile identity
  * and durable profile generation. Rebuild is required so pre-profile rows cannot masquerade
  * as project-bound evidence merely because additive columns exist at runtime.
+ * Version 11: cycle restart relationships preserve predecessor cycles outside the active slot.
  *
  * PP-09 adds non-projection workspace ownership metadata without changing this version. The
  * singleton is not derived from the event log, so adding it must not invalidate or rebuild the
  * projection surface of an existing workspace.
  */
-export const PROJECTION_SCHEMA_VERSION = 10;
+export const PROJECTION_SCHEMA_VERSION = 11;
 
 const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS projection_state (

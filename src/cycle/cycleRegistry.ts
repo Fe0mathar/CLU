@@ -32,6 +32,7 @@
  *   HANDOFF          → CLOSED             `cycle.closed`          (carries §24, met or unmet)
  *   any live stage   → SUSPENDED          `cycle.suspended`       (remembers where it was)
  *   SUSPENDED        → suspended_from     `cycle.resumed`
+ *   SCREENED        → new OPENED cycle   `cycle.restarted`       (preserves predecessor)
  *
  * Legality is enforced at write time; the projector replays trustingly, because an event
  * that reached the log passed the gate when it was written and the log is the truth.
@@ -39,9 +40,9 @@
  * ## Serial by design
  *
  * Execution Model §1 makes cycles sequential: each accepted state is the next cycle's
- * baseline. `open()` therefore refuses while any cycle is unclosed — including a suspended
- * one, which must be resumed and closed (or closed from HANDOFF after resuming) before a
- * new campaign begins. Two concurrent cycles would mean two competing baselines.
+ * baseline. `open()` therefore refuses while a cycle is active, even if suspended.
+ * A restart replaces the active slot with a new cycle and keeps the predecessor's
+ * stage and evidence intact. Two concurrent cycles would mean two competing baselines.
  */
 
 import {
@@ -50,17 +51,20 @@ import {
   cycleInputsLockedSchema,
   cycleOpenedSchema,
   cycleRecordSchema,
+  cycleRestartedSchema,
   cycleResumedSchema,
   cycleStageAdvancedSchema,
   cycleSuspendedSchema,
   parseOrThrow,
   type ArtifactRef,
+  type Actor,
   type CycleInputLock,
+  type CycleOpened,
   type CycleRecord,
   type CycleStage,
   type CycleClosed,
 } from '../shared/schemas.js';
-import { makeEntityId, nowIso } from '../shared/ids.js';
+import { makeEntityId, nowIso, type Sha256 } from '../shared/ids.js';
 import type { EventLog } from '../memory/eventLog.js';
 import type Database from 'better-sqlite3';
 import type { ProjectionModule, ProjectionStore } from '../memory/db.js';
@@ -75,6 +79,7 @@ import type { EventRecord } from '../shared/schemas.js';
 /** The cycle domain's event namespace (plan D5), mirroring `authority.*`. */
 export const CYCLE_EVENT_TYPES = {
   opened: 'cycle.opened',
+  restarted: 'cycle.restarted',
   inputsLocked: 'cycle.inputs_locked',
   stageAdvanced: 'cycle.stage_advanced',
   suspended: 'cycle.suspended',
@@ -149,7 +154,19 @@ CREATE TABLE IF NOT EXISTS cycles (
   criteria_met    INTEGER,
   unmet_count     INTEGER
 );
+CREATE TABLE IF NOT EXISTS cycle_restarts (
+  previous_cycle_id TEXT PRIMARY KEY,
+  successor_cycle_id TEXT NOT NULL UNIQUE
+);
 `;
+
+function projectOpenedCycle(db: Db, payload: CycleOpened): void {
+  db.prepare(
+    `INSERT INTO cycles (id, mission_version, stage, suspended_from, grade, lock_digest,
+                         opened_at, updated_at, closed_at)
+     VALUES (?, ?, 'OPENED', NULL, NULL, NULL, ?, ?, NULL)`,
+  ).run(payload.cycle_id, payload.mission_version, payload.opened_at, payload.opened_at);
+}
 
 /**
  * The cycle projection module. Registered into the `ProjectionStore` at construction, so a
@@ -161,15 +178,28 @@ export const CYCLE_PROJECTION: ProjectionModule = {
   install(db: Db): void {
     db.exec(CYCLE_SCHEMA_SQL);
   },
-  tables: ['cycles'],
+  tables: ['cycles', 'cycle_restarts'],
   projectors: {
     [CYCLE_EVENT_TYPES.opened]: (db: Db, record: EventRecord): void => {
       const payload = parseOrThrow(cycleOpenedSchema, record.payload, `${record.id} cycle.opened`);
+      projectOpenedCycle(db, payload);
+    },
+    [CYCLE_EVENT_TYPES.restarted]: (db: Db, record: EventRecord): void => {
+      const payload = parseOrThrow(cycleRestartedSchema, record.payload, `${record.id} cycle.restarted`);
+      const previous = db.prepare(
+        `SELECT id FROM cycles
+         WHERE id = ? AND mission_version = ? AND lock_digest = ?
+           AND stage = 'SCREENED' AND grade = 'diagnostic'`,
+      ).get(payload.previous_cycle_id, payload.previous_mission_version, payload.previous_lock_digest);
+      if (previous === undefined || record.subject_id !== payload.successor.cycle_id ||
+          record.mission_version !== payload.successor.mission_version ||
+          record.actor !== 'cli' || payload.successor.opened_by !== 'cli') {
+        throw new Error(`${record.id} cycle.restarted disagrees with its predecessor or event identity.`);
+      }
       db.prepare(
-        `INSERT INTO cycles (id, mission_version, stage, suspended_from, grade, lock_digest,
-                             opened_at, updated_at, closed_at)
-         VALUES (?, ?, 'OPENED', NULL, NULL, NULL, ?, ?, NULL)`,
-      ).run(payload.cycle_id, payload.mission_version, payload.opened_at, payload.opened_at);
+        'INSERT INTO cycle_restarts (previous_cycle_id, successor_cycle_id) VALUES (?, ?)',
+      ).run(payload.previous_cycle_id, payload.successor.cycle_id);
+      projectOpenedCycle(db, payload.successor);
     },
     [CYCLE_EVENT_TYPES.inputsLocked]: (db: Db, record: EventRecord): void => {
       const payload = parseOrThrow(
@@ -240,7 +270,11 @@ export const CYCLE_PROJECTION: ProjectionModule = {
  */
 export function readCurrentCycle(projections: ProjectionStore): CycleRecord | null {
   const row = projections.db
-    .prepare("SELECT * FROM cycles WHERE stage != 'CLOSED' ORDER BY opened_at DESC LIMIT 1")
+    .prepare(
+      `SELECT * FROM cycles WHERE stage != 'CLOSED' AND NOT EXISTS (
+         SELECT 1 FROM cycle_restarts WHERE previous_cycle_id = cycles.id
+       ) ORDER BY opened_at DESC LIMIT 1`,
+    )
     .get();
   return row === undefined ? null : parseOrThrow(cycleRecordSchema, row, 'current cycle row');
 }
@@ -307,6 +341,12 @@ export interface CycleRegistryDeps {
   readonly missionVersion: () => string;
 }
 
+export interface CycleRestartExpectation {
+  readonly cycleId: string;
+  readonly missionVersion: string;
+  readonly lockDigest: Sha256;
+}
+
 export class CycleRegistry {
   private readonly log: EventLog;
   private readonly projections: ProjectionStore;
@@ -325,12 +365,9 @@ export class CycleRegistry {
     return row === undefined ? null : parseOrThrow(cycleRecordSchema, row, `cycle row ${cycleId}`);
   }
 
-  /** The unclosed cycle, or null. Serial cycles mean there is at most one. */
+  /** The active cycle, or null. Restarted predecessors remain historical. */
   public current(): CycleRecord | null {
-    const row = this.projections.db
-      .prepare("SELECT * FROM cycles WHERE stage != 'CLOSED' ORDER BY opened_at DESC LIMIT 1")
-      .get();
-    return row === undefined ? null : parseOrThrow(cycleRecordSchema, row, 'current cycle row');
+    return readCurrentCycle(this.projections);
   }
 
   public list(): CycleRecord[] {
@@ -342,7 +379,7 @@ export class CycleRegistry {
 
   /* ------------------------------- moves ------------------------------- */
 
-  /** Opens a new cycle. Refused while any cycle is unclosed (Execution Model §1). */
+  /** Opens a new cycle. Refused while a cycle is active (Execution Model §1). */
   public open(): CycleRecord {
     const unclosed = this.current();
     if (unclosed !== null) {
@@ -353,10 +390,7 @@ export class CycleRegistry {
         `a cycle is already in progress at ${unclosed.stage}; cycles are serial — close it first`,
       );
     }
-    const count = this.projections.db.prepare('SELECT COUNT(*) AS n FROM cycles').get() as {
-      n: number;
-    };
-    const cycleId = makeEntityId('cycle', count.n + 1);
+    const cycleId = this.nextCycleId();
     const payload = parseOrThrow(
       cycleOpenedSchema,
       {
@@ -369,6 +403,43 @@ export class CycleRegistry {
     );
     this.append(CYCLE_EVENT_TYPES.opened, payload, cycleId);
     return this.mustGet(cycleId);
+  }
+
+  /** Replaces an old diagnostic slot with a fresh cycle in one durable event (§21.3). */
+  public restart(expected: CycleRestartExpectation): { readonly cycle: CycleRecord; readonly created: boolean } {
+    const previous = this.get(expected.cycleId);
+    const mission = this.missionVersion();
+    if (previous === null || previous.stage !== 'SCREENED' || previous.grade !== 'diagnostic' ||
+        previous.lock_digest !== expected.lockDigest || mission !== expected.missionVersion ||
+        previous.mission_version === mission) {
+      throw new CycleTransitionError(expected.cycleId, previous?.stage ?? null, 'OPENED',
+        'restart requires the exact screened diagnostic cycle, its full lock digest, and a successor mission');
+    }
+    const existingId = this.restartSuccessorId(previous.id);
+    if (existingId !== null) {
+      const existing = this.get(existingId);
+      if (existing === null || existing.mission_version !== mission) {
+        throw new Error(`Restart of ${previous.id} disagrees with the current mission.`);
+      }
+      return { cycle: existing, created: false };
+    }
+    if (this.current()?.id !== previous.id) {
+      throw new CycleTransitionError(previous.id, previous.stage, 'OPENED', 'only the active cycle can be restarted');
+    }
+    const successorId = this.nextCycleId();
+    const payload = parseOrThrow(cycleRestartedSchema, {
+      previous_cycle_id: previous.id,
+      previous_mission_version: previous.mission_version,
+      previous_lock_digest: previous.lock_digest,
+      successor: {
+        cycle_id: successorId,
+        mission_version: mission,
+        opened_by: 'cli',
+        opened_at: nowIso(),
+      },
+    }, 'cycle.restarted');
+    this.append(CYCLE_EVENT_TYPES.restarted, payload, successorId, 'cli');
+    return { cycle: this.mustGet(successorId), created: true };
   }
 
   /** Locks the inputs (OPENED → INPUTS_LOCKED). The lock's own schema keeps the grade honest. */
@@ -480,18 +551,34 @@ export class CycleRegistry {
 
   /* ----------------------------- internals ----------------------------- */
 
+  private nextCycleId(): string {
+    const { n } = this.projections.db.prepare('SELECT COUNT(*) AS n FROM cycles').get() as { n: number };
+    return makeEntityId('cycle', n + 1);
+  }
+
+  private restartSuccessorId(cycleId: string): string | null {
+    const row = this.projections.db.prepare(
+      'SELECT successor_cycle_id FROM cycle_restarts WHERE previous_cycle_id = ?',
+    ).get(cycleId) as { successor_cycle_id: string } | undefined;
+    return row?.successor_cycle_id ?? null;
+  }
+
   private mustGet(cycleId: string): CycleRecord {
     const cycle = this.get(cycleId);
     if (cycle === null) {
       throw new CycleTransitionError(cycleId, null, null, 'unknown cycle');
     }
+    const successorId = this.restartSuccessorId(cycleId);
+    if (successorId !== null) {
+      throw new CycleTransitionError(cycleId, cycle.stage, null, `superseded by ${successorId}`);
+    }
     return cycle;
   }
 
-  private append(type: string, payload: unknown, subjectId: string): void {
+  private append(type: string, payload: unknown, subjectId: string, actor: Actor = 'daemon'): void {
     this.log.append({
       type,
-      actor: 'daemon',
+      actor,
       missionVersion: this.missionVersion(),
       subjectId,
       payload,

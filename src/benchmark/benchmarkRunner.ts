@@ -70,6 +70,10 @@ import { hashBytes, nowIso, type Sha256 } from '../shared/ids.js';
 import { executeBenchmarkHarness } from './benchmarkHarnessProcess.js';
 import { createRestrictedExecution, type ExecutionBoundary } from './restrictedExecution.js';
 import {
+  isBenchmarkProfileContract,
+  type PreparedBenchmarkProfileInputs,
+} from '../control/projectProfiles/benchmarkProfileInputs.js';
+import {
   readBenchmarkContract,
   readExecutionPolicy,
   selectHarnessBlock,
@@ -277,6 +281,8 @@ export interface RunOptions {
   /** Production candidate callers may supply an already-bound restricted command broker. */
   readonly executionBoundary?: ExecutionBoundary;
   readonly mode?: 'baseline' | 'candidate';
+  /** Captured by the host from the verified v3 self-target mission. */
+  readonly benchmarkProfileInputs?: PreparedBenchmarkProfileInputs;
   readonly environment?: BenchmarkResult['environment'];
   readonly log?: (line: string) => void;
 }
@@ -341,6 +347,10 @@ export async function runMasterBenchmark(options: RunOptions): Promise<RunOutcom
 
   const read = readBenchmarkContract(text);
   if ('error' in read) return { ok: false, stage: 'contract', reason: read.error };
+  if (options.benchmarkProfileInputs !== undefined && (!isBenchmarkProfileContract(hashBytes(bytes)) ||
+      read.identity.benchmark_id !== 'clu-master' || read.identity.benchmark_version !== '0.2.0')) {
+    return { ok: false, stage: 'contract', reason: 'Supervised profile inputs require the exact clu-master@0.2.0 contract.' };
+  }
 
   const policyRead = readExecutionPolicy(text);
   if ('error' in policyRead) return { ok: false, stage: 'contract', reason: policyRead.error };
@@ -397,6 +407,9 @@ export async function runMasterBenchmark(options: RunOptions): Promise<RunOutcom
         projectRoot: options.projectRoot,
         workspaceRoot: options.workspaceRoot,
         mode: options.mode ?? 'baseline',
+        ...(options.benchmarkProfileInputs === undefined ? {} : {
+          benchmarkProfileInputs: options.benchmarkProfileInputs,
+        }),
       });
       boundary = restricted.boundary;
     }

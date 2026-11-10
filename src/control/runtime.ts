@@ -133,6 +133,7 @@ import {
 } from '../experiment/console/consoleLedger.js';
 import { createAttributor, makeUnitLocator, type SourceMapProvider } from '../experiment/console/attribution.js';
 import { loadActiveProjectProfileForStartup, readActiveProjectProfileForBenchmark } from './projectProfiles/projectProfileStartup.js';
+import { benchmarkWorkerMission, benchmarkWorkerProfile } from './projectProfiles/benchmarkProfileInputs.js';
 import { projectStatusFromRuntime } from '../status/statusFromRuntime.js';
 
 /* ------------------------------------------------------------------------- */
@@ -465,12 +466,12 @@ export function loadLegacyConfig(repoRoot: string): ClueConfig {
  */
 export function loadConfig(repoRoot: string, options: { readonly resolvePaths?: boolean } = {}): ClueConfig {
   const installationConfig = loadLegacyConfig(repoRoot);
-  const startup = loadActiveProjectProfileForStartup(repoRoot);
-  const config = startup === null
+  const profile = benchmarkWorkerProfile(repoRoot) ?? loadActiveProjectProfileForStartup(repoRoot)?.record ?? null;
+  const config = profile === null
     ? installationConfig
-    : resolveProjectRuntimeBinding(installationConfig, startup.record).config;
+    : resolveProjectRuntimeBinding(installationConfig, profile).config;
   return options.resolvePaths === true
-    ? resolveConfigPaths(config, repoRoot, { projectProfileBound: startup !== null })
+    ? resolveConfigPaths(config, repoRoot, { projectProfileBound: profile !== null })
     : config;
 }
 
@@ -888,7 +889,7 @@ function globToRegExp(glob: string): RegExp {
 function resolveRuntimeConfig(options: RuntimeOptions, observeProfile = false) {
   const repoRoot = options.repoRoot ?? findRepoRoot();
   const installationConfig = loadLegacyConfig(repoRoot);
-  const selectedProfile = options.projectProfile ?? (observeProfile
+  const selectedProfile = options.projectProfile ?? benchmarkWorkerProfile(repoRoot) ?? (observeProfile
     ? readActiveProjectProfileForBenchmark(repoRoot)
     : loadActiveProjectProfileForStartup(repoRoot)?.record ?? null);
   const projectBinding =
@@ -1331,11 +1332,15 @@ export function withRuntime<T>(options: RuntimeOptions, work: (runtime: Runtime)
     // consumed. An explicit option keeps its word; silence defaults to what the dispatched
     // command declared; callers outside a CLI dispatch (daemon, tests, scripts) see null
     // and behave exactly as before the flip.
-    if (options.requireMission ?? activeCommandMissionRequirement() ?? false) {
+    const benchmarkMission = benchmarkWorkerMission();
+    if (benchmarkMission !== null || (options.requireMission ?? activeCommandMissionRequirement() ?? false)) {
       // Gate before the command body: no committed mission (or stale projections) means no
       // authoritative event may be written under it.
       runtime.requireMission();
       runtime.requireFreshProjections();
+      if (benchmarkMission !== null && runtime.currentMissionId() !== benchmarkMission) {
+        throw new Error('Supervised benchmark mission changed.');
+      }
     }
     return work(runtime);
   } finally {

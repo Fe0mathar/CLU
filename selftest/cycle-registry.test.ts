@@ -30,7 +30,10 @@ import {
   CYCLE_PROJECTION,
   CycleRegistry,
   CycleTransitionError,
+  readLastClosure,
 } from '../src/cycle/cycleRegistry.js';
+import { requireSha256 } from '../src/shared/ids.js';
+import { createDashboardCycleProgress } from '../src/daemon/dashboardCycleProgress.js';
 import {
   cycleClosedSchema,
   type CycleInputLock,
@@ -49,7 +52,10 @@ interface Stack {
   dispose(): void;
 }
 
-function openStack(root = mkdtempSync(join(tmpdir(), 'clue-cycle-'))): Stack {
+function openStack(
+  root = mkdtempSync(join(tmpdir(), 'clue-cycle-')),
+  missionVersion = () => 'MISSION-000001',
+): Stack {
   mkdirSync(join(root, 'events'), { recursive: true });
   const projections = new ProjectionStore(join(root, 'cycle.db'), {
     modules: [CYCLE_PROJECTION],
@@ -58,7 +64,7 @@ function openStack(root = mkdtempSync(join(tmpdir(), 'clue-cycle-'))): Stack {
   const registry = new CycleRegistry({
     log,
     projections,
-    missionVersion: () => 'MISSION-000001',
+    missionVersion,
   });
   return {
     root,
@@ -268,6 +274,73 @@ test('S2: suspend remembers the stage, resume returns exactly there, and a close
 /* ========================================================================= */
 /* The rows are a convenience; the events are the truth                       */
 /* ========================================================================= */
+
+test('§21.3: a state-bound restart preserves its screened predecessor and replays atomically', () => {
+  let mission = 'MISSION-000001';
+  const stack = openStack(undefined, () => mission);
+  try {
+    const cycle = stack.registry.open();
+    const lock = diagnosticLock();
+    stack.registry.lockInputs(cycle.id, lock);
+    for (const stage of ['OPENING_EVIDENCE', 'RECOGNIZED', 'SCREENED'] as const) {
+      stack.registry.advance(cycle.id, stage, null);
+    }
+    const previous = stack.registry.get(cycle.id);
+    const expected = {
+      cycleId: cycle.id,
+      missionVersion: 'MISSION-000002',
+      lockDigest: requireSha256(lock.digest, 'test lock digest'),
+    };
+    const before = stack.log.getHead();
+    assert.throws(() => stack.registry.restart(expected), /exact screened diagnostic cycle/);
+    mission = expected.missionVersion;
+    assert.throws(
+      () => stack.registry.restart({ ...expected, lockDigest: requireSha256('e'.repeat(64), 'wrong digest') }),
+      /exact screened diagnostic cycle/,
+    );
+    assert.deepEqual(stack.log.getHead(), before, 'refusals never add a restart event');
+    const restarted = stack.registry.restart(expected);
+    assert.equal(restarted.created, true);
+    assert.equal(restarted.cycle.id, 'CYCLE-000002');
+    assert.equal(restarted.cycle.mission_version, mission);
+    assert.equal(restarted.cycle.stage, 'OPENED');
+    assert.equal(restarted.cycle.lock_digest, null);
+    assert.equal(stack.log.getHead()?.sequence, (before?.sequence ?? 0) + 1);
+    assert.deepEqual(stack.registry.get(cycle.id), previous);
+    assert.equal(readLastClosure(stack.projections), null, 'supersession is not a §24 closure');
+    assert.equal(stack.registry.current()?.id, restarted.cycle.id);
+    assert.throws(() => stack.registry.open(), /cycles are serial/);
+    assert.throws(() => stack.registry.advance(cycle.id, 'CLOSING_EVIDENCE', null), /superseded by CYCLE-000002/);
+
+    const rebuilt = new ProjectionStore(join(stack.root, 'restart-replay.db'), { modules: [CYCLE_PROJECTION] });
+    try {
+      rebuilt.sync(stack.log);
+      const replayed = new CycleRegistry({ log: stack.log, projections: rebuilt, missionVersion: () => mission });
+      assert.deepEqual(replayed.get(cycle.id), previous);
+      assert.deepEqual(replayed.current(), restarted.cycle);
+      const status = createDashboardCycleProgress({ projections: rebuilt, currentMissionId: () => mission }).read();
+      assert.equal(status?.checkpoint?.kind, CYCLE_EVENT_TYPES.restarted);
+      assert.equal(status?.recoverable, true);
+      const head = stack.log.getHead();
+      assert.deepEqual(replayed.restart(expected), { cycle: restarted.cycle, created: false });
+      assert.deepEqual(stack.log.getHead(), head, 'retry never adds another restart event');
+    } finally {
+      rebuilt.close();
+    }
+
+    const successor = restarted.cycle.id;
+    stack.registry.lockInputs(successor, diagnosticLock());
+    for (const stage of ['OPENING_EVIDENCE', 'RECOGNIZED', 'SCREENED', 'CLOSING_EVIDENCE', 'HANDOFF'] as const) {
+      stack.registry.advance(successor, stage, null);
+    }
+    stack.registry.close(successor, ['diagnostic cycle']);
+    assert.equal(stack.registry.current(), null, 'closing the successor cannot revive its predecessor');
+    assert.equal(readLastClosure(stack.projections)?.cycleId, successor);
+  } finally {
+    stack.dispose();
+    rmSync(stack.root, { recursive: true, force: true, maxRetries: 3 });
+  }
+});
 
 test('S2: a fresh projection replays the same log into identical rows', () => {
   const stack = openStack();

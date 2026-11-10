@@ -1666,6 +1666,21 @@ export const cycleOpenedSchema = z
   .strict();
 export type CycleOpened = z.infer<typeof cycleOpenedSchema>;
 
+export const cycleRestartedSchema = z
+  .object({
+    previous_cycle_id: entityIdSchema,
+    previous_mission_version: z.string().min(1),
+    previous_lock_digest: sha256Schema,
+    successor: cycleOpenedSchema,
+  })
+  .strict()
+  .refine(
+    (value) =>
+      value.previous_cycle_id !== value.successor.cycle_id &&
+      value.previous_mission_version !== value.successor.mission_version,
+    { message: 'a restart requires a distinct cycle and a successor mission' },
+  );
+
 export const cycleInputsLockedSchema = z
   .object({ cycle_id: entityIdSchema, lock: cycleInputLockSchema })
   .strict();

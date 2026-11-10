@@ -19,6 +19,7 @@ import type { ProjectProfile, ProjectProfileRecord } from '../../shared/schemas.
 import type { ProjectOperationIdentity } from '../../shared/projectOperationIdentity.js';
 import { operationIdentityFromProfileRecord } from '../../shared/projectOperationIdentity.js';
 import { computeProjectAuthorityHash, computeProjectRecognitionHash } from './profileHash.js';
+import { benchmarkWorkerAuthority } from './benchmarkProfileInputs.js';
 
 export const PROJECT_AUTHORITY_MANIFEST_VERSION = 'clue-project-authority-manifest/1' as const;
 export const PROJECT_AUTHORITY_SNAPSHOT_VERSION = 'clue-project-authority-snapshot/1' as const;
@@ -137,7 +138,7 @@ export function inspectProjectAuthority(record: ProjectProfileRecord): ProjectAu
   }
 
   for (const binding of orderedBindings(profile)) {
-    const result = evaluateBinding(profile, binding);
+    const result = evaluateBinding(record, binding);
     evaluated.push(result.document);
     if (result.issue !== null) issues.push(result.issue);
   }
@@ -212,8 +213,13 @@ export function readActiveAuthorityDocuments(record: ProjectProfileRecord): read
   const manifest = requireCurrentProjectAuthority(record);
   return manifest.documents.map((document) => ({
     document,
-    text: readFileSync(nativePath(document.canonicalPath), 'utf8'),
+    text: readProjectAuthorityBytes(record, document).toString('utf8'),
   }));
+}
+
+/** Worker reads only its exact staged bytes; ordinary runtime reads the live canonical file. */
+export function readProjectAuthorityBytes(record: ProjectProfileRecord, document: ActiveAuthorityDocument): Buffer {
+  return benchmarkWorkerAuthority(record, document.bindingId) ?? readFileSync(nativePath(document.canonicalPath));
 }
 
 function buildManifest(
@@ -227,7 +233,7 @@ function buildManifest(
 }
 
 function evaluateBinding(
-  profile: ProjectProfile,
+  record: ProjectProfileRecord,
   binding: AuthorityBinding,
 ): { readonly document: EvaluatedAuthorityDocument; readonly issue: ProjectAuthorityIssue | null } {
   const base: Omit<EvaluatedAuthorityDocument, 'canonicalPath' | 'observedSha256' | 'bytes' | 'state'> = {
@@ -269,9 +275,23 @@ function evaluateBinding(
     };
   }
 
+  const staged = benchmarkWorkerAuthority(record, binding.bindingId);
+  if (staged !== null) {
+    return {
+      document: {
+        ...base,
+        canonicalPath: normalisePathDisplay(binding.canonicalPath),
+        observedSha256: hashBytes(staged),
+        bytes: staged.byteLength,
+        state: 'CURRENT',
+      },
+      issue: null,
+    };
+  }
+
   const configuredAbsolute = isAbsolute(nativePath(binding.path))
     ? nativePath(binding.path)
-    : resolve(nativePath(profile.targetRoot), nativePath(binding.path));
+    : resolve(nativePath(record.profile.targetRoot), nativePath(binding.path));
   const declaredAbsolute = nativePath(binding.canonicalPath);
 
   let configuredCanonical: string;

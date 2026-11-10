@@ -28,6 +28,18 @@ export function resolveProjectOperatingZones(profile: ProjectProfile) {
 /** Revalidate after registration: aliases and links can appear before the next runtime open. */
 export function assertProjectStatePaths(profile: ProjectProfile): void {
   const [, workspace] = resolveProjectOperatingZones(profile);
+  assertWorkspaceStatePaths(profile, workspace);
+}
+
+/** A benchmark worker cannot access shadow or browser roots already verified by its host. */
+export function assertBenchmarkWorkspacePaths(profile: ProjectProfile): void {
+  const target = resolvePathIdentity(profile.targetRoot, { zone: 'target', expectedKind: 'directory' });
+  const workspace = resolvePathIdentity(profile.workspaceRoot, { zone: 'workspace', expectedKind: 'directory' });
+  assertPathZonesDisjoint([target, workspace]);
+  assertWorkspaceStatePaths(profile, workspace);
+}
+
+function assertWorkspaceStatePaths(profile: ProjectProfile, workspace: ResolvedPathIdentity): void {
   assertUnredirected(workspace, 'directory');
 
   const { databasePath, eventLogRoot, artifactStoreRoot, greatBookScope: _scope, ...directories } = profile.state;

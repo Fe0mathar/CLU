@@ -448,6 +448,15 @@ export const COMMAND_AUTHORITIES: readonly CommandAuthority[] = [
       'own lock — a diagnostic ending recorded, never implied',
   },
   {
+    command: 'cycle restart',
+    capability: 'fs.write.workspace',
+    mutates: true,
+    requiresMission: true,
+    rationale:
+      'Execution Model §21.3: explicitly replace a screened diagnostic cycle under a ' +
+      'superseded mission with a fresh identity, preserving the predecessor and its lock',
+  },
+  {
     command: 'benchmark run',
     capability: 'fs.write.workspace',
     mutates: true,

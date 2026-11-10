@@ -48,6 +48,13 @@ import {
   type ProjectGovernanceBasis,
 } from './projectProfiles/projectGovernanceBasis.js';
 import { resolveProjectRecognition } from './projectProfiles/projectRecognition.js';
+import {
+  captureBenchmarkProfileInputs,
+  isBenchmarkProfileContract,
+  type PreparedBenchmarkProfileInputs,
+} from './projectProfiles/benchmarkProfileInputs.js';
+import { requireCurrentProjectAuthority } from './projectProfiles/projectAuthority.js';
+import { readActiveProjectProfileForBenchmark } from './projectProfiles/projectProfileStartup.js';
 import { captureSnapshot } from '../analysis/source/snapshot.js';
 import { requireProofExecutionBoundary } from '../benchmark/restrictedExecution.js';
 import { assertExactRunInputs, captureExactRunInputs, type ExactRunInputs } from './exactRunInputs.js';
@@ -296,6 +303,7 @@ export async function performBenchmarkRun(deps: {
     readonly bytes: Buffer;
     readonly subject: BenchmarkRunSubject;
     readonly head: PerformedRun['log_head_before'];
+    readonly profileInputs: PreparedBenchmarkProfileInputs | null;
   };
   try {
     if (!deps.contract.registered) throw new Error('Execution requires the registered Master Benchmark. Run clue benchmark run without --contract.');
@@ -303,7 +311,13 @@ export async function performBenchmarkRun(deps: {
     // Runtime assembles the proof-board projection, which imports the event identity here.
     // The preparation phase runs only after those modules have finished loading.
     const { withRuntime } = await import('./runtime.js');
-    prepared = withRuntime({ repoRoot: deps.repoRoot, withLog: false, requireMission: true }, (runtime) => {
+    const activeProfile = process.platform === 'win32' ? readActiveProjectProfileForBenchmark(deps.repoRoot) : null;
+    prepared = withRuntime({
+      repoRoot: deps.repoRoot,
+      withLog: false,
+      requireMission: true,
+      ...(activeProfile === null ? {} : { projectProfile: activeProfile }),
+    }, (runtime) => {
       const bytes = readFileSync(deps.contract.path);
       const subject = prepareBenchmarkRunSubject(runtime, deps.contract, bytes);
       if (
@@ -316,7 +330,36 @@ export async function performBenchmarkRun(deps: {
       }
       const eventsDir = runtime.projectState?.eventLogRoot ?? join(runtime.workspaceRoot, 'events');
       const head = existsSync(eventsDir) ? EventLog.readHead(eventsDir) : null;
-      return { bytes, subject, head: head === null ? null : { sequence: head.sequence, hash: head.hash } };
+      let profileInputs: PreparedBenchmarkProfileInputs | null = null;
+      if (activeProfile !== null && isBenchmarkProfileContract(subject.contract_sha256)) {
+        const binding = runtime.projectBinding;
+        if (binding === null || binding.authority.manifest === null ||
+            binding.authorityConflicts.state !== 'CLEAR' || binding.benchmarkRuntime.state !== 'READY') {
+          throw new Error('Supervised benchmark needs current and verified Project Profile authority.');
+        }
+        const manifest = binding.authority.manifest;
+        profileInputs = {
+          bytes: captureBenchmarkProfileInputs({
+            repoRoot: subject.repo_root,
+            missionVersion: subject.mission_version,
+            record: activeProfile,
+            documents: manifest.documents,
+          }),
+          verifyCurrent: () => {
+            const current = readActiveProjectProfileForBenchmark(subject.repo_root);
+            if (current === null || canonicalJson(current) !== canonicalJson(activeProfile) ||
+                requireCurrentProjectAuthority(current).manifestHash !== manifest.manifestHash) {
+              throw new Error('Active profile or exact authority changed during the supervised benchmark.');
+            }
+          },
+        };
+      }
+      return {
+        bytes,
+        subject,
+        head: head === null ? null : { sequence: head.sequence, hash: head.hash },
+        profileInputs,
+      };
     });
   } catch (error) {
     return {
@@ -326,15 +369,23 @@ export async function performBenchmarkRun(deps: {
       subject: null,
     };
   }
-  const outcome = await runMasterBenchmark({
+  let outcome = await runMasterBenchmark({
     repoRoot: prepared.subject.repo_root,
     projectRoot: prepared.subject.project_root,
     workspaceRoot: prepared.subject.workspace_root,
     contractPath: prepared.subject.contract_path,
     contractBytes: prepared.bytes,
+    ...(prepared.profileInputs === null ? {} : { benchmarkProfileInputs: prepared.profileInputs }),
     baseline: deps.baseline ?? null,
     ...(deps.log === undefined ? {} : { log: deps.log }),
   });
+  if (outcome.ok && prepared.profileInputs !== null) {
+    try {
+      prepared.profileInputs.verifyCurrent();
+    } catch (error) {
+      outcome = { ok: false, stage: 'subject', reason: error instanceof Error ? error.message : String(error) };
+    }
+  }
   return {
     outcome,
     contract: deps.contract,

@@ -252,6 +252,65 @@ test('§21.2: a successor mission refuses the resume and names §21.4', () => {
   }
 });
 
+test('§21.3: cycle restart binds the exact prior lock and current successor mission', () => {
+  const root = writeFixture(fileURLToPath(new URL('..', import.meta.url)));
+  try {
+    cpSync(fileURLToPath(new URL('../src', import.meta.url)), join(root, 'dist', 'src'), { recursive: true });
+    const run = (...args: string[]) => spawnSync(process.execPath, [
+      join(root, 'dist', 'src', 'cli', 'index.js'), 'cycle', ...args,
+    ], { cwd: root, encoding: 'utf8', timeout: 30_000 });
+
+    const previous = withRuntime({ withLog: true, repoRoot: root }, (runtime) => {
+      runtime.mission?.bootstrap();
+      return new CycleOrchestrator(runtime).drive().cycle;
+    });
+    assert.equal(previous.grade, 'diagnostic');
+    assert.equal(previous.stage, 'SCREENED');
+    assert.ok(previous.lock_digest);
+    const status = run('status');
+    assert.equal(status.status, 0, status.stdout + status.stderr);
+    assert.ok(status.stdout.includes(previous.lock_digest), 'operator can review the complete lock');
+
+    const restart = (mission: string) => run(
+      'restart', previous.id, '--expect-mission', mission, '--expect-lock', previous.lock_digest ?? '',
+    );
+    const beforeSupersession = restart(previous.mission_version);
+    assert.equal(beforeSupersession.status, 1);
+    assert.match(beforeSupersession.stdout, /directly supersede/);
+
+    writeFileSync(join(root, 'CLUE.md'), '# CLUE\n\nAmended for the restart test.\n', 'utf8');
+    const successorMission = withRuntime({ withLog: true, repoRoot: root }, (runtime) =>
+      runtime.mission?.bootstrap().mission.id);
+    assert.ok(successorMission);
+    const moved = restart(previous.mission_version);
+    assert.equal(moved.status, 1);
+    assert.match(moved.stdout, /directly supersede/);
+    const restarted = restart(successorMission);
+    assert.equal(restarted.status, 0, restarted.stdout + restarted.stderr);
+    assert.match(restarted.stdout, /CYCLE-000001 superseded by CYCLE-000002/);
+    assert.match(restarted.stdout, /CYCLE-000002 at OPENED/);
+    const retried = restart(successorMission);
+    assert.equal(retried.status, 0, retried.stdout + retried.stderr);
+    assert.match(retried.stdout, /already superseded/);
+
+    withRuntime({ withLog: true, repoRoot: root }, (runtime) => {
+      const orchestrator = new CycleOrchestrator(runtime);
+      assert.equal(orchestrator.status()?.lock_digest, null);
+      const driven = orchestrator.drive(null, { verifyRecovery: true });
+      assert.equal(driven.cycle.id, 'CYCLE-000002');
+      assert.equal(driven.cycle.mission_version, successorMission);
+      assert.equal(driven.cycle.stage, 'SCREENED');
+      assert.ok(driven.cycle.lock_digest);
+      assert.notEqual(driven.cycle.lock_digest, previous.lock_digest);
+      const events = [...runtime.requireLog().replay()];
+      assert.equal(events.filter((entry) => entry.type === CYCLE_EVENT_TYPES.restarted).length, 1);
+      assert.equal(events.filter((entry) => entry.type === CYCLE_EVENT_TYPES.closed).length, 0);
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true, maxRetries: 3 });
+  }
+});
+
 test('verified drive continues the same OPENED cycle and leaves suspension to the operator', () => {
   const root = writeFixture();
   try {

@@ -1,6 +1,6 @@
 /** Project-scoped Benchmark Runtime resolution and Master Benchmark consistency checks. */
 
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, statSync } from 'node:fs';
 import { isAbsolute, relative } from 'node:path';
 
 import {
@@ -14,6 +14,7 @@ import { normalisePathDisplay } from '../../shared/pathIdentity.js';
 import type { ProjectProfileRecord } from '../../shared/schemas.js';
 import { computeProjectBenchmarkRuntimeHash } from './profileHash.js';
 import type { ProjectAuthorityManifest } from './projectAuthority.js';
+import { readProjectAuthorityBytes } from './projectAuthority.js';
 
 export const PROJECT_BENCHMARK_RUNTIME_VERSION = 'clue-project-benchmark-runtime/1' as const;
 
@@ -110,7 +111,7 @@ export function resolveProjectBenchmarkRuntime(
       detail: 'No current active Master Benchmark is available.',
     });
   } else {
-    const text = readFileSync(nativePath(activeBenchmark.canonicalPath), 'utf8');
+    const text = readProjectAuthorityBytes(record, activeBenchmark).toString('utf8');
     const contract = readBenchmarkContract(text);
     if ('error' in contract) {
       issues.push({
