@@ -99,7 +99,7 @@ export function renderGitEditor(snapshot) {
     <details data-cfg-details="git-advanced"><summary>Advanced Git settings</summary>
       <p class="cfg-note">Edit these by hand only when the three steps above do not fit, for example a non-GitHub provider.</p>
       <div class="cfg-form-grid">
-      ${field('integrations.git.publicationMode', { label: 'Publication Mode', control: select('integrations.git.publicationMode', git?.publicationMode, ['NO_REMOTE_YET', 'LOCAL_ONLY', 'REMOTE_REGISTERED']), note: 'NO_REMOTE_YET: none decided. LOCAL_ONLY: deliberately local. REMOTE_REGISTERED: publishes to the remote below.' })}
+      ${field('integrations.git.publicationMode', { label: 'Publication Mode', control: select('integrations.git.publicationMode', git?.publicationMode, ['NO_REMOTE_YET', 'LOCAL_ONLY', 'REMOTE_REGISTERED']), note: 'NO_REMOTE_YET: none decided. LOCAL_ONLY: deliberately local. REMOTE_REGISTERED: enables explicit Sync Git with the remote below.' })}
       ${field('integrations.git.provider', { label: 'Provider', control: select('integrations.git.provider', git?.provider ?? '', [{ value: '', label: 'NONE' }, 'github', 'gitlab', 'azure-devops', 'other'], { kind: 'nullable' }) })}
       ${field('integrations.git.remote', { label: 'Remote', wide: true, control: textInput('integrations.git.remote', git?.remote ?? '', { placeholder: 'origin URL or registered remote identity' }), note: 'Must remain blank when publication mode is NO_REMOTE_YET.' })}
       ${field('integrations.git.defaultBranch', { label: 'Default Branch', required: true, control: textInput('integrations.git.defaultBranch', git?.defaultBranch ?? 'main') })}

@@ -81,23 +81,71 @@ function withFacts(overrides: Partial<P2ClosureFacts>): P2ClosureFacts {
   return { ...completeFacts, ...overrides };
 }
 
-test('P2-CLOSURE-03: the shipped policy remains an explicit Creator decision, not an implicit default', () => {
+test('P2-CLOSURE-03: the shipped policy records explicit Creator decisions for the model and remote', () => {
   const parsed = p2ClosurePolicySchema.parse(
     parseYaml(readFileSync('config/policies/p2-closure.yaml', 'utf8')),
   );
   assert.equal(parsed.gateway.decision, 'OPERATIONAL');
-  assert.equal(parsed.gateway.decision_id, 'P2-D4-OPENAI-GPT-5.6-SOL');
-  assert.equal(parsed.gateway.recorded_at, '2026-11-07');
+  assert.equal(parsed.gateway.decision_id, 'P2-D4-OPENAI-GPT-6-ASTRA');
+  assert.equal(parsed.gateway.recorded_at, '2026-11-11');
   assert.equal(parsed.gateway.recorded_by, 'creator');
-  assert.equal(parsed.gateway.model, 'gpt-5.6-sol');
+  assert.equal(parsed.gateway.model, 'gpt-6-astra');
   assert.equal(parsed.gateway.budget_authority, 'OPENAI_PLATFORM');
   assert.equal(parsed.gateway.local_budget_enforced, false);
   assert.equal(parsed.gateway.provider_exhaustion_action, 'CONTROLLED_PAUSE');
   assert.equal(parsed.gateway.remaining_token_authority, 'PROVIDER_ONLY');
+  assert.equal(parsed.publication?.decision, 'REMOTE_REGISTERED');
+  assert.equal(parsed.publication?.decision_id, 'P2-D5-REGISTERED-REMOTE');
+  assert.equal(parsed.publication?.recorded_at, '2026-11-11');
+  assert.equal(parsed.publication?.recorded_by, 'creator');
   assert.deepEqual(parsed.p3_deferrals, {
     project_intent_model: true,
     environment_adapters: true,
   });
+});
+
+test('P07: explicit remote registration and the exact Astra model satisfy only their own gates', () => {
+  const policy = p2ClosurePolicySchema.parse(parseYaml(readFileSync('config/policies/p2-closure.yaml', 'utf8')));
+  const activeProfile = withFacts({
+    remoteDecision: 'REMOTE_REGISTERED',
+    localOnly: false,
+    gatewayEnabled: true,
+    gatewayOperationallyReady: true,
+    gatewayEnabledRouteCount: 12,
+    gatewayBudgetAuthority: 'openai_platform',
+    gatewayLocalBudgetEnforced: false,
+    gatewayModel: 'gpt-6-astra',
+  });
+  assert.deepEqual(decideP2Closure(policy, activeProfile), { state: 'CLOSED', closed: true, blockers: [] });
+  for (const mismatch of [
+    { remoteDecision: null },
+    { remoteDecision: 'NO_REMOTE_YET', localOnly: true },
+    { localOnly: true },
+    { publicationPermitted: true },
+  ]) {
+    const decision = decideP2Closure(policy, { ...activeProfile, ...mismatch });
+    assert.deepEqual(decision.blockers.map(({ id }) => id), ['P2-REMOTE-POLICY']);
+    assert.equal(decision.closed, false);
+  }
+  assert.deepEqual(
+    decideP2Closure(policy, { ...activeProfile, gatewayModel: 'gpt-5.6-sol' }).blockers.map(({ id }) => id),
+    ['P2-D4-OPERATIONAL-CONTRADICTION'],
+  );
+  assert.deepEqual(
+    decideP2Closure(policy, { ...activeProfile, ratificationCurrent: false }).blockers.map(({ id }) => id),
+    ['P2-RATIFICATION'],
+  );
+  assert.ok(!p2ClosurePolicySchema.safeParse({
+    ...policy, publication: { decision: 'REMOTE_REGISTERED' },
+  }).success);
+});
+
+test('P07: legacy policy without an explicit D5 choice still refuses a registered remote', () => {
+  const decision = decideP2Closure(safeDisabledPolicy, withFacts({
+    remoteDecision: 'REMOTE_REGISTERED',
+    localOnly: false,
+  }));
+  assert.deepEqual(decision.blockers.map(({ id }) => id), ['P2-REMOTE-ABSENCE']);
 });
 
 test('P2-CLOSURE-03: a pending D4 decision cannot be called ready or closed', () => {

@@ -1,7 +1,8 @@
 # CLU-E RPI Documentation Pack v9 — Validation Report
 
 **Release:** 9.0
-**Validation dates:** 2026-08-04 pack validation and 2026-08-14 executable-alignment validation. Section 11 records the 2026-11-07 ADR-0020 candidate.  
+**Validation dates:** 2026-08-04 pack validation and 2026-08-14 executable-alignment validation. Sections 11 and 12 record the November successor candidates.
+
 **Result:** Historical pack validation **PASS** within the scope and limitations in §6.  
 **Scope:** Repair verification of the corrupted v8 deployment, name/content realignment, cross-reference and catalogue integrity, Part II integration, governance, templates, seal preparation and executable alignment.  
 
@@ -173,3 +174,10 @@ binds the manifest. The v10 pack remains a separate deferred candidate.
 The live model-access check uses the operator's provider project and key. Inference still requires
 an exact provider response identity. Live access, Creator ratification and a current evidence epoch
 remain separate gates from the documentation and local runtime checks.
+
+## 12. ADR-0021 candidate authority
+
+The amended v9 manifest records the AI, Git, interface and governance document revisions for the
+successor P2 mission. The Windows Status and P2 assessment for `MISSION-000007` provided the
+evidence for the proposed exact model and registered-remote decision. The new pack requires
+interactive Creator ratification and new mission-bound proof evidence before formal P2 closure.

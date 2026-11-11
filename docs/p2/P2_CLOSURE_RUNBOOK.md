@@ -11,7 +11,7 @@ P2 is complete only when the live system proves:
 
 ```text
 ratificationCurrent = true
-epochName = P2-authoritative
+epochName = P2-authoritative or P2-authoritative-<mission-id>
 epochCurrent = true
 proofAttempts >= 1
 verdicts >= 1
@@ -99,7 +99,9 @@ PowerShell/Host:
 
 Git:
   repository root matches F:\CLU\CLU
-  publication state is NO_REMOTE_YET
+  profile remote matches its registered identity
+  ADR-0021 successor expects REMOTE_REGISTERED
+  governed publication remains disabled during P2
   no automatic fetch/pull/push occurred
 
 Chrome, only when required by the selected proof:
@@ -109,15 +111,16 @@ Chrome, only when required by the selected proof:
 
 GPT:
   provider = openai
-  requestedModel = gpt-5.6-sol
-  effectiveModel = gpt-5.6-sol
+  requestedModel = gpt-6-astra
+  effectiveModel = gpt-6-astra
   fallbackUsed = false
   apiKeyPresent = true
   operationallyReady = true
   problem = null
 ```
 
-Do not paste the API key into reports or commands. The runtime resolves `OPENAI_API_KEY` from the environment.
+The model must equal the active mission's policy pin. The values above are for ADR-0021.
+Keep the API key in the configured host credential facility and out of reports and commands.
 
 ## 6. Active and deferred authority
 
@@ -142,23 +145,26 @@ implementationRequiredForP2Closure = false
 
 ## 7. Ratification and epoch
 
-Ratification and epoch sealing are deliberate Creator acts and remain interactive.
+Ratification and epoch sealing are interactive Creator acts. Register the successor mission
+first when the policy or documentation pack changes. Replace the mission ID below with the one
+reported by the active installation.
 
 ```powershell
 cd F:\CLU\CLU
 node dist/src/cli/index.js docs ratify
-node dist/src/cli/index.js epoch seal P2-authoritative
+node dist/src/cli/index.js epoch seal 'P2-authoritative-<mission-id>'
 ```
 
 Verify live Status/API evidence:
 
 ```text
 ratificationCurrent = true
-epochName = P2-authoritative
+epochName = P2-authoritative-<mission-id>
 epochCurrent = true
 ```
 
-Do not continue if the ratified seal differs from the manifest captured in `01-authority`.
+Confirm the ratified seal against the manifest captured in `01-authority`. Use the reviewed
+Windows proof launchers prepared for that exact successor mission, profile, source and seal.
 
 ## 8. First authoritative proof candidate
 

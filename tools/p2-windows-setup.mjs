@@ -5,7 +5,7 @@ import { lstatSync, mkdirSync, realpathSync, statSync } from 'node:fs';
 import { dirname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadConfig, resolveConfigPaths } from '../dist/src/control/runtime.js';
-import { P2_OPENAI_MODEL as approvedModel, readP2ClosurePolicy } from '../dist/src/control/p2ClosurePolicy.js';
+import { P2_EXACT_OPENAI_MODELS, readP2ClosurePolicy } from '../dist/src/control/p2ClosurePolicy.js';
 import { assessGatewayPolicy, loadGatewayPolicies } from '../dist/src/ai/gateway/policy.js';
 import { OpenAiGatewayError, OpenAiResponsesAdapter } from '../dist/src/ai/gateway/openaiAdapter.js';
 import { resolveWindowsSupervisor } from '../dist/src/benchmark/windowsExecutionSupervisor.js';
@@ -71,6 +71,7 @@ function prepare(config) {
 
 async function checkGateway(config, output) {
   const decision = readP2ClosurePolicy(root).policy.gateway;
+  const approvedModel = decision.model;
   const policies = loadGatewayPolicies(root, config);
   const assessment = assessGatewayPolicy(config, policies);
   const base = {
@@ -88,7 +89,7 @@ async function checkGateway(config, output) {
   const key = process.env.OPENAI_API_KEY?.trim();
   if (!assessment.apiKeyPresent) {
     state = 'CREDENTIAL_MISSING';
-  } else if (key && decision.decision === 'OPERATIONAL' && decision.model === approvedModel &&
+  } else if (key && decision.decision === 'OPERATIONAL' && P2_EXACT_OPENAI_MODELS.includes(approvedModel) &&
       assessment.operationallyReady && assessment.spendAuthority === 'openai_platform' &&
       assessment.preferredModel === approvedModel &&
       policies.routing.api.base_url.replace(/\/+$/u, '') === 'https://api.openai.com/v1' &&

@@ -12,7 +12,7 @@ import {
 } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { parse as parseYaml } from 'yaml';
+import { readP2ClosureContext } from './p2-closure-context.mjs';
 import { externalReportPath, writeExternalReport } from './verification-support.mjs';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -38,10 +38,6 @@ function argument(flag) {
   const value = process.argv[index + 1];
   if (value === undefined || value.startsWith('--')) throw new Error(`${flag} requires a value`);
   return value;
-}
-
-function readYaml(path) {
-  return parseYaml(readFileSync(path, 'utf8'));
 }
 
 function documentationPack() {
@@ -131,8 +127,7 @@ function fileBinding(path, role, activeForP2Proof) {
   };
 }
 
-const configPath = join(repoRoot, 'config', 'clue.config.yaml');
-const config = readYaml(configPath);
+const { config, profile, policySha256, gateway, publication } = await readP2ClosureContext(repoRoot);
 const activeDocs = Array.isArray(config?.constitution?.tracked_documents)
   ? config.constitution.tracked_documents
   : [];
@@ -151,9 +146,6 @@ const deferredPaths = [
   'docs/source-authority/CLUE_P2_AND_PROJECT_PROFILES_FILE_BY_FILE_COMPLETION_STRATEGY_2026-08-14.md',
 ];
 
-const routing = readYaml(join(repoRoot, config.gateway.routing_file));
-const models = [...new Set(Object.values(routing.routes ?? {}).filter((route) => route?.enabled).map((route) => route.model).filter(Boolean))];
-const budget = readYaml(join(repoRoot, config.gateway.budget_policy_file));
 const tree = inventoryFiles();
 const treePayload = {
   schemaVersion: 'clue-p2-final-tree-inventory/1',
@@ -190,27 +182,26 @@ const context = {
   schemaVersion: 'clue-p2-closure-context/1',
   generatedAt: treePayload.generatedAt,
   project: {
-    targetRootConfigured: config?.project?.active_target ?? null,
-    workspaceRoot: config?.workspace?.root ?? null,
-    shadowRoot: config?.shadow?.root ?? null,
-    projectProfilesSelectorPresent: existsSync(join(repoRoot, 'config', 'project-profiles.yaml')),
+    targetId: config.project.id,
+    targetRootConfigured: config.project.root,
+    workspaceRoot: config.workspace.root,
+    shadowRoot: config.shadow.root,
+    projectProfilesSelectorPresent: profile !== null,
+    profileGeneration: profile?.generation ?? null,
+    projectProfileHash: profile?.projectProfileHash ?? null,
   },
   publication: {
-    expectedState: 'NO_REMOTE_YET',
-    localOnly: true,
-    publicationPermitted: false,
+    expectedState: publication.intendedState,
+    ...publication,
   },
   gateway: {
-    provider: config?.gateway?.provider ?? null,
-    requestedModels: models,
-    apiKeyReference: config?.gateway?.api_key_env ? `env:${config.gateway.api_key_env}` : null,
-    apiKeyPresent: Boolean(config?.gateway?.api_key_env && process.env[config.gateway.api_key_env]),
-    spendAuthority: budget?.spend_authority ?? null,
+    ...gateway,
     secretIncluded: false,
   },
   authority: {
     activeManifestFile: activeManifestName,
     deferredManifestFile: deferredManifestName,
+    closurePolicySha256: policySha256,
   },
   finalTree: {
     inventoryFile: inventoryName,
@@ -226,4 +217,7 @@ writeExternalReport(repoRoot, join(outputDir, contextName), { ...context, finalT
 process.stdout.write(`P2 closure inventory written to ${outputDir}\n`);
 process.stdout.write(`  files: ${treePayload.fileCount}\n`);
 process.stdout.write(`  active authority complete: ${String(activeManifest.complete)}\n`);
-process.stdout.write(`  OPENAI_API_KEY present: ${String(context.gateway.apiKeyPresent)}\n`);
+const credential = profile === null
+  ? `${config.gateway.api_key_env} present: ${String(gateway.apiKeyPresent)}`
+  : `Project Profile credential reference configured: ${String(gateway.credentialReferenceConfigured)}; live check pending`;
+process.stdout.write(`  ${credential}\n`);

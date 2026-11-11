@@ -1,7 +1,9 @@
 # CLU-E P2 Closure Runbook
 
-**Runbook version:** 1.3  
-**Prepared:** 2026-08-14  
+**Runbook version:** 1.4
+
+**Prepared:** 2026-08-14. ADR-0021 alignment on 2026-11-11.
+
 **Purpose:** convert the engineering-complete and Creator-configured P2 tree into one formally
 closed, evidence-backed state without allowing configuration, UI or scripts to invent a verdict.
 
@@ -27,13 +29,14 @@ Restart the dashboard/terminal process after setting it.
 
 CLU-E does not configure or enforce the monetary budget. OpenAI Platform remains the sole budget
 and credit authority. Local zero caps are compatibility fields, not a disabled gateway. The exact
-route model is `gpt-5.6-sol`. The adapter checks that identity before use and refuses fallback.
+route model for the ADR-0021 successor is `gpt-6-astra`. The adapter checks that identity before
+use and refuses fallback.
 
 Run the final browser probe. Before governance/evidence ceremony, a healthy state is:
 
 ```text
 integrationPass: true
-model: gpt-5.6-sol
+model: gpt-6-astra
 budgetAuthority: openai_platform
 localBudgetEnforced: false
 providerPaused: false
@@ -66,15 +69,16 @@ the normal verified cycle-resume act; provider recovery never resumes it automat
 
 ## 4. Manual Git Sync
 
-`SYNC GIT` is separate from `START CLU-E`. With the current `NO_REMOTE_YET` decision it must return
-`NO_REMOTE_CONFIGURED` and contact nothing. When a remote is later registered, it permits only:
+`SYNC GIT` is separate from `START CLU-E`. The ADR-0021 successor expects the registered remote
+in the active Project Profile. With a registered remote, operator-initiated Sync Git permits:
 
 - no change;
 - ahead-only push;
 - behind-only fast-forward.
 
-Dirty, detached or diverged state is refused. This action is not proof, landing or P4 governed Git
-lifecycle authority. The final P2 cycle remains local-first and requires no remote.
+Dirty, detached or diverged state is refused. A legacy `NO_REMOTE_YET` profile reports
+`NO_REMOTE_CONFIGURED` without contacting the remote. P2 proof and closure are local-first.
+The full publication, landing and recovery lifecycle remains P4 scope.
 
 ## 5. Ratify the amended documentation pack
 
@@ -90,15 +94,17 @@ Read the preview and type the exact phrase printed by the command:
 RATIFY <12-character state token>
 ```
 
-There is intentionally no non-interactive bypass. This is the explicit Creator approval of the
-ADR-0017 bytes, exact model/budget policy, local-first Git boundary and P3 deferrals.
+The interactive act records explicit Creator approval of the installed bytes, exact model and
+budget policy, registered remote decision and P3 deferrals. Register the successor mission
+before ratifying an amended pack.
 
 ## 6. Seal the P2 evidence epoch
 
-After ratification:
+After ratification, use the mission-specific name for a successor. Replace the mission ID
+with the one reported by the active installation.
 
 ```powershell
-node dist/src/cli/index.js epoch seal P2-authoritative
+node dist/src/cli/index.js epoch seal 'P2-authoritative-<mission-id>'
 ```
 
 Type the exact `SEAL <token>` phrase. The epoch must stand on the latest ratification and current

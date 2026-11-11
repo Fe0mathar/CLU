@@ -140,6 +140,7 @@ Documentation validation establishes internal coherence of this knowledge base. 
 The permanent v9 pack has additive executable-alignment amendments through Status wire 5.7.0.
 ADR-0017 records the operational OpenAI gateway boundary, provider-side monetary authority,
 controlled billing-exhaustion pause, exact token-use telemetry and manual local-first Git Sync.
-ADR-0020 proposes `gpt-5.6-sol` as the exact legacy P2 model. The governance record in §19 explains
-the model check, Creator ratification and evidence epoch. P2 closure also requires a real
-proof-authoritative ACCEPT cycle.
+ADR-0021 proposes the verified `gpt-6-astra` model and registered Git remote for the successor
+P2 mission. Documentation Governance §20 explains the successor mission, Creator ratification
+and evidence epoch. Formal closure requires a new proof-authoritative ACCEPT cycle under that
+mission.

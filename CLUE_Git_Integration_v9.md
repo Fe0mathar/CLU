@@ -2,7 +2,8 @@
 ## Full Git Lifecycle, Branch Isolation, Remote Synchronization, and Cloud Publication Contract
 
 **Document status:** permanent normative Git and cloud lifecycle domain contract  
-**Revision:** 9.1 (pack release 9.0) — revision 2.0 content preserved at the v9 re-baseline; amended 2026-08-14 under ADR-0017 to define the narrow manual local-first sync boundary while retaining the complete governed Git lifecycle as P4 scope.  
+**Revision:** 9.2 (pack release 9.0). Revision 2.0 content was preserved at the v9 re-baseline. ADR-0017 established manual local-first sync, and ADR-0021 proposes P2 registration of the selected remote. The complete governed Git lifecycle is P4 scope.
+
 **Language:** English  
 **Normative methodology:** `RPI_Core_Methodology_v9.md`  
 **Normative companions:** `CLUE_Constitution_v9.md`, `CLUE_Architecture_v9.md`, `CLUE_Execution_Model_v9.md`, `CLUE_Canonical_Measurement_Catalogue_v9.md`, `CLUE_Status_Contract_v9.md`, and `CLUE_Interface_Design_v9.md`  
@@ -1649,18 +1650,20 @@ CLU-E binds the two without allowing either to impersonate the other.
 
 ---
 
-# 35. 2026-08-14 executable-alignment amendment — local-first manual sync boundary
+# 35. P2 registered remote and manual sync boundary
 
-P2 exposes one manual `SYNC GIT` operator convenience beside `START CLU-E`. The two actions are
-independent: Start, proof, ACCEPT and cycle closure never trigger Git synchronization.
+P2 exposes one manual `SYNC GIT` operator action. Start, proof, ACCEPT and cycle closure
+operate independently of Git synchronization.
 
-The P2 action is deliberately narrower than the full lifecycle in this document. With
-`NO_REMOTE_YET`, it refuses without contacting Git. With a later registered remote, it requires a
-clean attached branch, fetches first, reports unchanged state, fast-forwards behind-only state,
-pushes ahead-only state and refuses divergence. It provides no merge, rebase, force push, stash,
-semantic conflict resolution, protected-ref authority or proof-to-commit binding. Credentials remain
-with the host Git credential helper or SSH agent.
+ADR-0021 proposes `REMOTE_REGISTERED` for the successor P2 mission. The closure policy records
+the expected decision and the active Project Profile binds the specific credential-free remote.
+`NO_REMOTE_YET` retains local-only behavior. In that mode, Sync Git refuses without contacting
+the remote. With a registered remote, Sync Git requires a clean attached branch, fetches first,
+reports unchanged state, fast-forwards behind-only state, pushes ahead-only state and refuses
+divergence. Credentials remain with the host Git credential helper or SSH agent.
 
-This action does not satisfy Section 32 and does not populate the governed `versionControl` Status
-branch. The complete repository registration, worktree lease, sealed candidate commit, remote
-checks, landing, publication receipt and automatic recovery lifecycle remains P4 scope.
+Governed publication and landing stay disabled in P2. Section 32 acceptance and the
+`versionControl` Status branch belong to the complete P4 lifecycle. That lifecycle binds the
+exact accepted tree to a dedicated remote review branch, captures required CI and review evidence,
+records publication and Custodian landing receipts, verifies the landed tree and retains rollback
+evidence.

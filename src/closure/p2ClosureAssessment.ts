@@ -16,7 +16,8 @@ import { readProofBoard, type ProofBoardView } from '../daemon/proofBoardProject
 import { EventLog } from '../memory/eventLog.js';
 import {
   P2_CLOSURE_POLICY_PATH as CLOSURE_POLICY_PATH,
-  P2_OPENAI_MODEL,
+  P2_EXACT_OPENAI_MODELS,
+  matchesP2Publication,
   readP2ClosurePolicy,
   type P2ClosurePolicy as ClosurePolicy,
 } from '../control/p2ClosurePolicy.js';
@@ -141,11 +142,14 @@ export function decideP2Closure(
     'versionControl does not state the expected P4 deferral.', 'Do not imply a Git lifecycle that P2 did not implement.');
   engineering(facts.benchmarkRegistered && facts.benchmarkIntegrity, 'P2-BENCHMARK',
     'The registered Master Benchmark or its harness integrity is not current.', 'Register and integrity-verify clu-master before opening the closure cycle.');
+  const expectedPublication = policy.publication?.decision ?? 'NO_REMOTE_YET';
   engineering(
-    facts.remoteDecision === 'NO_REMOTE_YET' && facts.localOnly && !facts.publicationPermitted,
-    'P2-REMOTE-ABSENCE',
-    'The explicit local-only remote decision is absent or contradictory.',
-    'Restore P2-D5-NO-REMOTE-YET or register a governed remote in a later phase.',
+    matchesP2Publication(expectedPublication, {
+      decision: facts.remoteDecision, localOnly: facts.localOnly, publicationPermitted: facts.publicationPermitted,
+    }),
+    expectedPublication === 'NO_REMOTE_YET' ? 'P2-REMOTE-ABSENCE' : 'P2-REMOTE-POLICY',
+    `P2 expects ${expectedPublication} with governed publication disabled. Live decision=${facts.remoteDecision ?? 'absent'}, localOnly=${facts.localOnly}, publicationPermitted=${facts.publicationPermitted}.`,
+    'Match the active Project Profile to the ratified D5 remote decision. Governed publication requires its own authority.',
   );
   engineering(facts.greatBookRecordingGaps === 0, 'P2-GREAT-BOOK-GAPS',
     `${facts.greatBookRecordingGaps} accepted verdict recording gap(s) exist.`, 'Repair Great Book event/projection parity.');
@@ -177,7 +181,7 @@ export function decideP2Closure(
     }
   } else {
     const creatorPolicyCoherent =
-      policy.gateway.model === P2_OPENAI_MODEL &&
+      P2_EXACT_OPENAI_MODELS.some((model) => model === policy.gateway.model) &&
       policy.gateway.budget_authority === 'OPENAI_PLATFORM' &&
       policy.gateway.local_budget_enforced === false &&
       policy.gateway.provider_exhaustion_action === 'CONTROLLED_PAUSE' &&
@@ -187,7 +191,7 @@ export function decideP2Closure(
         'P2-D4-CREATOR-POLICY-CONTRADICTION',
         'creator-decision',
         'The OPERATIONAL decision does not encode the complete Creator-approved OpenAI authority boundary.',
-        `Record exact model ${P2_OPENAI_MODEL}, OPENAI_PLATFORM budget authority, no local budget enforcement, CONTROLLED_PAUSE and PROVIDER_ONLY token-balance authority.`,
+        `Record an approved exact model (${P2_EXACT_OPENAI_MODELS.join(' or ')}), OPENAI_PLATFORM budget authority, no local budget enforcement, CONTROLLED_PAUSE and PROVIDER_ONLY token-balance authority.`,
       ));
     }
     const operational =
@@ -203,8 +207,8 @@ export function decideP2Closure(
       blockers.push(blocker(
         'P2-D4-OPERATIONAL-CONTRADICTION',
         'creator-decision',
-        `The policy records OPERATIONAL but the approved OpenAI ${P2_OPENAI_MODEL} gateway is not ready.`,
-        'Set OPENAI_API_KEY, keep OpenAI Platform as budget authority, enable the approved routes, and clear any explicit provider-budget pause with `clue gateway resume`.',
+        `P2 expects a ready OpenAI gateway for ${policy.gateway.model ?? 'the selected exact model'}. Live model=${facts.gatewayModel ?? 'absent'}, ready=${facts.gatewayOperationallyReady ?? 'unknown'}.`,
+        'Verify the active gateway uses the ratified exact model, its credential and routes are ready, and OpenAI Platform owns spending. Clear an explicit provider-budget pause with `clue gateway resume` when applicable.',
       ));
     }
   }

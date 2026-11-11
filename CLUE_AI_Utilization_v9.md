@@ -1,7 +1,8 @@
 # CLU-E AI Utilization and Reasoning Architecture
 
 **Document status:** permanent normative AI architecture and governance contract  
-**Revision:** 9.2 (pack release 9.0). Revision 2.0 content was preserved at the v9 re-baseline. ADR-0017 established the operational OpenAI provider boundary. ADR-0020 proposes its successor model identity for Creator ratification.  
+**Revision:** 9.3 (pack release 9.0). Revision 2.0 content was preserved at the v9 re-baseline. ADR-0017 established the operational OpenAI provider boundary. ADR-0021 proposes the exact model for the successor P2 mission.
+
 **Language:** English  
 **Document purpose:** Define where artificial intelligence belongs in CLU-E, where it does not belong, and how CLU-E uses approved reasoning models throughout RPI without wasting tokens, weakening evidence quality, or turning model output into an unauditable source of truth.  
 **Normative companions:** `CLUE_Constitution_v9.md`, `CLUE_Architecture_v9.md`, `CLUE_Execution_Model_v9.md`, `CLUE_Canonical_Measurement_Catalogue_v9.md`, and `CLUE_Status_Contract_v9.md`
@@ -2287,13 +2288,15 @@ With this architecture, token efficiency does not weaken CLU-E. It is what allow
 ## 27.1 Operational provider and model identity
 
 For the P2 reference installation, OpenAI is the active provider. ADR-0017 originally recorded
-`gpt-5.6`. Its proposed ADR-0020 successor selects `gpt-5.6-sol` as the exact model identity for
-enabled P2 routes. This revision requires Creator ratification before it governs P2 closure.
+`gpt-5.6`, and ADR-0020 selected `gpt-5.6-sol`. ADR-0021 proposes the live-verified
+`gpt-6-astra` for the successor P2 mission. The mission-bound P2 closure policy pins the
+exact provider ID. Creator ratification of this revision precedes the successor evidence epoch.
 
 The adapter verifies access to the selected ID for the configured provider project and key before
 submission. The provider's effective model must also match the request on completion. A missing
-or different model causes refusal. Project Profiles record their selected model independently and
-the runtime checks that selection against the applicable routing policy.
+or different model causes refusal. Project Profiles record their selected model independently.
+Formal P2 closure checks the effective gateway identity against the exact mission policy.
+Operators review any later model change against a successor policy and mission.
 
 ## 27.2 Money, usage and remaining allowance
 

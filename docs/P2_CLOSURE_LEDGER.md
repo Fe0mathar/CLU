@@ -5,6 +5,9 @@
 **Authority:** closure index only; durable events, sealed Status, registered policy, pack seal,
 Creator ratification and exact release evidence remain the authorities named in each row.
 
+This ledger records the 2026-08-14 checkpoint. Use the [current runbook](p2/P2_CLOSURE_RUNBOOK.md)
+for the ADR-0021 successor and read the live assessment for its closure state.
+
 ## Verdict after the final backend/governance activation patch
 
 ```text

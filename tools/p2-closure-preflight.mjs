@@ -12,6 +12,7 @@ import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parse as parseYaml } from 'yaml';
+import { readP2ClosureContext } from './p2-closure-context.mjs';
 import { externalReportPath, resolveNpmInvocation, writeExternalReport } from './verification-support.mjs';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -145,7 +146,19 @@ if (nodeMajor < 22 || (nodeMajor === 22 && nodeMinor < 11)) {
 }
 const configPath = join(repoRoot, 'config', 'clue.config.yaml');
 if (!existsSync(configPath)) throw new Error('config/clue.config.yaml is absent');
-const config = parseYaml(readFileSync(configPath, 'utf8'));
+const installation = parseYaml(readFileSync(configPath, 'utf8'));
+const profileSelectorPresent = existsSync(join(repoRoot, 'config', 'project-profiles.yaml'));
+let context = null;
+try {
+  context = await readP2ClosureContext(repoRoot);
+} catch (error) {
+  const code = error?.code;
+  problems.push(code === 'ERR_MODULE_NOT_FOUND'
+    ? 'Build CLU-E before verifying the installed P2 policy and active configuration.'
+    : `The installed policy or active configuration could not be verified${/^[A-Z][A-Z0-9_]+$/u.test(code ?? '') ? ` (${code})` : ''}. Run clue doctor.`);
+}
+const config = context?.config ?? installation;
+const profile = context?.profile ?? null;
 const pack = documentationPack();
 const activeSeal = verifySeal(pack.sealFile);
 if (activeSeal.state !== 'PASS') problems.push(...activeSeal.problems.map((item) => `active authority: ${item}`));
@@ -171,24 +184,28 @@ if (docsCandidate.status !== 0 || docsCandidateResult?.status !== 'PASS') {
 }
 notes.push('The packaged v10 candidate remains deferred post-P2 authority.');
 
-const routingPath = join(repoRoot, config.gateway.routing_file);
-const budgetPath = join(repoRoot, config.gateway.budget_policy_file);
-const routing = existsSync(routingPath) ? parseYaml(readFileSync(routingPath, 'utf8')) : null;
-const budget = existsSync(budgetPath) ? parseYaml(readFileSync(budgetPath, 'utf8')) : null;
-const closurePolicyPath = join(repoRoot, 'config', 'policies', 'p2-closure.yaml');
-const gatewayDecision = existsSync(closurePolicyPath) ? parseYaml(readFileSync(closurePolicyPath, 'utf8'))?.gateway : null;
-const approvedModel = 'gpt-5.6-sol';
-const enabledModels = routing === null
-  ? []
-  : [...new Set(Object.values(routing.routes ?? {}).filter((route) => route?.enabled).map((route) => route.model).filter(Boolean))];
-const apiKeyEnv = config.gateway.api_key_env;
-const apiKeyPresent = typeof apiKeyEnv === 'string' && Boolean(process.env[apiKeyEnv]);
-if (config.gateway.provider !== 'openai') problems.push('gateway provider is not openai');
-const exactGatewayPolicy = gatewayDecision?.decision === 'OPERATIONAL' && gatewayDecision.model === approvedModel &&
-  enabledModels.length === 1 && enabledModels[0] === approvedModel;
-if (!exactGatewayPolicy) problems.push(`D4 and enabled gateway routes must resolve exactly to ${approvedModel} (${enabledModels.join(', ') || 'none'})`);
-if (budget?.spend_authority !== 'openai_platform') problems.push('OpenAI Platform is not the configured spend authority');
-if (!apiKeyPresent) problems.push(`${apiKeyEnv ?? 'OPENAI_API_KEY'} is not present in this process environment`);
+const gateway = context?.gateway ?? {
+  provider: config.gateway?.provider ?? null,
+  requestedModels: [],
+  approvedModel: null,
+  exactModelPolicy: false,
+  apiKeyReference: null,
+  apiKeyPresent: false,
+  credentialReferenceConfigured: false,
+  credentialCheck: 'UNVERIFIED',
+  spendAuthority: null,
+};
+const publication = context?.publication ?? {
+  intendedState: null, observedState: null, localOnly: null, publicationPermitted: null, matchesPolicy: false,
+};
+if (context !== null) {
+  if (gateway.provider !== 'openai') problems.push('gateway provider is not openai');
+  if (!gateway.exactModelPolicy) problems.push(`D4 and enabled gateway routes must resolve to the approved exact model (${gateway.approvedModel ?? 'unverified'}). Effective routes: ${gateway.requestedModels.join(', ') || 'none'}.`);
+  if (gateway.spendAuthority !== 'openai_platform') problems.push('OpenAI Platform is not the configured spend authority');
+  if (profile !== null && !gateway.credentialReferenceConfigured) problems.push('Configure a credential reference in the active Project Profile.');
+  if (profile === null && !gateway.apiKeyPresent) problems.push(`${config.gateway.api_key_env} is not present in this process environment`);
+  if (!publication.matchesPolicy) problems.push(`D5 requires ${publication.intendedState} with governed publication disabled. Active target: ${publication.observedState}.`);
+}
 
 const roots = [
   pathCheck('workspace', config.workspace?.root, 'directory'),
@@ -199,7 +216,7 @@ for (const item of roots) {
   if (item.state === 'FAIL') problems.push(`${item.label}: ${item.detail}`);
 }
 
-const powershell = probeVersion(config.powershell?.executable ?? 'pwsh', ['--version'], /^PowerShell (\d+\.\d+\.\d+)/u);
+const powershell = probeVersion(installation.powershell?.executable ?? 'pwsh', ['--version'], /^PowerShell (\d+\.\d+\.\d+)/u);
 if (powershell.ok && Number(powershell.detail.split('.')[0]) < 7) {
   powershell.detail = `PowerShell 7 or later is required (found ${powershell.detail}).`;
   powershell.ok = false;
@@ -254,10 +271,13 @@ const result = {
   mode: 'READ_ONLY',
   status: problems.length === 0 ? 'READY_FOR_LIVE_RUNTIME_VERIFICATION' : 'BLOCKED',
   repoRoot,
+  targetId: config.project?.id ?? config.project?.active_target ?? null,
   activeAuthority: { ...activeSeal, documentationPack: pack },
   deferredPostP2Documentation: docsCandidateResult,
   projectProfiles: {
-    selectorPresent: existsSync(join(repoRoot, 'config', 'project-profiles.yaml')),
+    selectorPresent: profileSelectorPresent,
+    activeProjectId: profile?.profile.projectId ?? null,
+    activeGeneration: profile?.generation ?? null,
     acceptanceMatrixPresent: existsSync(join(repoRoot, 'config', 'project-profiles-acceptance.matrix.json')),
   },
   roots,
@@ -270,27 +290,20 @@ const result = {
   hostToolDetails,
   proofExecutionBoundary,
   gateway: {
-    provider: config.gateway.provider,
-    requestedModels: enabledModels,
-    approvedModel,
-    exactModelPolicy: exactGatewayPolicy,
-    apiKeyReference: typeof apiKeyEnv === 'string' ? `env:${apiKeyEnv}` : null,
-    apiKeyPresent,
+    ...gateway,
     secretValueIncluded: false,
-    spendAuthority: budget?.spend_authority ?? null,
     operationallyReady: null,
     operationallyReadyReason: 'A live provider test is required; this preflight intentionally performs no network request.',
   },
   publication: {
-    intendedState: 'NO_REMOTE_YET',
-    localOnly: true,
+    ...publication,
     automaticSyncPerformed: false,
   },
   requiredNextLiveChecks: [
     'Qualify the pinned Windows proof supervisor on this host and preserve the native qualification evidence.',
     'Run npm.cmd run release:package -- --out <external-evidence-directory> from the clean local Git tree.',
     'Run the Project Profile Host, Git, Chrome and GPT connection tests against the active profile.',
-    `Confirm requestedModel = effectiveModel = ${approvedModel} and fallbackUsed = false.`,
+    `Confirm requestedModel and effectiveModel match the approved exact model${gateway.approvedModel === null ? '' : ` (${gateway.approvedModel})`} and fallbackUsed = false.`,
     'Generate closure inventory and authority manifests in the external closure evidence directory.',
     'Only then perform interactive docs ratify and epoch seal P2-authoritative.',
   ],
@@ -312,8 +325,11 @@ else {
   process.stdout.write(`P2 closure preflight: ${result.status}\n`);
   process.stdout.write(`  active authority: ${activeSeal.state} (${activeSeal.declared} files)\n`);
   process.stdout.write(`  deferred v10 pack: ${docsCandidateResult?.status ?? 'FAIL'}\n`);
-  process.stdout.write(`  exact model: ${enabledModels.join(', ') || 'none'}\n`);
-  process.stdout.write(`  ${apiKeyEnv ?? 'OPENAI_API_KEY'} present: ${String(apiKeyPresent)}\n`);
+  process.stdout.write(`  exact model: ${gateway.requestedModels.join(', ') || 'none'}\n`);
+  const credentialStatus = profileSelectorPresent
+    ? `active Project Profile credential reference configured: ${String(gateway.credentialReferenceConfigured)}; live check pending`
+    : `${config.gateway?.api_key_env ?? 'OPENAI_API_KEY'} present: ${String(gateway.apiKeyPresent)}`;
+  process.stdout.write(`  ${credentialStatus}\n`);
   if (proofExecutionBoundary !== null) process.stdout.write(`  Windows supervisor qualification: ${proofExecutionBoundary.nativeQualification}\n`);
   for (const blocker of problems) process.stdout.write(`  BLOCKER: ${blocker}\n`);
   if (reportPath !== null) process.stdout.write(`  report: ${reportPath}\n`);

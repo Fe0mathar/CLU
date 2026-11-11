@@ -87,8 +87,7 @@ function fileExists(path) {
   try { return lstatSync(path).isFile(); } catch { return false; }
 }
 
-function gatewayKeyName(config) {
-  const key = config?.gateway?.api_key_env;
+function gatewayKeyName(key) {
   return typeof key === 'string' && /^[A-Z][A-Z0-9_]*(?:KEY|TOKEN|SECRET|CREDENTIAL|PASSWORD)$/u.test(key) &&
     !/^(?:NODE_|GIT_|NPM_|CLU_)/u.test(key) ? key : null;
 }
@@ -118,7 +117,7 @@ function inspectPreflight(config, env) {
       // The preflight's own pin check reports invalid supervisor paths.
     }
   }
-  const keyName = gatewayKeyName(config);
+  const keyName = gatewayKeyName(config?.gateway?.api_key_env);
   const childEnv = { ...env };
   for (const key of [SUPERVISOR_PATH, SUPERVISOR_SHA256, QUALIFICATION_PATH, QUALIFICATION_SHA256]) {
     if (process.env[key] !== undefined) childEnv[key] = process.env[key];
@@ -200,20 +199,18 @@ function inspectSource() {
   return { baseline: 'AUDITED_SURF_RIBBON_Q4_PLUS_READINESS', state: files.every((file) => file.matches) ? 'MATCH' : 'REVIEW_REQUIRED', files };
 }
 
-function inspectGraph(env, windows) {
+function inspectGraph(env, windows, workspace, target) {
   if (!windows) return { state: 'WINDOWS_HOST_REQUIRED' };
   if (!fileExists(join(ROOT, 'dist/src/analysis/source/navigatorEvents.js'))) return { state: 'BUILD_REQUIRED' };
+  if (typeof workspace !== 'string' || typeof target !== 'string') return { state: 'POINTER_CHECK_UNAVAILABLE' };
   const source = `
-import { lstatSync, readFileSync } from 'node:fs';
+import { lstatSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
-import { parse } from 'yaml';
 import { readCommittedInventoryParity, readGraphPointer } from './dist/src/analysis/source/navigatorEvents.js';
 let out = { state: 'POINTER_UNAVAILABLE' };
 try {
-  const config = parse(readFileSync('config/clue.config.yaml', 'utf8'));
-  const workspace = config?.workspace?.root;
-  const target = config?.project?.active_target;
-  if (typeof workspace === 'string' && isAbsolute(workspace) && typeof target === 'string') {
+  const [workspace, target] = process.argv.slice(1);
+  if (isAbsolute(workspace)) {
     const livePath = join(workspace, 'graph', 'system-navigator.ndjson');
     const info = lstatSync(join(workspace, 'graph', 'current.json'));
     const pointer = info.isFile() && info.size <= 256 * 1024 ? readGraphPointer(livePath) : null;
@@ -231,7 +228,7 @@ try {
 } catch { /* no configured, readable pointer */ }
 process.stdout.write(JSON.stringify(out));
 `;
-  const result = childRecord(execute(process.execPath, ['--input-type=module', '--eval', source], env));
+  const result = childRecord(execute(process.execPath, ['--input-type=module', '--eval', source, '--', workspace, target], env));
   if (!['POINTER_UNAVAILABLE', 'FRESH_RECOGNITION_EVIDENCE_REQUIRED', 'COMMITTED_RECEIPT_PRESENT'].includes(result?.state)) {
     return { state: 'POINTER_CHECK_UNAVAILABLE' };
   }
@@ -256,12 +253,17 @@ function report() {
     data.activeAuthority.documentationPack.releaseVersion === '9.0' &&
     data.activeAuthority.documentationPack.sealFile === 'SHA256SUMS_v9.txt' &&
     data.activeAuthority.documentationPack.manifestFile === 'DOCUMENTATION_MANIFEST_v9.json';
-  const preflightRoot = (label) => state(Array.isArray(data?.roots) ? data.roots.find((row) => row?.label === label)?.state : undefined);
+  const preflightRoot = (label) => Array.isArray(data?.roots) ? data.roots.find((row) => row?.label === label) : undefined;
+  const preflightRootState = (label) => state(preflightRoot(label)?.state);
   const sqlite = inspectSqlite(env);
   const git = inspectGit(env);
   const source = inspectSource();
-  const navigator = inspectGraph(env, windows);
-  const keyName = gatewayKeyName(config);
+  const navigator = inspectGraph(env, windows, preflightRoot('workspace')?.configured, data?.targetId);
+  const profileCredential = data?.gateway?.credentialCheck === 'LIVE_PROFILE_CHECK_REQUIRED';
+  const reference = data?.gateway?.apiKeyReference;
+  const keyName = gatewayKeyName(profileCredential
+    ? reference?.startsWith('env:') ? reference.slice(4) : null
+    : config?.gateway?.api_key_env);
   const keyPresent = keyName !== null && Boolean(process.env[keyName]?.trim());
   const exactGatewayPolicy = data?.gateway?.provider === 'openai' && data?.gateway?.spendAuthority === 'openai_platform' &&
     data?.gateway?.exactModelPolicy === true;
@@ -288,14 +290,15 @@ function report() {
   if (preflightState !== 'READY_FOR_LIVE_RUNTIME_VERIFICATION') blockers.push('CLOSURE_PREFLIGHT_INCOMPLETE');
   if (data?.hostTools?.npm !== true) blockers.push('NPM_UNVERIFIED');
   if (data?.hostTools?.powershell !== true) blockers.push('POWERSHELL_7_UNVERIFIED');
-  if (preflightRoot('Chrome executable') !== 'PASS') blockers.push('CHROME_UNVERIFIED');
-  if (preflightRoot('workspace') !== 'PASS' || preflightRoot('shadow') !== 'PASS') blockers.push('WORKSPACE_OR_SHADOW_UNVERIFIED');
+  if (preflightRootState('Chrome executable') !== 'PASS') blockers.push('CHROME_UNVERIFIED');
+  if (preflightRootState('workspace') !== 'PASS' || preflightRootState('shadow') !== 'PASS') blockers.push('WORKSPACE_OR_SHADOW_UNVERIFIED');
   if (!activeV9 || authority !== 'PASS' || v10 !== 'PASS') blockers.push('DOCUMENTATION_PACK_CHECK_INCOMPLETE');
   if (sqlite.state !== 'PASS') blockers.push('NATIVE_SQLITE_CHECK_FAILED');
   if (git.state !== 'CLEAN') blockers.push('CLEAN_LOCAL_GIT_TREE_UNVERIFIED');
   if (!pinVerified) blockers.push('SUPERVISOR_PIN_UNVERIFIED');
-  if (!keyPresent) blockers.push('GATEWAY_KEY_PRESENCE_UNVERIFIED');
+  if (profileCredential ? data?.gateway?.credentialReferenceConfigured !== true : !keyPresent) blockers.push('GATEWAY_KEY_PRESENCE_UNVERIFIED');
   if (!exactGatewayPolicy) blockers.push('GATEWAY_POLICY_UNVERIFIED');
+  if (data?.publication?.matchesPolicy !== true) blockers.push('PUBLICATION_POLICY_UNVERIFIED');
   if (source.state !== 'MATCH') blockers.push('PATCH_05D_SOURCE_REVIEW_REQUIRED');
   if (navigator.parity === false) blockers.push('NAVIGATOR_RECEIPT_PARITY_FAILED');
 
@@ -306,11 +309,12 @@ function report() {
       ? 'QUALIFICATION_RECEIPT_VERIFIED_LIVE_CHECKS_PENDING' : 'PREREQUISITES_PRESENT_QUALIFICATION_PENDING',
     platform: { name: process.platform, arch: process.arch, nativeWindows: windows },
     host: { node: process.versions.node, nodeSupported, npm: data?.hostTools?.npm === true, powershell7: data?.hostTools?.powershell === true, sqlite, git },
-    paths: { workspace: preflightRoot('workspace'), shadow: preflightRoot('shadow'), chromeExecutable: preflightRoot('Chrome executable') },
+    paths: { workspace: preflightRootState('workspace'), shadow: preflightRootState('shadow'), chromeExecutable: preflightRootState('Chrome executable') },
     documentation: { activeV9, activeSeal: authority, deferredV10Seal: v10 },
     preflight: { state: preflightState },
     supervisor: { state: supervisorState, builtBrokerPresent, pathConfigured, pinConfigured, pinShapeValid, verifiedSha256: pinVerified ? observedPin : null, qualificationConfigured, qualification },
-    gateway: { keyPresentInThisProcess: keyPresent, approvedModel: data?.gateway?.approvedModel ?? null, exactModelAndBudgetPolicy: exactGatewayPolicy, liveProviderCheck: 'PENDING' },
+    gateway: { keyPresentInThisProcess: keyPresent, profileCredentialCheck: profileCredential ? 'PENDING' : null, approvedModel: data?.gateway?.approvedModel ?? null, exactModelAndBudgetPolicy: exactGatewayPolicy, liveProviderCheck: 'PENDING' },
+    publication: data?.publication ?? null,
     source, navigator,
     blockers,
   };

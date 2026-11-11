@@ -16,14 +16,14 @@
     {
       "path": "README_v9.md",
       "role": "Release guide",
-      "version": "9.2",
-      "priorRevision": "9.1 (ADR-0017 revision)",
+      "version": "9.3",
+      "priorRevision": "9.2 (previous sealed revision)",
       "status": "permanent",
-      "bytes": 9916,
-      "lines": 145,
-      "words": 1192,
-      "sha256": "31b40d0a0aff270078c36bfb33b85077f328fc882fcaf2b5ac01cfdcffa80049",
-      "amendment": "ADR-0020 proposed exact Sol model for legacy P2",
+      "bytes": 9984,
+      "lines": 146,
+      "words": 1198,
+      "sha256": "466a18a53a156a6ef77f95e26371a85a68dc30016d83721b0f9b9a6da23a93aa",
+      "amendment": "ADR-0021 proposed P2 profile alignment",
       "amendments": [
         {
           "date": "2026-08-14",
@@ -39,6 +39,15 @@
           "backlog": "ADR-0020 / proposed P2 exact model successor",
           "applied": [
             "Refer operators to the proposed P2 model and successor governance record"
+          ],
+          "packRelease": "unchanged (9.0); document revision and current seal only",
+          "countBasis": "bytes = file size; lines = newline count; words = ASCII-whitespace-delimited tokens (locale-independent)"
+        },
+        {
+          "date": "2026-11-11",
+          "backlog": "ADR-0021 / proposed P2 profile alignment",
+          "applied": [
+            "Refer operators to the ADR-0021 successor scope and evidence ceremony"
           ],
           "packRelease": "unchanged (9.0); document revision and current seal only",
           "countBasis": "bytes = file size; lines = newline count; words = ASCII-whitespace-delimited tokens (locale-independent)"
@@ -92,14 +101,14 @@
     {
       "path": "CLUE_AI_Utilization_v9.md",
       "role": "AI reasoning, routing, context, cache, budget, and audit contract",
-      "version": "9.2",
-      "priorRevision": "9.1 (ADR-0017 revision)",
+      "version": "9.3",
+      "priorRevision": "9.2 (previous sealed revision)",
       "status": "permanent",
-      "bytes": 90299,
-      "lines": 2317,
-      "words": 12232,
-      "sha256": "89c71e65ea9b465050d56e65226246dfb6a80d7e8a1d9c6c3af54c66bcedf578",
-      "amendment": "ADR-0020 proposed exact Sol model for legacy P2",
+      "bytes": 90462,
+      "lines": 2320,
+      "words": 12256,
+      "sha256": "981d4aecde2a83cc7541734244a938927d86520869f2e51462fd072eee0ec1cf",
+      "amendment": "ADR-0021 proposed P2 profile alignment",
       "amendments": [
         {
           "date": "2026-08-14",
@@ -118,26 +127,44 @@
           ],
           "packRelease": "unchanged (9.0); document revision and current seal only",
           "countBasis": "bytes = file size; lines = newline count; words = ASCII-whitespace-delimited tokens (locale-independent)"
+        },
+        {
+          "date": "2026-11-11",
+          "backlog": "ADR-0021 / proposed P2 profile alignment",
+          "applied": [
+            "Pin the exact live-verified OpenAI model through the successor P2 policy"
+          ],
+          "packRelease": "unchanged (9.0); document revision and current seal only",
+          "countBasis": "bytes = file size; lines = newline count; words = ASCII-whitespace-delimited tokens (locale-independent)"
         }
       ]
     },
     {
       "path": "CLUE_Git_Integration_v9.md",
       "role": "Local Git, worktree, commit, remote, provider, publication, and recovery contract",
-      "version": "9.1",
-      "priorRevision": "9.0 (revision 2.0 source basis)",
+      "version": "9.2",
+      "priorRevision": "9.1 (previous sealed revision)",
       "status": "permanent",
-      "bytes": 55558,
-      "lines": 1666,
-      "words": 7094,
-      "sha256": "931de359318f28d2ab9b4d878c52cf54c03ca95d777756cd60df7866ede3914b",
-      "amendment": "ADR-0017 manual local-first sync boundary",
+      "bytes": 55613,
+      "lines": 1669,
+      "words": 7107,
+      "sha256": "9899f3479a6e60581c1bea14dcb9ae572a5c70fe250c5e61d01d489221b72181",
+      "amendment": "ADR-0021 proposed P2 profile alignment",
       "amendments": [
         {
           "date": "2026-08-14",
           "backlog": "ADR-0017 / P2 final activation",
           "applied": [
             "ADR-0017 manual local-first sync boundary"
+          ],
+          "packRelease": "unchanged (9.0); document revision and current seal only",
+          "countBasis": "bytes = file size; lines = newline count; words = ASCII-whitespace-delimited tokens (locale-independent)"
+        },
+        {
+          "date": "2026-11-11",
+          "backlog": "ADR-0021 / proposed P2 profile alignment",
+          "applied": [
+            "Record the registered remote and manual sync boundary for successor P2"
           ],
           "packRelease": "unchanged (9.0); document revision and current seal only",
           "countBasis": "bytes = file size; lines = newline count; words = ASCII-whitespace-delimited tokens (locale-independent)"
@@ -181,14 +208,14 @@
     {
       "path": "CLUE_Interface_Design_v9.md",
       "role": "Two-tab, four-quadrant operator interface contract",
-      "version": "9.2",
-      "priorRevision": "9.1 (ADR-0017 revision)",
+      "version": "9.3",
+      "priorRevision": "9.2 (previous sealed revision)",
       "status": "permanent",
-      "bytes": 77853,
-      "lines": 2356,
-      "words": 10594,
-      "sha256": "fbf73e1fc9de85338982135edfa2a9d78d90c7e871df06180530fb2c42d51ab8",
-      "amendment": "ADR-0020 proposed exact Sol model for legacy P2",
+      "bytes": 77862,
+      "lines": 2357,
+      "words": 10596,
+      "sha256": "c3769cd878b25e40cc259f9d891ff98b81e24b34333cd962fd04f47f34cc7352",
+      "amendment": "ADR-0021 proposed P2 profile alignment",
       "amendments": [
         {
           "date": "2026-08-14",
@@ -204,6 +231,15 @@
           "backlog": "ADR-0020 / proposed P2 exact model successor",
           "applied": [
             "Align illustrative Q3 model identity with the proposed P2 model"
+          ],
+          "packRelease": "unchanged (9.0); document revision and current seal only",
+          "countBasis": "bytes = file size; lines = newline count; words = ASCII-whitespace-delimited tokens (locale-independent)"
+        },
+        {
+          "date": "2026-11-11",
+          "backlog": "ADR-0021 / proposed P2 profile alignment",
+          "applied": [
+            "Display the mission-pinned model in the illustrative operator panel"
           ],
           "packRelease": "unchanged (9.0); document revision and current seal only",
           "countBasis": "bytes = file size; lines = newline count; words = ASCII-whitespace-delimited tokens (locale-independent)"
@@ -289,14 +325,14 @@
     {
       "path": "DOCUMENTATION_GOVERNANCE_v9.md",
       "role": "Documentation authority, ownership, terminology, versioning, and migration records",
-      "version": "9.3",
-      "priorRevision": "9.2 (ADR-0017 revision)",
+      "version": "9.4",
+      "priorRevision": "9.3 (previous sealed revision)",
       "status": "permanent",
-      "bytes": 22473,
-      "lines": 428,
-      "words": 3119,
-      "sha256": "a6e36d8317fe2cd67bc8986e6edc63c74a490d7ee239f562f5a6e3f4d78092ce",
-      "amendment": "ADR-0020 proposed exact Sol model for legacy P2",
+      "bytes": 23211,
+      "lines": 443,
+      "words": 3222,
+      "sha256": "fe5352446d59a7cd08b6f9e8d365f61920895364f73e18565caac2f5d5ad2207",
+      "amendment": "ADR-0021 proposed P2 profile alignment",
       "amendments": [
         {
           "date": "2026-08-14",
@@ -322,6 +358,15 @@
           "backlog": "ADR-0020 / proposed P2 exact model successor",
           "applied": [
             "Record the proposed ADR-0020 successor and its ratification and evidence requirements"
+          ],
+          "packRelease": "unchanged (9.0); document revision and current seal only",
+          "countBasis": "bytes = file size; lines = newline count; words = ASCII-whitespace-delimited tokens (locale-independent)"
+        },
+        {
+          "date": "2026-11-11",
+          "backlog": "ADR-0021 / proposed P2 profile alignment",
+          "applied": [
+            "Record the successor mission, ratification and evidence epoch requirements"
           ],
           "packRelease": "unchanged (9.0); document revision and current seal only",
           "countBasis": "bytes = file size; lines = newline count; words = ASCII-whitespace-delimited tokens (locale-independent)"
@@ -364,14 +409,14 @@
     {
       "path": "VALIDATION_REPORT_v9.md",
       "role": "Documentation release validation evidence",
-      "version": "9.3",
-      "priorRevision": "9.2 (ADR-0017 revision)",
+      "version": "9.4",
+      "priorRevision": "9.3 (previous sealed revision)",
       "status": "permanent",
-      "bytes": 11578,
-      "lines": 175,
-      "words": 1591,
-      "sha256": "3beab61cfb932ee84084c46ad3cf3514887517e90ebb7a099078c791037da321",
-      "amendment": "ADR-0020 proposed exact Sol model for legacy P2",
+      "bytes": 12000,
+      "lines": 183,
+      "words": 1651,
+      "sha256": "d93cf564bb38d6246ac1c53cb61d502ba5d61ca268a9be61ecfa2f88c355af69",
+      "amendment": "ADR-0021 proposed P2 profile alignment",
       "amendments": [
         {
           "date": "2026-08-14",
@@ -398,6 +443,15 @@
           "backlog": "ADR-0020 / proposed P2 exact model successor",
           "applied": [
             "Retain historical validation and identify current candidate and live acceptance gates"
+          ],
+          "packRelease": "unchanged (9.0); document revision and current seal only",
+          "countBasis": "bytes = file size; lines = newline count; words = ASCII-whitespace-delimited tokens (locale-independent)"
+        },
+        {
+          "date": "2026-11-11",
+          "backlog": "ADR-0021 / proposed P2 profile alignment",
+          "applied": [
+            "Identify the successor pack scope and pending live gates"
           ],
           "packRelease": "unchanged (9.0); document revision and current seal only",
           "countBasis": "bytes = file size; lines = newline count; words = ASCII-whitespace-delimited tokens (locale-independent)"
@@ -429,6 +483,7 @@
     "2026-08-14 executable-alignment revisions are sealed here but require a fresh Creator ratification and P2-authoritative epoch before P2 closure.",
     "Historical ADR-0017 records the operational OpenAI provider boundary, original gpt-5.6 identity, provider-side monetary authority, controlled pause, Status 5.7.0 and manual local-first Git sync.",
     "Final backend/governance validation: 89 self-test files, 675 tests, 669 pass, 0 fail and 6 platform skips; dashboard 118/118; accepted app.js remains a separate artifact and is excluded from the backend archive.",
-    "ADR-0020 proposes gpt-5.6-sol as the exact legacy P2 model. The amended v9 bytes require current Creator ratification and a P2-authoritative epoch after live model verification. Deferred v10 stays separately sealed."
+    "ADR-0020 proposes gpt-5.6-sol as the exact legacy P2 model. The amended v9 bytes require current Creator ratification and a P2-authoritative epoch after live model verification. Deferred v10 stays separately sealed.",
+    "ADR-0021 proposes the exact gpt-6-astra model and registered remote for successor P2. Creator ratification and proof evidence bind the new mission. Deferred v10 remains separately sealed."
   ]
 }

@@ -14,7 +14,8 @@
 - [ ] Active P2 authority manifest complete and hash-current.
 - [ ] Project Profiles supplement/v10 recorded as deferred post-P2 authority.
 - [ ] Workspace `F:\CLU\workspace\clue` preserved.
-- [ ] Publication state intentionally `NO_REMOTE_YET`.
+- [ ] Active Project Profile and mission policy agree on the remote registration.
+- [ ] For the ADR-0021 successor, publication state is `REMOTE_REGISTERED` and governed publication is disabled.
 - [ ] `START CLU-E` does not synchronize Git.
 
 ## Runtime gates
@@ -25,7 +26,7 @@
 - [ ] Exact Chrome target passes when the proof requires a browser.
 - [ ] `OPENAI_API_KEY` present without exposure.
 - [ ] Provider is OpenAI.
-- [ ] Requested and effective model are exactly `gpt-5.6-sol`.
+- [ ] Requested and effective model equal the exact policy pin `gpt-6-astra` for the ADR-0021 successor.
 - [ ] No fallback.
 - [ ] Gateway operationally ready.
 
@@ -35,8 +36,8 @@
 - [ ] Exact hashes captured.
 - [ ] Creator ratifies interactively.
 - [ ] `ratificationCurrent = true`.
-- [ ] Creator seals `P2-authoritative` interactively.
-- [ ] `epochName = P2-authoritative`.
+- [ ] Creator seals the current P2-authoritative epoch interactively.
+- [ ] Successor `epochName = P2-authoritative-<mission-id>`.
 - [ ] `epochCurrent = true`.
 
 ## Proof-authoritative cycle

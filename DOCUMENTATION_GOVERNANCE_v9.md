@@ -2,7 +2,8 @@
 ## Authority Order, Single-Owner Rules, Terminology, Versioning, and Change Control
 
 **Document status:** permanent normative documentation-governance contract  
-**Revision:** 9.3 (pack release 9.0). Sections 17 and 18 record the 2026-08 executable-alignment amendments. Section 19 records the proposed ADR-0020 successor model and the required ratification and evidence epoch.  
+**Revision:** 9.4 (pack release 9.0). Sections 17–19 record the preceding executable-alignment amendments. Section 20 records the ADR-0021 proposal and its successor evidence requirements.
+
 **Language:** English  
 **Applies to:** the CLU-E permanent project knowledge base and every future coordinated documentation release  
 **Does not contain:** executable-program backlog, current implementation maturity, sprint status, or transient audit findings
@@ -426,3 +427,17 @@ operator verifies the model using the intended provider key and retains that evi
 The Creator ratifies the exact installed pack and then seals a current `P2-authoritative` epoch
 before running the formal proof cycle. Previous authority records and evidence retain their
 original mission and seal identity. The deferred v10 pack retains its separately sealed state.
+
+---
+
+# 20. 2026-11-11 ADR-0021 proposed P2 profile alignment
+
+ADR-0021 proposes an exact OpenAI model and an explicitly registered Git remote for the
+successor P2 mission. AI Utilization §27 owns the model boundary. Git Integration §35 owns
+the remote registration and operator sync boundary. The phase policy and active Project Profile
+bind those decisions to the mission and the cycle lock.
+
+The Creator registers a successor mission, ratifies the installed v9 seal and seals a fresh
+`P2-authoritative-<mission-id>` evidence epoch. Formal closure then requires a completed
+proof-authoritative cycle under that mission. The ACCEPT and closure for `CYCLE-000004` retain
+their original `MISSION-000007` identity. The deferred v10 pack retains its separate seal.

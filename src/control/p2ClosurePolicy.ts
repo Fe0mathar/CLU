@@ -2,8 +2,8 @@
  * P2 phase-boundary policy.
  *
  * This file is mission-bound by `MissionRegistry`. It records the Creator's D4 gateway
- * decision and the two explicitly post-P2 capabilities. The policy does not activate a
- * provider, ratify documents, seal an epoch, or issue a verdict; it only makes phase scope
+ * and D5 remote registration decisions and the two explicitly post-P2 capabilities. The policy does
+ * not activate a provider, ratify documents, seal an epoch, or issue a verdict; it only makes phase scope
  * machine-readable so the cycle lock and closure assessment cannot disagree.
  */
 
@@ -17,6 +17,7 @@ import { hashBytes } from '../shared/ids.js';
 
 export const P2_CLOSURE_POLICY_PATH = 'config/policies/p2-closure.yaml' as const;
 export const P2_OPENAI_MODEL = 'gpt-5.6-sol' as const;
+export const P2_EXACT_OPENAI_MODELS = [P2_OPENAI_MODEL, 'gpt-6-astra'] as const;
 
 export const p2GatewayDecisionSchema = z.enum([
   'PENDING_CREATOR_DECISION',
@@ -36,7 +37,7 @@ export const p2ClosurePolicySchema = z
         recorded_by: z.literal('creator').nullable(),
         reason: z.string().min(1),
         /** Exact Creator-approved provider model; no implicit fallback is allowed. */
-        model: z.enum(['gpt-5.6', P2_OPENAI_MODEL]).nullable().default(null),
+        model: z.enum(['gpt-5.6', ...P2_EXACT_OPENAI_MODELS]).nullable().default(null),
         /** Billing/credit authority is external; CLU-E never invents a provider balance. */
         budget_authority: z.enum(['OPENAI_PLATFORM', 'CLU_E']).nullable().default(null),
         local_budget_enforced: z.boolean().nullable().default(null),
@@ -44,6 +45,17 @@ export const p2ClosurePolicySchema = z
         remaining_token_authority: z.enum(['PROVIDER_ONLY']).nullable().default(null),
       })
       .strict(),
+    // Legacy policies without D5 retain the original local-only closure rule.
+    publication: z
+      .object({
+        decision: z.enum(['NO_REMOTE_YET', 'REMOTE_REGISTERED']),
+        decision_id: z.string().min(1),
+        recorded_at: z.string().regex(/^\d{4}-\d{2}-\d{2}$/u),
+        recorded_by: z.literal('creator'),
+        reason: z.string().min(1),
+      })
+      .strict()
+      .optional(),
     p3_deferrals: z
       .object({
         project_intent_model: z.literal(true),
@@ -103,6 +115,14 @@ export const p2ClosurePolicySchema = z
   });
 
 export type P2ClosurePolicy = z.infer<typeof p2ClosurePolicySchema>;
+
+export function matchesP2Publication(
+  expected: NonNullable<P2ClosurePolicy['publication']>['decision'],
+  observed: { readonly decision: string | null; readonly localOnly: boolean; readonly publicationPermitted: boolean },
+): boolean {
+  return observed.decision === expected && observed.localOnly === (expected === 'NO_REMOTE_YET') &&
+    observed.publicationPermitted === false;
+}
 
 function parsePolicy(bytes: Buffer): P2ClosurePolicy {
   const parsed = p2ClosurePolicySchema.safeParse(parseYaml(bytes.toString('utf8')));
