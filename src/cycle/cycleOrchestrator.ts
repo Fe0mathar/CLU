@@ -666,6 +666,7 @@ export class CycleOrchestrator {
           executable_inputs: control.executable_inputs,
           execution_boundary: control.outcome.execution_boundary,
           profile_relocation: control.profile_relocation,
+          recognition_timings: control.recognition_timings ?? [],
           instrumentation: control.instrumentation,
         }, { label: `proof-control-run-${frozen.contract_hash.slice(0, 12)}.json` });
         controlBaseline = captureBaseline({
@@ -715,10 +716,15 @@ export class CycleOrchestrator {
           throw new Error('Canonical executable inputs changed during candidate execution.');
         }
       } catch (error) {
-        execution = { ok: false, stage: 'instrument', reason: (error as Error).message };
+        execution = {
+          ok: false, stage: 'instrument', reason: (error as Error).message,
+          evidence: (execution.recognition_timings ?? []).map((timing) => `BENCHMARK_TIMING ${JSON.stringify(timing)}`),
+        };
       }
     }
     if (!execution.ok) {
+      const evidence = [...(execution.evidence ?? []),
+        ...(control?.ok === true ? (control.recognition_timings ?? []).map((timing) => `BENCHMARK_TIMING ${JSON.stringify(timing)}`) : [])];
       const refusedEvent = log.append({
         type: PROOF_EVENT_TYPES.executionRefused,
         actor: 'cli',
@@ -728,7 +734,7 @@ export class CycleOrchestrator {
           contract_hash: frozen.contract_hash,
           stage: execution.stage,
           reason: execution.reason,
-          evidence: execution.evidence ?? [],
+          evidence,
         },
       });
       this.runtime.projections.sync(log);
@@ -736,7 +742,7 @@ export class CycleOrchestrator {
         ok: false,
         stage: execution.stage,
         reasons: [execution.reason],
-        ...(execution.evidence === undefined ? {} : { evidence: execution.evidence }),
+        ...(evidence.length === 0 ? {} : { evidence }),
         recorded_event: refusedEvent.id,
       };
     }
@@ -752,6 +758,7 @@ export class CycleOrchestrator {
         inputs: execution.candidate_inputs,
         executable_inputs: execution.executable_inputs,
         execution_boundary: execution.outcome.execution_boundary,
+        recognition_timings: execution.recognition_timings ?? [],
         ...(execution.profile_relocation === undefined ? {} : { profile_relocation: execution.profile_relocation }),
         ...(controlArtifact === null ? {} : { matched_control: controlArtifact }),
         ...(frozen.contract.project_basis === undefined

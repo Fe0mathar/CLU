@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { requirePassingOpening } from './live-candidate-proof.mjs';
+import { buildBlockedReport, requirePassingOpening } from './live-candidate-proof.mjs';
 
 function openingFixture() {
   const boundary = { kind: 'windows-supervisor', sha256: 'wrapper', qualificationSha256: 'qualification' };
@@ -59,4 +59,25 @@ test('candidate review refuses a different opening event, boundary or incomplete
     alter(fixture);
     assert.throws(() => requirePassingOpening(fixture.report, fixture.planned, fixture.runtime), /verified event log|verified opening artifact/);
   }
+});
+
+test('a blocked proof report preserves the recorded event and timing evidence with redaction and bounds', () => {
+  const timing = 'BENCHMARK_TIMING ' + JSON.stringify({
+    role: 'candidate', command: 'cold-recognize', sample: 2, startedAt: '2026-11-11T09:00:00.000Z',
+    finishedAt: '2026-11-11T09:00:16.200Z', wallMs: 16200.25, code: 0, timedOut: false,
+  });
+  const credential = 'sk-test-fixture-redaction';
+  const error = Object.assign(new Error('Proof refused: ' + credential), {
+    recordedEventId: 'EVENT-011883',
+    evidence: [timing, 'Recognize output: Bearer ' + credential, 'a'.repeat(2000),
+      ...Array.from({ length: 35 }, (_, index) => String(index))],
+  });
+  const report = buildBlockedReport(error, 'proof', 'commit');
+  assert.equal(report.state, 'BLOCKED');
+  assert.equal(report.recordedEventId, 'EVENT-011883');
+  assert.equal(report.evidence[0], timing);
+  assert.equal(report.evidence[1], 'Recognize output: Bearer [REDACTED]');
+  assert.equal(report.evidence[2].length, 1024);
+  assert.equal(report.evidence.length, 32);
+  assert.ok(!JSON.stringify(report).includes(credential));
 });

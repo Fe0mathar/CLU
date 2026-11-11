@@ -179,6 +179,16 @@ function stageCandidateCache(cacheDirectory, cacheSource) {
   return cache;
 }
 
+export function buildBlockedReport(error, stage, sourceCommit) {
+  const detail = redactSecretText(error instanceof Error ? error.message : String(error)).text.slice(0, 1024);
+  const recordedEventId = /^EVENT-[0-9]+$/u.test(error?.recordedEventId ?? '') ? error.recordedEventId : undefined;
+  const evidence = Array.isArray(error?.evidence)
+    ? error.evidence.slice(0, 32).filter((item) => typeof item === 'string')
+      .map((item) => redactSecretText(item).text.slice(0, 1024))
+    : undefined;
+  return { state: 'BLOCKED', stage, sourceCommit, detail, recordedEventId, evidence };
+}
+
 async function main() {
   const [operation, sourceCommit, ...args] = process.argv.slice(2);
   const execute = operation === '--run';
@@ -220,7 +230,7 @@ async function main() {
       });
       if (!result.ok) {
         throw Object.assign(new Error('Proof refused at ' + result.stage + ': ' + result.reasons.join(' / ')),
-          { recordedEventId: result.recorded_event });
+          { recordedEventId: result.recorded_event, evidence: result.evidence });
       }
       const events = [...runtime.requireLog().replay()];
       const bound = events.findLast((event) => event.type === PROOF_EVENT_TYPES.baselineBound &&
@@ -267,9 +277,7 @@ async function main() {
       state: 'PASS', sourceCommit, review: plan.review, reviewDigest: reviewedDigest, executionBoundary: boundary, ...receipt,
     }) + '\n');
   } catch (error) {
-    const detail = redactSecretText(error instanceof Error ? error.message : String(error)).text.slice(0, 1024);
-    const recordedEventId = /^EVENT-[0-9]+$/u.test(error?.recordedEventId ?? '') ? error.recordedEventId : undefined;
-    process.stdout.write(JSON.stringify({ state: 'BLOCKED', stage, sourceCommit, detail, recordedEventId }) + '\n');
+    process.stdout.write(JSON.stringify(buildBlockedReport(error, stage, sourceCommit)) + '\n');
     process.exitCode = 1;
   }
 }

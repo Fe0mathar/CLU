@@ -34,10 +34,11 @@ function writeFile(path: string, content: string): void {
   writeFileSync(path, content, 'utf8');
 }
 
-function writeSelfTargetStick(root: string, version = '0.1.0'): string {
+function writeSelfTargetStick(root: string, version = '0.1.0', extraBody: readonly string[] = []): string {
   const body = [
     "const candidate = String(context.repoRoot).replace(/\\\\/g,'/').includes('/proof-');",
     'const cost = candidate ? 80 : 100;',
+    ...extraBody,
     `return { benchmarkVersion:'${version}', unifiedScore:null,`,
     " measures:[{id:'SIG-COST',name:'cost',scenario:'S1',native_unit:'ms',aggregation:'median',value:cost,samples:[cost],warmup_samples:[]},",
     "           {id:'SIG-GUARD',name:'guard',scenario:'S1',native_unit:'count',aggregation:'exact',value:1,samples:[1],warmup_samples:[]}],",
@@ -98,6 +99,55 @@ test('a candidate cannot replace an offline suite test in the version 0.2.0 benc
   assert.deepEqual(result, {
     ok: false, stage: 'patch', reason: `a proof candidate cannot modify the benchmark instrument: ${testPath}`,
   });
+});
+
+test('version 0.2.0 proof refusals retain the recognition command timings', async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'clue-proof-recognition-timing-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const project = join(root, 'target');
+  writeFile(join(project, 'src', 'value.ts'), 'export const value = 100;\n');
+  const stick = writeSelfTargetStick(project, '0.2.0', [
+    "await context.exec([...context.cliArgv, 'recognize', '--full', '--navigator']);",
+    "await context.exec([...context.cliArgv, 'recognize', '--navigator']);",
+  ]);
+  const exec = async (argv: readonly string[]) => ({ code: 0,
+    stdout: argv.includes('--full') ? 'INFO  elapsed                          31 ms\r\n' : '',
+    stderr: '', wallMs: 58.125, timedOut: false });
+  const opening = await runMasterBenchmark({
+    repoRoot: root, projectRoot: project, workspaceRoot: root, contractPath: stick, execImpl: exec,
+  });
+  assert.ok(opening.ok, opening.ok ? '' : opening.reason);
+  const baseline = captureBaseline({
+    outcome: opening, snapshot_id: SNAPSHOT, mission_version: 'MISSION-SELF-000001',
+    run_artifact: { hash: '8'.repeat(64), bytes: 1, media_type: 'application/json; charset=utf-8',
+      label: 'opening.json', created_at: opening.timing.finished_at },
+  });
+  const frozen = freezeProofContract({ contract: contract(), policy: POLICY, capabilities: ['benchmark:clu-master'] });
+  assert.ok(!('refusals' in frozen));
+  const deps = {
+    frozen, baseline, projectRoot: project, pinnedInputs: captureExactRunInputs(project),
+    shadow: { root: join(root, 'shadow'), persistent: false, install_command: null, install_on_lockfile_change: true },
+    scripts: { typecheck: 'node typecheck.js', build: 'node build.js' },
+    benchmarkContractPath: stick, repoRoot: root, execImpl: exec,
+  };
+  const prefix = 'BENCHMARK_TIMING ';
+  const checkRefusal = (result: Awaited<ReturnType<typeof executeProofPlan>>, role: 'control' | 'candidate') => {
+    assert.ok(!result.ok && result.stage === 'instrument');
+    assert.match(result.reason, /13 required signals/);
+    const timings = result.evidence?.filter((line) => line.startsWith(prefix)).map((line) => {
+      const { startedAt, finishedAt, ...timing } = JSON.parse(line.slice(prefix.length));
+      assert.ok(Date.parse(startedAt) <= Date.parse(finishedAt));
+      return timing;
+    });
+    assert.deepEqual(timings, [
+      { role, command: 'cold-recognize', sample: 1, wallMs: 58.125, internalElapsedMs: 31, code: 0, timedOut: false },
+      { role, command: 'incremental-recognize', sample: 1, wallMs: 58.125, internalElapsedMs: null, code: 0, timedOut: false },
+    ]);
+  };
+  checkRefusal(await executeMatchedProofControl(deps), 'control');
+  checkRefusal(await executeProofPlan({
+    ...deps, patch: [{ op: 'write', path: 'src/value.ts', content: 'export const value = 80;\n' }],
+  }), 'candidate');
 });
 
 test('a matched proof control measures the pinned unchanged tree in a fresh separate lease', async (t) => {

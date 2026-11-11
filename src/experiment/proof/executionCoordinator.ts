@@ -140,6 +140,18 @@ export interface ProofExecutionDeps {
 
 export type ProofExecutionRefusalStage = 'contract' | 'baseline' | 'shadow' | 'patch' | 'static' | 'instrument';
 
+interface RecognitionCommandTiming {
+  readonly role: 'control' | 'candidate';
+  readonly command: 'cold-recognize' | 'incremental-recognize';
+  readonly sample: number;
+  readonly startedAt: string;
+  readonly finishedAt: string;
+  readonly wallMs: number;
+  readonly internalElapsedMs: number | null;
+  readonly code: number;
+  readonly timedOut: boolean;
+}
+
 export type ProofExecution =
   | {
       readonly ok: true;
@@ -155,6 +167,7 @@ export type ProofExecution =
       readonly static_preparation: readonly { readonly script: string; readonly wall_ms: number }[];
       readonly instrumentation: readonly ProofInstrumentationChange[];
       readonly profile_relocation?: ShadowBenchmarkProfileInputs['receipt'];
+      readonly recognition_timings?: readonly RecognitionCommandTiming[];
       readonly anomalies: readonly string[];
     }
   | {
@@ -859,6 +872,23 @@ async function executeShadowProof(deps: ProofExecutionDeps, matchedControl: bool
     }
 
     // §13 — the frozen plan's instrument: the same stick, over the candidate tree.
+    const recognitionTimings: RecognitionCommandTiming[] = [];
+    const recognitionSamples = { 'cold-recognize': 0, 'incremental-recognize': 0 };
+    const observedExec: ExecFn = async (argv, options) => {
+      if (argv[2] !== 'recognize' || argv.at(-1) !== '--navigator') return exec(argv, options);
+      const command = argv[3] === '--full' ? 'cold-recognize' : 'incremental-recognize';
+      const sample = ++recognitionSamples[command];
+      const startedAt = new Date().toISOString();
+      const run = await exec(argv, options);
+      const internal = /^INFO\s+elapsed\s+(\d+) ms\s*$/m.exec(run.stdout)?.[1];
+      if (recognitionTimings.length < 8 && Number.isFinite(run.wallMs)) {
+        recognitionTimings.push({ role: matchedControl ? 'control' : 'candidate', command, sample,
+          startedAt, finishedAt: new Date().toISOString(), wallMs: run.wallMs,
+          internalElapsedMs: internal === undefined ? null : Number(internal), code: run.code, timedOut: run.timedOut });
+      }
+      return run;
+    };
+    const timingEvidence = () => recognitionTimings.map((timing) => `BENCHMARK_TIMING ${JSON.stringify(timing)}`);
     const outcome = await runMasterBenchmark({
       repoRoot: executionLocation.runner_repo_root,
       projectRoot: shadowDir,
@@ -866,7 +896,7 @@ async function executeShadowProof(deps: ProofExecutionDeps, matchedControl: bool
       contractPath: deps.benchmarkContractPath,
       contractBytes: benchmarkBytes,
       maxProofDurationSeconds: deps.frozen.contract.execution.max_duration_seconds,
-      execImpl: exec,
+      execImpl: requiresCompleteCluBenchmark ? observedExec : exec,
       ...(executionScope === undefined ? {} : { executionBoundary: executionScope.boundary }),
       log: (line) => log(`instrument: ${line}`),
     });
@@ -875,6 +905,7 @@ async function executeShadowProof(deps: ProofExecutionDeps, matchedControl: bool
         ok: false,
         stage: 'instrument',
         reason: `the measuring stick refused at ${outcome.stage}: ${outcome.reason}`,
+        evidence: timingEvidence(),
       };
     }
 
@@ -891,7 +922,7 @@ async function executeShadowProof(deps: ProofExecutionDeps, matchedControl: bool
         throw new Error('benchmark contract changed during execution');
       }
     } catch (error) {
-      return { ok: false, stage: 'instrument', reason: (error as Error).message };
+      return { ok: false, stage: 'instrument', reason: (error as Error).message, evidence: timingEvidence() };
     }
 
     if (requiresCompleteCluBenchmark && !isCompleteCluBenchmarkV020(outcome.result)) {
@@ -899,7 +930,7 @@ async function executeShadowProof(deps: ProofExecutionDeps, matchedControl: bool
         ok: false,
         stage: 'instrument',
         reason: 'the candidate benchmark did not produce all 13 required signals',
-        evidence: outcome.result.incomplete.map(({ id, reason }) => `${id}: ${reason}`),
+        evidence: [...outcome.result.incomplete.map(({ id, reason }) => `${id}: ${reason}`), ...timingEvidence()],
       };
     }
 
@@ -924,6 +955,7 @@ async function executeShadowProof(deps: ProofExecutionDeps, matchedControl: bool
       static_preparation: staticReceipts,
       instrumentation: executionLocation.instrumentation,
       ...(profileInputs === undefined ? {} : { profile_relocation: profileInputs.receipt }),
+      ...(recognitionTimings.length === 0 ? {} : { recognition_timings: recognitionTimings }),
       anomalies,
     };
   } catch (error) {
