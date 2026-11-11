@@ -47,15 +47,15 @@ constitution:
   tracked_documents:
     - "CLUE_Constitution_v9.md"
     - "RPI_Core_Methodology_v9.md"
-    - "CLUE_AI_Utilization_v9.md"
-    - "CLUE_Git_Integration_v9.md"
+    - "CLUE_AI_Utilization_v10.md"
+    - "CLUE_Git_Integration_v10.md"
     - "CLUE_Canonical_Measurement_Catalogue_v9.md"
-    - "CLUE_Status_Contract_v9.md"
-    - "CLUE_Q1_System_Navigator_v9.md"
-    - "CLUE_Architecture_v9.md"
-    - "CLUE_Execution_Model_v9.md"
-    - "CLUE_Interface_Design_v9.md"
-    - "CLUE_Project_Directory_v9.md"
+    - "CLUE_Status_Contract_v10.md"
+    - "CLUE_Q1_System_Navigator_v10.md"
+    - "CLUE_Architecture_v10.md"
+    - "CLUE_Execution_Model_v10.md"
+    - "CLUE_Interface_Design_v10.md"
+    - "CLUE_Project_Directory_v10.md"
 
 # Murugan-side commands. Executed through the restricted PowerShell host, with the
 # SHADOW clone as working directory for all experiment and verification work.
