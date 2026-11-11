@@ -1489,15 +1489,6 @@ function aggregateDeclarations(node: ts.Node): ts.Node[] {
     .sort(compareNodePosition);
 }
 
-/** The declarations that can collide under one logical parent, including merged-owner fragments. */
-function identitySiblings(node: ts.Node): ts.Node[] {
-  const owner = nearestRecognisedOwner(node);
-  if (isMergeAggregateDeclaration(owner)) {
-    return aggregateDeclarations(owner).flatMap((fragment) => directRecognisedChildren(fragment)).sort(compareNodePosition);
-  }
-  return directRecognisedChildren(owner);
-}
-
 function encodedName(node: ts.Node): string | null {
   const name = recognisedName(node);
   return name === null ? null : encodeURIComponent(name);
@@ -1544,20 +1535,47 @@ function basePathSegment(node: ts.Node): string | null {
   return null;
 }
 
+const siblingGroupsCache = new WeakMap<ts.Node, ReadonlyMap<string, readonly ts.Node[]>>();
+const pathSegmentCache = new WeakMap<ts.Node, string>();
+
+/** Index collisions once for each AST owner, keeping the existing source order for ordinals. */
+function siblingCollisionGroups(owner: ts.Node): ReadonlyMap<string, readonly ts.Node[]> {
+  const cached = siblingGroupsCache.get(owner);
+  if (cached !== undefined) return cached;
+
+  const siblings = isMergeAggregateDeclaration(owner)
+    ? aggregateDeclarations(owner).flatMap((fragment) => directRecognisedChildren(fragment)).sort(compareNodePosition)
+    : directRecognisedChildren(owner);
+  const groups = new Map<string, ts.Node[]>();
+  for (const sibling of siblings) {
+    const base = basePathSegment(sibling);
+    if (base === null) continue;
+    const group = groups.get(base);
+    if (group === undefined) groups.set(base, [sibling]);
+    else group.push(sibling);
+  }
+  siblingGroupsCache.set(owner, groups);
+  return groups;
+}
+
 /**
  * A declaration's own path segment. Discriminators are unconditional where contracts may coexist.
  * The final ordinal exists only for genuinely identical semantic declarations; because such nodes are
  * indistinguishable, the ordinal cannot reassign meaning between different contracts.
  */
 function pathSegment(node: ts.Node): string | null {
+  const cached = pathSegmentCache.get(node);
+  if (cached !== undefined) return cached;
   const base = basePathSegment(node);
   if (base === null) return null;
-  if (isMergeAggregateDeclaration(node)) return base;
-
-  const collisionGroup = identitySiblings(node).filter((candidate) => basePathSegment(candidate) === base);
-  if (collisionGroup.length <= 1) return base;
-  const tie = collisionGroup.indexOf(node);
-  return `${base}~duplicate${tie < 0 ? 0 : tie}`;
+  const group = isMergeAggregateDeclaration(node)
+    ? undefined
+    : siblingCollisionGroups(nearestRecognisedOwner(node)).get(base);
+  const segment = group !== undefined && group.length > 1
+    ? `${base}~duplicate${Math.max(0, group.indexOf(node))}`
+    : base;
+  pathSegmentCache.set(node, segment);
+  return segment;
 }
 
 /** Dotted segments from the outermost recognised/namespace ancestor down to `node`, or null. */
