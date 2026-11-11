@@ -2299,10 +2299,13 @@ With this architecture, token efficiency does not weaken CLU-E. It is what allow
 
 ## 27.1 Operational provider and model identity
 
-For the P2 reference installation, OpenAI is the active provider and `gpt-5.6` is the exact
-Creator-selected model identity for enabled routes. The identity is a configuration requirement,
-not a claim that every provider project or key has access. Before submission, the adapter validates
-the exact model against the provider and refuses rather than silently substituting another model.
+OpenAI is the provider for the P2 reference installation. ADR-0017 recorded `gpt-5.6`,
+ADR-0020 selected `gpt-5.6-sol`, and ADR-0021 pinned `gpt-6-astra` for the successor P2 mission.
+The P2 closure policy and its verified mission evidence retain that exact provider identity.
+
+The adapter validates access to the configured model before submission and checks the effective
+provider model on completion. A missing or different model causes refusal. Each Project Profile
+records its own model. A later mission-bound model change requires separate policy review and evidence.
 
 ## 27.2 Money, usage and remaining allowance
 
@@ -2339,19 +2342,23 @@ Profiles store credential references only. Approved forms are environment or cre
 
 ## C. Exact model and provider authority
 
-For the current governed route:
+The qualified `clue1` generation 9 route is:
 
 ```text
 provider = openai
-requestedModel = gpt-5.6
-effectiveModel = gpt-5.6
+requestedModel = gpt-6-astra
+effectiveModel = gpt-6-astra
 fallbackPolicy = FORBID
 fallbackUsed = false
 spendAuthority = openai_platform
 localBudgetEnforced = false
 ```
 
-A different effective model is `MODEL UNAVAILABLE`, not a silent fallback. The project identity and generation are checked again before attributing a provider response, preventing an in-flight Project A response from becoming Project B evidence.
+Profile A's Windows qualification verified the exact provider response through its saved credential
+reference. Each enabled profile requires its own requested/effective model match. An unavailable or
+different effective model is `MODEL UNAVAILABLE`. The gateway rechecks project identity and generation
+before attributing a provider response, preventing an in-flight Project A response from becoming
+Project B evidence. The local acceptance fixture B disables GPT.
 
 ## D. Controlled pause
 

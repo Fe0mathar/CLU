@@ -1662,21 +1662,24 @@ CLU-E binds the two without allowing either to impersonate the other.
 
 ---
 
-# 35. 2026-08-14 executable-alignment amendment — local-first manual sync boundary
+# 35. Registered remote and local-first manual sync boundary
 
-P2 exposes one manual `SYNC GIT` operator convenience beside `START CLU-E`. The two actions are
-independent: Start, proof, ACCEPT and cycle closure never trigger Git synchronization.
+The dashboard exposes `/git sync` as an explicit Q4 operator command. Start, proof, ACCEPT and cycle
+closure operate independently of Git synchronization.
 
-The P2 action is deliberately narrower than the full lifecycle in this document. With
-`NO_REMOTE_YET`, it refuses without contacting Git. With a later registered remote, it requires a
-clean attached branch, fetches first, reports unchanged state, fast-forwards behind-only state,
-pushes ahead-only state and refuses divergence. It provides no merge, rebase, force push, stash,
-semantic conflict resolution, protected-ref authority or proof-to-commit binding. Credentials remain
-with the host Git credential helper or SSH agent.
+ADR-0021 records `REMOTE_REGISTERED` for the successor P2 mission. The closure policy binds that
+decision and the active Project Profile binds the credential-free remote. Profile `clue1` generation
+9 has a registered remote. The acceptance fixture `clue-v10-acceptance-b` generation 1 uses
+`NO_REMOTE_YET`, so Sync Git refuses before contacting a remote. Sync Git on a registered remote
+requires a clean attached branch, fetches first, reports unchanged state, fast-forwards behind-only
+state, pushes ahead-only state and refuses divergence. Credentials remain with the host Git credential
+helper or SSH agent.
 
-This action does not satisfy Section 32 and does not populate the governed `versionControl` Status
-branch. The complete repository registration, worktree lease, sealed candidate commit, remote
-checks, landing, publication receipt and automatic recovery lifecycle remains P4 scope.
+Manual sync grants no authority to merge, rebase, force push, stash, resolve semantic conflicts or
+update protected refs. Section 32 acceptance and the governed `versionControl` Status branch belong
+to the full P4 lifecycle. That lifecycle binds the accepted source tree to a dedicated remote review
+branch, checks remote CI and review evidence, records publication and Custodian landing receipts,
+verifies the landed tree and retains rollback evidence.
 
 ---
 
@@ -1692,7 +1695,9 @@ Every profile binds Repository Root, remote, provider, default branch, protected
 
 ## C. Explicit synchronization
 
-`START CLU-E` never performs fetch, pull, push or remote discovery. `SYNC GIT` is a separate operator action and remains blocked when no remote is configured. Connection tests must distinguish absent remote from an invalid repository.
+The Q4 `/start` command never performs fetch, pull, push or remote discovery. `/git sync` requires a
+separate operator request and a registered remote. Connection tests distinguish an intentional
+local-only posture from invalid repository configuration.
 
 ## D. Switching
 

@@ -403,10 +403,9 @@ installation.
 
 ---
 
-# 18. 2026-08-14 ADR-0017 ratification amendment
+# 18. 2026-08-14 ADR-0017 ratification amendment (historical)
 
-Before the final P2 evidence epoch, the permanent authority set is amended to record the Creator's
-operational D4 decision and manual local-first Git boundary:
+The ADR-0017 amendment recorded the Creator's operational D4 decision and manual local-first Git boundary before the final P2 evidence epoch:
 
 - exact provider model `gpt-5.6`, validated against provider availability with no fallback;
 - OpenAI Platform as sole monetary/billing authority;
@@ -418,10 +417,16 @@ operational D4 decision and manual local-first Git boundary:
   acceptance;
 - Project Intent Model compiler and environment adapter registry retained as explicit P3 deferrals.
 
-These amended bytes require a new manifest/seal, interactive Creator ratification and a new current
-`P2-authoritative` epoch before any final cycle evidence can satisfy closure. ADR-0017 supersedes
+At that point the amended bytes required a new manifest and seal, interactive Creator ratification, and a current
+`P2-authoritative` epoch before final cycle evidence could satisfy closure. ADR-0017 superseded
 ADR-0016's former `PENDING_CREATOR_DECISION` D4 state without changing ADR-0016's self-target proof
 and read-only closure-control decisions.
+
+The successor P2 mission adopted the exact `gpt-6-astra` model and the active profile's
+`REMOTE_REGISTERED` Git decision under ADR-0021. Those decisions are recorded in the historical
+P2 evidence and carry forward in the relevant v10 owner documents. Exact model selection and
+Git mode are profile-scoped. The manual Sync Git boundary and the P4 lifecycle deferral remain
+in force.
 
 ---
 
@@ -429,7 +434,7 @@ and read-only closure-control decisions.
 
 ## A. Release classification
 
-The v10 pack is a coordinated release candidate that promotes the Project Profiles supplement into an implementation-aligned authority set only after P2 is historically closed and the v10 live acceptance gates pass. Installing the files is not ratification.
+The v10 pack is a coordinated release candidate that incorporates the Project Profiles supplement. The P2 receipt and its Creator approval preserve the historical v9 closure. The installed authority remains on v9 during v10 candidate preparation and review.
 
 ## B. Source preservation
 
@@ -443,18 +448,18 @@ The P2 formal-closure handoff and file-by-file strategy are retained as planning
 
 ## C. Promotion gate
 
-Before promotion:
+Promotion and acceptance follow this order.
 
-1. complete authoritative Windows Project Profiles acceptance;
-2. preserve the immutable P2 closure receipt;
-3. verify `SHA256SUMS_v10.txt` and `DOCUMENTATION_MANIFEST_v10.json`;
-4. run the reviewed `npm run project-profiles:promote-v10` act, which coordinates the selected seal/manifest with the eight v10 owner-document registrations and preserves backups;
-5. perform interactive Creator ratification;
-6. seal `POST-P2-PROJECT-PROFILES`;
-7. run representative recognition/proof work on at least two profiles;
-8. record explicit Creator acceptance of Project Profiles.
+1. Preserve the immutable P2 closure receipt and its Creator approval.
+2. Complete authoritative Windows Project Profiles acceptance, using the P15A dashboard run as the live isolation evidence.
+3. Verify `SHA256SUMS_v10.txt` and `DOCUMENTATION_MANIFEST_v10.json` and review the exact candidate.
+4. Run `npm run project-profiles:promote-v10` and enter its interactive Creator confirmation. It coordinates the selected seal and manifest with the eight v10 owner-document registrations and preserves backups.
+5. Bootstrap the successor mission and review the resulting governed input changes.
+6. Ratify the selected v10 pack interactively, then seal `POST-P2-PROJECT-PROFILES` under the current mission.
+7. Run representative recognition and proof work on at least two profiles.
+8. Record explicit Creator acceptance of Project Profiles after reviewing the evidence.
 
-No script may simulate the Creator's ratification or epoch statement.
+Selection, ratification, epoch sealing and final acceptance each require their own Creator act.
 
 ## D. Drift
 

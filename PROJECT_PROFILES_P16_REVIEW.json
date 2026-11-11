@@ -1,0 +1,80 @@
+{
+  "schemaVersion": "clue-project-profiles-candidate-review/1",
+  "state": "P15A_LIVE_PROFILE_ISOLATION_VERIFIED",
+  "baseSource": {
+    "commit": "bc0db64e1dcfffe5433718b450cc58d88ff4e789",
+    "tree": "289fcc3aca9234a5ac2d7c5c99a4f5648e97ef0d"
+  },
+  "evidence": {
+    "p2Receipt": {
+      "file": "P2_FORMAL_CLOSURE_RECEIPT.json",
+      "sha256": "d1330434f50f10f3a986472b7a739d1c4842b29bc92ed4ea23291ad8c2e96c1a"
+    },
+    "creatorP2Approval": {
+      "file": "P2_CREATOR_APPROVAL.txt",
+      "sha256": "52a20382ce01f28a0eedf6d0281bf08c737cc2a1f48440a7f62430bc430930b9"
+    },
+    "windowsP14Qualification": {
+      "file": "CLU-E-P14-Profile-Qualification-2026-11-11T16-58-17-534Z-b71b1b52.json",
+      "sha256": "f506c99f16e9b25bed74625a830a0f84282a7af2ad0cb1106364aaa4c4e68773"
+    },
+    "windowsP15Installation": {
+      "file": "CLU-E-P15-Installation-2026-11-11T17-16-41-217Z-805f9beb.json",
+      "sha256": "ba609c4aaebd4485bc837ba8f776e1f590419b6e055f468eee1697e973e8ff71"
+    },
+    "windowsP15ConsoleLog": {
+      "file": "Wklejony tekst(3).txt",
+      "sha256": "b8b72b4dc318f213ea01d3e24306074af6d1e6ad56e3a768afd70e89e473ed86"
+    },
+    "windowsP15ALiveSwitch": {
+      "file": "CLU-E-P15A-Live-Profile-Switch-2026-11-11T17-30-22-790Z.json",
+      "sha256": "696b0b62399112b9141f643e250ced00fa9b9e7b6359b1170ccebd34fd1a848b"
+    }
+  },
+  "priorAuthority": {
+    "version": "9.0",
+    "missionId": "MISSION-000008",
+    "verdictEventId": "EVENT-012055",
+    "greatBookEntryId": "GBI-27c640ce3fc712050ca84250ca89da4a"
+  },
+  "windowsP14": {
+    "projectId": "clue1",
+    "generation": 9,
+    "powerShellHost": "HOST_READY",
+    "requestedModel": "gpt-6-astra",
+    "effectiveModel": "gpt-6-astra",
+    "fallbackUsed": false,
+    "gitPublicationMode": "REMOTE_REGISTERED"
+  },
+  "windowsP15": {
+    "focusedTestsPassed": 126,
+    "fixtureB": "SEEDED"
+  },
+  "windowsP15A": {
+    "state": "PASS",
+    "route": [
+      "clue1",
+      "clue-v10-acceptance-b",
+      "clue1"
+    ],
+    "registryGenerations": [
+      15,
+      16,
+      17
+    ],
+    "returnedProjectId": "clue1",
+    "retainedAFiles": 897,
+    "fixtureBFiles": 7,
+    "fixtureBProofAttempts": 0,
+    "fixtureBGreatBookEntries": 0,
+    "semanticSnapshotB": "0e477a12fbceff956d5749fa9144f193c52d065efe6ddcc8f915cc23f341d9ef",
+    "physicalSnapshotB": "dfcd3f307a87f9cdf01c0fd402a47d39ca1d19628c2eec7096f18fd7485aa32a"
+  },
+  "pending": [
+    "fresh Windows full regression for this candidate",
+    "corroborate remaining native and live acceptance gates",
+    "interactive v10 promotion and Creator ratification",
+    "successor evidence epoch and representative operations on both profiles",
+    "separate Creator Project Profiles acceptance"
+  ]
+}

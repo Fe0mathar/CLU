@@ -1,13 +1,13 @@
 # CLU-E Interface Design v10 — Project Profiles release candidate
 
 **Document status:** v10 release candidate — not active authority until explicit Creator ratification  
-**Preserved basis:** the complete pre-existing `CLUE_Interface_Design_v10.md` supplied in the project tree  
+**Source basis:** the pre-existing interface design supplied in the project tree
 
-The preserved interface body follows. The coordinated Project Profiles amendment at the end resolves the formerly untracked v10 document into this release candidate without discarding its design work.
+The Project Profiles amendment and the reviewed dashboard controls are incorporated below.
 
 ---
 
-# Part I — Preserved interface design
+# Part I — Interface design
 
 # CLU-E Interface Design v10
 ## Two-Tab, Four-Quadrant WebGPU Mission-Control Console for Recursive Project Improvement
@@ -178,21 +178,10 @@ The operator should not need to see configuration during normal operation. Confi
 - the Start action detects an invalid setup,
 - or a Dashboard health indicator is selected to focus the corresponding configuration section.
 
-## 2.3 One primary Start / Stop control
+## 2.3 Typed cycle control
 
-Dashboard contains one unmistakable stateful control:
-
-```text
-START CLU-E
-```
-
-When running, the same control becomes:
-
-```text
-STOP CLU-E
-```
-
-This is not a decorative button. It is the primary mission authority control.
+Enter `/start` in the Q4 command pane to drive or recover the governed cycle through screening.
+The Status bulb summarizes the current process and the command pane renders the backend receipt.
 
 ## 2.4 No generic button farm
 
@@ -200,10 +189,9 @@ Controls must remain sparse and meaningful.
 
 Dashboard should contain only:
 
-- the Start / Stop control,
+- the Q4 command pane,
 - the two top-level tabs,
-- compact focus controls where necessary,
-- and a minimal command rail for expert operation.
+- compact focus controls where necessary.
 
 Configuration may contain explicit actions such as:
 
@@ -402,16 +390,15 @@ The Dashboard tells the operator:
 
 ## 5.2 Dashboard visual composition
 
-The top mission rail contains:
+The top mission rail contains the CLU-E wordmark, a compact animated seal, readiness bulbs and
+the two navigation icons.
 
 ```text
-[DASHBOARD] [CONFIGURATION]
-START / STOP CLU-E
-CLU-E STATUS
-mission · target · cycle · snapshot · state seal · integration health
+CLU-E · SEAL       STATUS · GIT · AI · CHROME · CONSOLE       [DASHBOARD] [CONFIGURATION]
 ```
 
-The remaining usable body is a fixed equal 2 × 2 matrix:
+The fixed composition uses an equal 2 × 2 matrix. Configuration owns the window composition
+control, where the operator can choose individually movable and resizable quadrant windows.
 
 ```text
 ┌──────────────────────────────────┬──────────────────────────────────┐
@@ -425,13 +412,13 @@ The remaining usable body is a fixed equal 2 × 2 matrix:
 │                                  │                                  │
 │ four selected metric projections │ real subsystem I/O               │
 │ native + normalized + confidence │ WHAT / WHY / CURRENT / NEXT      │
-│                                  │ CLU-E STATUS control             │
+│                                  │ typed commands and CLUE dialogue │
 └──────────────────────────────────┴──────────────────────────────────┘
 ```
 
 Rules:
 
-1. each quadrant occupies 25% of the Dashboard body;
+1. each quadrant occupies 25% of the Dashboard body in fixed composition;
 2. no quadrant becomes a third navigation system;
 3. selection in one quadrant may focus the same durable IDs in another;
 4. all four consume one sealed `ConsoleSnapshot`;
@@ -439,135 +426,33 @@ Rules:
 6. each quadrant has a reduced textual fallback, but no fallback may claim WebGPU health;
 7. dense detail opens in-place and returns to the same composition.
 
-# 6. Dashboard Start / Stop Core
+# 6. Dashboard cycle control
 
-## 6.1 Primary control states
+## 6.1 Start and status
 
-The control changes label and energy state according to CLU-E status.
+The Q4 `/start` command requests the governed cycle drive through screening. The command pane
+renders the acceptance, attachment, recovery guidance or refusal returned by the daemon. Use
+`/status` or `/cycle status` to inspect process state and the last durable checkpoint. Operation
+readiness is derived from the required capabilities for the current profile and scope.
 
-### Stopped
+## 6.2 Agent controls
 
-```text
-START CLU-E
-```
-
-- blue frame,
-- quiet glow,
-- no moving mission pulse,
-- configuration readiness shown beside it.
-
-### Starting
-
-```text
-STARTING…
-```
-
-- gold energy builds clockwise around the control,
-- prerequisite checks stream outward,
-- control is temporarily locked.
-
-### Running
-
-```text
-STOP CLU-E
-```
-
-- gold active ring,
-- slow heartbeat,
-- mission energy flows into the rest of Dashboard.
-
-### Graceful stopping
-
-```text
-STOPPING AFTER CHECKPOINT…
-```
-
-- gold fades toward blue,
-- current session remains visibly active,
-- next sessions are prevented from starting,
-- estimated checkpoint time is shown.
-
-### Blocked
-
-```text
-START BLOCKED
-```
-
-- orange edge,
-- exact prerequisite named,
-- selecting the control switches to Configuration and focuses the invalid section.
-
-### Error
-
-```text
-CLU-E HALTED
-```
-
-- orange pulse,
-- fault reason visible,
-- no claim that work stopped cleanly unless confirmed.
-
-## 6.2 Stop semantics
-
-A normal click on `STOP CLU-E` performs a **graceful stop after the current safe checkpoint**.
-
-A deliberate hold interaction may invoke emergency termination:
-
-```text
-HOLD 2 SECONDS — HALT ALL
-```
-
-Emergency halt must be visually and semantically distinct. It may leave sessions requiring recovery and must never be presented as an ordinary clean stop.
-
-## 6.3 Start validation
-
-Before starting, CLU-E validates:
-
-- Scan Root,
-- Maintenance Root,
-- repository state,
-- storage availability,
-- AI provider availability,
-- session policy,
-- Chrome policy when browser tests are required,
-- PowerShell policy when local execution is required.
-
-If a nonessential integration is unavailable, CLU-E may start in a clearly declared degraded mode. If a required integration is unavailable, Start is blocked with an exact reason.
+The lower Q4 pane accepts the typed operator commands listed by `/help` and ordinary CLUE dialogue.
+`/halt [reason]` pauses CLUE and stops its active conversation turn. `/resume` resumes that
+conversation. The Q4 input grants only the authority of the typed actions registered by the dashboard.
 
 ---
 
-# 7. Dashboard Command Crown
+# 7. Dashboard readiness ribbon
 
-The upper operational band must show:
+The Status bulb combines stream, process and seal health. Its detail shows the current project
+identity and the available process receipt. The compact seal animates the received Status hash
+and exposes the complete hash in its tooltip.
 
-- overall CLU-E state,
-- mission,
-- campaign,
-- cycle,
-- repository snapshot,
-- elapsed mission time,
-- current session count,
-- call count,
-- remaining call budget,
-- integration health.
-
-Example:
-
-```text
-CLU-E STATUS      RUNNING — STABLE
-MISSION          MURUGAN PERFECT EFFICIENCY
-CAMPAIGN         GPU MEMORY LIFECYCLE
-CYCLE            0148
-SNAPSHOT         81ac72f
-UPTIME           14:26:38
-
-SESSIONS         4 ACTIVE / 6 LIMIT
-CALLS            186 TODAY / 3 IN FLIGHT / 11 QUEUED
-BUDGET           214 / 400 REMAINING
-INTEGRATIONS     PROJECT OK · CHROME OK · PS OK · IDE OK · AI OK
-```
-
-Integration health indicators are summaries only. Selecting one switches to Configuration and focuses its section.
+The Git, AI, Chrome and Console bulbs summarize capability evidence. Selecting a non-ready
+integration opens its Configuration section. The Chrome and Console test actions report the
+result for the current dashboard session and exact profile generation. Detailed mission, cycle
+and repository evidence remains in the sealed Status and the project-bound views.
 
 ---
 
@@ -1033,7 +918,10 @@ The Operational Console answers:
 
 > What is CLU-E computing, sending, receiving, proving, waiting for, and recording right now—and why?
 
-It is cinematic because the data flow is alive. It is trustworthy because every visible operation comes from an ordered, typed, redacted backend event.
+The upper pane contains the current work contract, operation feed and command receipts. Its
+operation records come from ordered, typed, redacted backend events. The lower pane contains
+command and conversation history above the CLUE prompt. The operation feed and command history
+scroll independently.
 
 ### 10.4.2 Canonical channels
 
@@ -1143,16 +1031,18 @@ Forbidden:
 
 ### 10.4.7 Controls
 
-Quadrant 4 contains:
+The CLUE prompt exposes:
 
 ```text
-CLU-E STATUS
-PAUSE AUTO-SCROLL
-FILTER CHANNELS
-OPEN RAW ARTIFACT
+/help
+/status or /cycle status
+/start
+/git sync
+/halt [reason], /resume, /forget
 ```
 
-`CLU-E STATUS` opens the in-place sealed status surface. It is not a third tab.
+The Proof Board opens from Q4 and displays the active project's durable benchmark and proof
+history. The shared Status bulb opens status details in place.
 
 
 ### 10.4.8 RPI traffic projection
@@ -2192,7 +2082,7 @@ Dashboard favors observation.
 - No path editing.
 - No provider setup.
 - Minimal direct controls.
-- Start / Stop remains primary.
+- Q4 remains the command surface for cycle drive and Git sync.
 - Selecting a health issue moves to Configuration.
 
 ## 25.2 Configuration
@@ -2208,16 +2098,11 @@ Configuration favors exact setup.
 
 ## 25.3 Keyboard behavior
 
-Recommended shortcuts:
+Use the arrow keys, Home or End to select a top-level tab while the tab list has focus. Enter
+submits the focused Q4 command. The dashboard supports quadrant focus shortcuts.
 
 ```text
-F1 or Ctrl+1     Dashboard
-F2 or Ctrl+2     Configuration
-Ctrl+Enter       Start CLU-E when stopped
-Ctrl+Shift+Enter Request graceful stop when running
-Ctrl+O           Select Scan Root
-Ctrl+Shift+O     Select Maintenance Root
-Ctrl+K           Focus command rail
+Alt+1 … Alt+4   Focus the corresponding quadrant
 Esc              Release panel focus
 ```
 
@@ -2248,8 +2133,7 @@ Neon should come from efficient emissive geometry and controlled bloom, not from
 A healthy running Dashboard should communicate one coherent picture:
 
 ```text
-CLU-E / TGT-CLUE                 RUNNING — STABLE · SEAL 8F21…
-[DASHBOARD] [CONFIGURATION]      [STOP CLU-E] [CLU-E STATUS]
+CLU-E · SEAL 8F21…    STATUS · GIT · AI · CHROME · CONSOLE    [DASHBOARD] [CONFIGURATION]
 
 ┌────────────────────────────────┬────────────────────────────────┐
 │ SYSTEM NAVIGATOR               │ GREAT BOOK IMPROVEMENT FIELD   │
@@ -2265,6 +2149,7 @@ CLU-E / TGT-CLUE                 RUNNING — STABLE · SEAL 8F21…
 │ MJ06  PASS global guardrail    │ PS OUT npm run benchmark       │
 │ MK17  87% orchestration truth  │ PS IN exit 0 · artifact 71A…   │
 │ Coverage / confidence / fresh  │ NEXT Chrome/CDP patched run    │
+│                                │ CLUE › /status                 │
 └────────────────────────────────┴────────────────────────────────┘
 
 NOW       MAS-0042 · Proof Designer · frontier reasoning model
@@ -2284,8 +2169,7 @@ Every number and console line resolves to the current sealed status snapshot.
 A healthy Configuration tab should communicate:
 
 ```text
-CLU-E / TGT-CLUE                         CONFIGURATION READY
-[DASHBOARD] [CONFIGURATION]              [START CLU-E] [CLU-E STATUS]
+CLU-E · SEAL    STATUS · GIT · AI · CHROME · CONSOLE    [DASHBOARD] [CONFIGURATION]
 
 PROJECT
 Canonical Root       F:\CLU\CLU
@@ -2319,7 +2203,7 @@ Policy               typed gateway only
 
 AI ORCHESTRATION
 Provider             OpenAI · reachable
-Critical Model       gpt-5.6 · exact ID validated
+Critical Model       gpt-6-astra · exact ID validated for clue1 generation 9
 Concurrency          6
 Spend Authority      OpenAI Platform · provider-controlled
 
@@ -2328,7 +2212,7 @@ Benchmark            registered and hash-frozen
 Warmups / Iterations 5 / 30
 Evidence Policy      frozen proof required
 
-READINESS            READY TO START CLU-E
+READINESS            READY FOR GOVERNED CYCLE DRIVE
 ```
 
 ---
@@ -2342,9 +2226,9 @@ READINESS            READY TO START CLU-E
 
 # 30. 2026-08-14 executable-alignment amendment — OpenAI pause and manual Git control
 
-The primary control rail places the explicit `SYNC GIT` action beside `START CLU-E`. Sync is never
-implicit in Start and is disabled/fail-closed when no remote is registered or the backend action is
-unavailable. The UI renders the server's result and does not create Git authority.
+The Q4 command pane routes `/start` and `/git sync` as separate typed requests. The Git request
+requires a registered remote and the corresponding backend capability. The UI renders the
+backend receipt under the current profile identity.
 
 Q3's AI instrument distinguishes three states:
 
@@ -2359,9 +2243,8 @@ allowance as authoritative; otherwise it displays unavailable. The interface nev
 monetary balance into an invented token count and never uses CLU-E compatibility caps as billing
 truth.
 
-The separately reviewed `ui/clue-dashboard/app.js` is the interface implementation for this
-amendment. The final backend/governance patch intentionally excludes that file so its accepted
-identity cannot be replaced by a broad patch.
+The dashboard uses the reviewed ribbon and Q4 modules for these controls and uses
+`ui/clue-dashboard/app.js` to bind them to the active project and server action contracts.
 
 ---
 
@@ -2396,7 +2279,11 @@ The UI maintains three visibly distinct states:
 
 Selecting a dropdown item does not activate it. Saving a draft does not activate it. Activation becomes visible only after the backend confirms the complete transition. Unsaved changes and optimistic-generation conflicts are explicit.
 
-The active Project ID is visible outside Configuration in the dashboard header, Q1, proof board, Great Book, and Operational Console. During switching, project-scoped surfaces park predecessor content and do not repopulate until the successor generation is published.
+The active Project ID is available in Status details and the project-bound Q1, Proof Board, Great
+Book and Operational Console views. The dashboard launched in Project Profile mode uses the
+runtime manager to activate a validated generation. During switching, project-scoped surfaces
+park predecessor content until the successor generation is published and its streams are rebound.
+The legacy single-runtime mode refuses live activation.
 
 ## C. Project editor
 
@@ -2410,7 +2297,7 @@ Target Description, Master Benchmark, and optional Project Intent are distinguis
 
 ## E. Integration editors
 
-Host, Git, browser, GPT, recognition, and benchmark-runtime editors expose effective values and whether each value comes from a global default or project override. Connection-test actions are explicit. `START CLU-E` is not a Git-sync control.
+Host, Git, browser, GPT, recognition, and benchmark-runtime editors expose effective values and whether each value comes from a global default or project override. Connection-test actions are explicit. Git synchronization has its own Q4 command.
 
 The GPT editor accepts only safe credential references such as `env:OPENAI_API_KEY` or a credential-store reference. There is no normal field that reads back or displays secret bytes.
 

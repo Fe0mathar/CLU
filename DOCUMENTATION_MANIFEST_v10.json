@@ -26,10 +26,10 @@
       "role": "Release guide and promotion boundary",
       "version": "10.0-rc1",
       "status": "release-candidate",
-      "bytes": 2012,
-      "lines": 42,
-      "words": 255,
-      "sha256": "dc4ae0e0a1bfab8574cf5a4ad43df839a6f014607704193fea1f5957c86727ab"
+      "bytes": 2820,
+      "lines": 43,
+      "words": 365,
+      "sha256": "652a3a5282d9868abf0dd521934720760a59a0db2f11f3517302eea9fbb942c8"
     },
     {
       "path": "RPI_Core_Methodology_v9.md",
@@ -76,20 +76,20 @@
       "role": "Project authority AI context and exact-model gateway",
       "version": "10.0-rc1",
       "status": "release-candidate",
-      "bytes": 92644,
-      "lines": 2362,
-      "words": 12549,
-      "sha256": "bee2eaba25e7c1379cdd71bd2cf15ab21ae6f6ddea6d4f2812c9011d48cbbbf6"
+      "bytes": 93071,
+      "lines": 2369,
+      "words": 12602,
+      "sha256": "5bf708b73de0ce160140211b425e27da8bf920e821164ff8202dd40be25b08a8"
     },
     {
       "path": "CLUE_Git_Integration_v10.md",
       "role": "Project-scoped Git and local-only publication semantics",
       "version": "10.0-rc1",
       "status": "release-candidate",
-      "bytes": 57533,
-      "lines": 1699,
-      "words": 7366,
-      "sha256": "9e75273981bc977257a2c1c649f39ab43744385022106aea842c9f2431109c66"
+      "bytes": 57756,
+      "lines": 1704,
+      "words": 7400,
+      "sha256": "2006bcfacaaba41a0d5f7f3e1739064a2d14cd254b37fdbf303e97eb82190182"
     },
     {
       "path": "CLUE_Canonical_Measurement_Catalogue_v9.md",
@@ -116,10 +116,10 @@
       "role": "Project Profiles Configuration control plane",
       "version": "10.0-rc1",
       "status": "release-candidate",
-      "bytes": 82274,
-      "lines": 2431,
-      "words": 11197,
-      "sha256": "c19f900949a817e3c979fea1709cc63eb8b8179d62959ce57798ba5e23ddd447"
+      "bytes": 81213,
+      "lines": 2318,
+      "words": 11053,
+      "sha256": "21a2c08cda3f412de596734fdd336e20839c27b8675f875c704f4b1c2d2e1971"
     },
     {
       "path": "CLUE_Q1_System_Navigator_v10.md",
@@ -146,10 +146,10 @@
       "role": "v10 promotion, drift and historical P2 rules",
       "version": "10.0-rc1",
       "status": "release-candidate",
-      "bytes": 24267,
-      "lines": 465,
-      "words": 3343,
-      "sha256": "493b7d719037fd2650d4e407c5f4555f8dcc8bd97ed949cc7d7a6aed6f2525c1"
+      "bytes": 25004,
+      "lines": 470,
+      "words": 3455,
+      "sha256": "9ecc07e47d8ba6ba6afe5049fcd60644b389606766fe8ae685f714e531c1bee8"
     },
     {
       "path": "templates/target_description.template_v9.md",
@@ -176,10 +176,10 @@
       "role": "Release-candidate validation and non-claims",
       "version": "10.0-rc1",
       "status": "release-evidence",
-      "bytes": 2686,
-      "lines": 53,
-      "words": 386,
-      "sha256": "a50e1973cc4ec8b4da42d087fa734a08b3d6e54df2b821968eb91f27a12704c1"
+      "bytes": 4155,
+      "lines": 65,
+      "words": 585,
+      "sha256": "771e5d23926fa4b84389222f2868c417db67d4a19095950d66245349b786a82a"
     },
     {
       "path": "PROJECT_PROFILES_ACCEPTANCE_REPORT.json",
@@ -206,10 +206,10 @@
       "role": "PP-36 Definition-of-Done acceptance matrix",
       "version": "1",
       "status": "release-evidence",
-      "bytes": 11435,
-      "lines": 304,
-      "words": 816,
-      "sha256": "20a0607f3898385d504306e7653998603fc17d9560a534981e8ac1d12641d9ab"
+      "bytes": 12030,
+      "lines": 307,
+      "words": 901,
+      "sha256": "c19b0e4982e110de7196c807ff474be5f861f0cdbb7fefa0132eec819e1ab952"
     },
     {
       "path": "docs/source-authority/CLUE_CONFIGURATION_PROJECT_PROFILES_SUPPLEMENT_2026-08-14.md",
@@ -246,27 +246,38 @@
       "role": "Final acceptance contract",
       "version": "10.0-rc1",
       "status": "release-evidence",
-      "bytes": 2753,
-      "lines": 69,
-      "words": 371,
-      "sha256": "1111395ce09cb6306dc1a7c5317f9e3f769bc43cb19cd6726de3f6444ecf83aa"
+      "bytes": 4436,
+      "lines": 77,
+      "words": 605,
+      "sha256": "19a0b4d8d4165e30a27a936e9884ad713158eefd961c06dae558069de16e9025"
     },
     {
       "path": "docs/project-profiles/PROJECT_PROFILES_V10_RELEASE_CANDIDATE.md",
       "role": "Promotion and authority boundary",
       "version": "10.0-rc1",
       "status": "release-evidence",
-      "bytes": 1335,
-      "lines": 32,
-      "words": 167,
-      "sha256": "5e5c38430ffe95ea791d26130829a02c075f7a3f02a2abd0c65a55b919383381"
+      "bytes": 1818,
+      "lines": 35,
+      "words": 236,
+      "sha256": "180a4b68e531ad2d21f68c8909b0d55ee0e5010091e1d68bf8ca304a29ce353d"
+    },
+    {
+      "path": "PROJECT_PROFILES_P16_REVIEW.json",
+      "role": "P16 review of Windows profile qualification and live A-to-B-to-A evidence",
+      "version": "1",
+      "status": "release-evidence",
+      "bytes": 2730,
+      "lines": 80,
+      "words": 162,
+      "sha256": "42f782b2fdbfcdbdaa31a49a6363331b7a428ecda640c9e83601be7a6e8eaa7e"
     }
   ],
-  "fileCount": 24,
+  "fileCount": 25,
   "notes": [
-    "The v9 pack remains the active authority for P2 closure.",
-    "The v10 candidate is sealed for verification but is not activated or ratified by Batch 8.",
-    "Migration, live connection evidence, epoch sealing and Creator acceptance remain explicit live acts."
+    "The v9 pack remains selected during candidate review and is preserved as the historical authority for P2 closure.",
+    "P16 refreshes the inactive v10 candidate for the exact reference model, per-profile Git policy and current dashboard behavior.",
+    "PROJECT_PROFILES_P16_REVIEW.json binds the verified live Windows isolation result to the P2, P14 and P15 receipts.",
+    "Remaining native and live gates, interactive selection, ratification, epoch sealing and Creator acceptance retain separate evidence."
   ],
   "carriedForwardUnchanged": [
     {

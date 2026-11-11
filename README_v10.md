@@ -1,6 +1,6 @@
 # CLU-E RPI Documentation Pack v10.0-rc1
 
-**Status:** release candidate, not ratified and not active P2 authority.
+**Status** — prepared release candidate. Creator selection and ratification remain pending.
 
 This candidate coordinates the implemented Project Profiles architecture across Architecture, Execution, Interface, Project Directory, AI, Git, Status, Q1 and Documentation Governance. It carries forward the v9 Constitution, RPI methodology, Metric Catalogue and benchmark/target templates without semantic modification.
 
@@ -19,24 +19,25 @@ This candidate coordinates the implemented Project Profiles architecture across 
 
 ## Authority boundary
 
-The installed v9 pack remains the authority used for P2 closure until the Creator performs an explicit successor ratification. Do not replace v9 tracked-document registration before P2 closure evidence is preserved and the authoritative Windows acceptance gates pass.
+The immutable P2 closure receipt and its Creator approval record the historical v9 authority. The P16 candidate refresh leaves the installed authority selector and tracked-document registration on v9. Review the candidate and complete authoritative Windows acceptance before the Creator selects v10.
+
+P14 qualified `clue1` with a registered Git remote, a matching PowerShell Host, and the exact OpenAI model `gpt-6-astra` with fallback forbidden. It also prepared a separate local-only fixture. The P15A Windows dashboard run switched `clue1` → `clue-v10-acceptance-b` → `clue1`, with separate Navigator and proof histories. The full native suite on the refreshed candidate and the current profile-bound Chrome evidence remain acceptance inputs.
 
 ## Verification
 
 ```powershell
-cd F:\CLU\CLU
-npm run project-profiles:docs-verify
-npm run project-profiles:acceptance -- --full --output PROJECT_PROFILES_ACCEPTANCE_REPORT.runtime.json
-npm run p2:closure-preflight -- --output P2_CLOSURE_PREFLIGHT.runtime.json
+Set-Location 'F:\CLU\CLU'
+npm.cmd run project-profiles:docs-verify
+npm.cmd run project-profiles:acceptance -- --full --output 'F:\CLU\release-evidence\PROJECT_PROFILES_ACCEPTANCE_REPORT.runtime.json'
 ```
 
 ## Promotion after P2
 
-1. verify and preserve the P2 closure receipt;
-2. complete all live Windows, PowerShell, Chrome and OpenAI gates;
-3. review the v10 manifest/seal;
-4. run `npm run project-profiles:promote-v10` to atomically coordinate the pack selector and active tracked-document registration;
-5. ratify interactively;
-6. seal `POST-P2-PROJECT-PROFILES`;
-7. execute representative operations on at least two profiles;
-8. record Creator acceptance.
+1. Verify and preserve the P2 closure receipt and its Creator approval.
+2. Complete authoritative Windows acceptance, including the live gates in the final acceptance contract.
+3. Review and verify the exact v10 manifest and seal.
+4. Run `npm run project-profiles:promote-v10` and enter the displayed Creator confirmation to coordinate the selector and eight owner-document registrations.
+5. Bootstrap the successor mission under the selected pack and inspect the governed input changes.
+6. Ratify v10 interactively and seal `POST-P2-PROJECT-PROFILES` under the current mission.
+7. Execute representative recognition and proof operations on at least two profiles.
+8. Record explicit Creator acceptance of Project Profiles v10 after reviewing the resulting evidence.
