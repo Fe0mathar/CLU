@@ -87,6 +87,12 @@ export class ConsoleStateService {
    * refresh with no state change publishes the same seal, and the publisher does not advance.
    */
   public refresh(): { snapshot: ConsoleSnapshot; revision: number } {
+    const snapshot = this.capture();
+    return { snapshot, revision: this.#publisher.publish(snapshot) };
+  }
+
+  /** Prepare a sealed frame without replacing the published runtime generation. */
+  public capture(): ConsoleSnapshot {
     const readiness = this.#evaluateReadiness();
     const sources = this.#stateSources();
     const source = new RuntimeRegistrySource(this.#runtime, {
@@ -113,9 +119,7 @@ export class ConsoleStateService {
       activeTab: this.#options.activeTab,
       status,
     });
-    const snapshot = projectConsoleSnapshot(input);
-    const revision = this.#publisher.publish(snapshot);
-    return { snapshot, revision };
+    return projectConsoleSnapshot(input);
   }
 
   /**

@@ -235,6 +235,11 @@ export class SystemNavigator extends EventTarget {
     this.#updateBreadcrumb();
   }
 
+  resetProjectReplay(projectName) {
+    this.streamSequences.clear();
+    this.beginScan({ projectName, status: 'AWAITING PROJECT RECOGNITION' });
+  }
+
   updateProgress(payload = {}) {
     this.model.updateProgress(payload);
   }

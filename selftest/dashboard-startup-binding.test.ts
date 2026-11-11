@@ -4,7 +4,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test, type TestContext } from 'node:test';
 
-import { bindSavedDashboardProfile } from '../src/cli/dashboardStartup.js';
+import { bindSavedDashboardProfile, withDashboardRuntime } from '../src/cli/dashboardStartup.js';
 import { ProjectProfileRegistry } from '../src/control/projectProfiles/profileRegistry.js';
 import { loadActiveProjectProfileForStartup, projectProfileStartupPath } from '../src/control/projectProfiles/projectProfileStartup.js';
 import { openRuntime } from '../src/control/runtime.js';
@@ -117,6 +117,31 @@ test('dashboard profile binding refuses a dirty checkout on the wrong branch', (
   assert.throws(() => bindSavedDashboardProfile(fixture.root, registry, pointer));
   assert.equal(existsSync(selectorPath), false);
   assert.equal(existsSync(databasePath), false);
+});
+
+test('normal dashboard startup owns a managed profile observer without taking the writer lock', async (t) => {
+  const { fixture, registry, record, pointer } = setup(t);
+  bindSavedDashboardProfile(fixture.root, registry, pointer);
+
+  const manager = await withDashboardRuntime(async (runtime, activeManager) => {
+    assert.ok(activeManager);
+    assert.equal(activeManager.activeRuntime, runtime);
+    assert.equal(activeManager.publication?.projectId, record.profile.projectId);
+    assert.equal(runtime.readOnly, true);
+    assert.equal(runtime.log, null);
+
+    const writer = openRuntime({ repoRoot: fixture.root, withLog: true });
+    try {
+      assert.ok(writer.log);
+      assert.deepEqual(writer.projectIdentity, runtime.projectIdentity);
+    } finally {
+      writer.dispose();
+    }
+    return activeManager;
+  }, fixture.root);
+
+  assert.equal(manager.state, 'DISPOSED');
+  assert.equal(manager.activeRuntime, null);
 });
 
 test('dashboard profile binding preserves authority checks alongside the dirty checkout exception', (t) => {

@@ -6,22 +6,51 @@ import { createInterface } from 'node:readline/promises';
 import { validateProjectProfileRecord } from '../daemon/projectProfilesApi.js';
 import {
   enableProjectProfileStartup,
+  loadActiveProjectProfileForStartup,
   projectProfileCutoverConfirmation,
+  ProjectRuntimeManager,
   type ActiveProjectPointer,
   type ProjectProfileCutoverResult,
   type ProjectProfileRegistry,
 } from '../control/projectProfiles/index.js';
 import { bootstrapProjectWorkspace } from '../control/projectProfiles/projectWorkspaceBootstrap.js';
-import { openProjectRuntime } from '../control/runtime.js';
+import { findRepoRoot, openProjectRuntime, withRuntimeAsync, type Runtime } from '../control/runtime.js';
 import type { ProjectProfileRecord } from '../shared/schemas.js';
 
-export function verifyProjectStartupWorkspace(repoRoot: string, record: ProjectProfileRecord): void {
+function openDashboardProjectRuntime(repoRoot: string, record: ProjectProfileRecord): Runtime {
   const runtime = openProjectRuntime(record, { repoRoot, withLog: false, readOnly: true });
   try {
     runtime.requireMission();
     runtime.requireFreshProjections();
-  } finally {
+    return runtime;
+  } catch (error) {
     runtime.dispose();
+    throw error;
+  }
+}
+
+export function verifyProjectStartupWorkspace(repoRoot: string, record: ProjectProfileRecord): void {
+  openDashboardProjectRuntime(repoRoot, record).dispose();
+}
+
+/** Keep the dashboard read-only while the manager owns its current Project Profile generation. */
+export async function withDashboardRuntime<T>(
+  run: (runtime: Runtime, manager?: ProjectRuntimeManager) => Promise<T>,
+  repoRoot = findRepoRoot(),
+): Promise<T> {
+  const startup = loadActiveProjectProfileForStartup(repoRoot);
+  if (startup === null) return withRuntimeAsync({ repoRoot, withLog: false }, run);
+
+  const manager = new ProjectRuntimeManager(startup.registry, {
+    openRuntime: ({ record }) => openDashboardProjectRuntime(repoRoot, record),
+  });
+  try {
+    manager.start();
+    const runtime = manager.activeRuntime;
+    if (runtime === null) throw new Error('The dashboard has no active Project Profile runtime.');
+    return await run(runtime, manager);
+  } finally {
+    manager.dispose();
   }
 }
 

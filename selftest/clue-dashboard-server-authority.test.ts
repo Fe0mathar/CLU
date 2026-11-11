@@ -26,7 +26,7 @@ import {
 } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, normalize } from 'node:path';
 import { stringify as toYaml } from 'yaml';
 
 import {
@@ -36,12 +36,21 @@ import {
   type ClueDashboardOptions,
 } from '../src/daemon/clueDashboardServer.js';
 import {
+  openProjectRuntime,
   withRuntime,
   withRuntimeAsync,
   type Runtime,
 } from '../src/control/runtime.js';
+import { ProjectRuntimeManager } from '../src/control/projectProfiles/projectRuntimeManager.js';
+import { ProjectProfileRegistry } from '../src/control/projectProfiles/profileRegistry.js';
+import { bootstrapProjectWorkspace } from '../src/control/projectProfiles/projectWorkspaceBootstrap.js';
+import { runRecognition } from '../src/control/recognitionRun.js';
 import { PROJECTION_SCHEMA_VERSION } from '../src/memory/db.js';
 import { CycleRegistry } from '../src/cycle/cycleRegistry.js';
+import type { ProjectProfileRecord } from '../src/shared/schemas.js';
+import { proofReadyProfile } from './project-governance-fixture.js';
+import { makeProjectProfileFixture, makeSiblingProjectProfile } from './project-profile-fixture.js';
+import { writeProfileRuntimeInstallation, writeRecognitionTarget } from './project-recognition-fixture.js';
 
 interface HttpResult {
   readonly status: number;
@@ -332,6 +341,143 @@ async function waitForRunState(port: number, state: string, timeoutMs = 5_000): 
   }
   throw new Error(`run did not reach ${state} within ${String(timeoutMs)} ms`);
 }
+
+test('dashboard switches the live frame, Navigator, proof board and run state together across A→B→A', { timeout: 20_000 }, async (t) => {
+  const fixture = makeProjectProfileFixture();
+  t.after(() => fixture.dispose());
+  writeProfileRuntimeInstallation(fixture.root);
+  const registry = new ProjectProfileRegistry(fixture.profilesRoot);
+  const alpha = registry.create(proofReadyProfile(fixture));
+  const beta = registry.create(proofReadyProfile(fixture, { profile: makeSiblingProjectProfile(fixture, 'beta') }));
+  for (const [record, marker] of [[alpha, 'alphaValue'], [beta, 'betaValue']] as const) {
+    writeRecognitionTarget(record.profile.targetRoot, marker);
+    const result = bootstrapProjectWorkspace({
+      repoRoot: fixture.root,
+      registry,
+      projectId: record.profile.projectId,
+      expectedGeneration: record.generation,
+      expectedProfileHash: record.projectProfileHash,
+    });
+    assert.equal(result.state, 'INITIALIZED');
+  }
+  registry.activate(alpha.profile.projectId);
+  const recognize = (record: ProjectProfileRecord) => {
+    const writer = openProjectRuntime(record, { repoRoot: fixture.root, withLog: true });
+    try {
+      return runRecognition(writer, {
+        force: false,
+        navigatorPath: join(record.profile.workspaceRoot, 'graph', 'system-navigator.ndjson'),
+      });
+    } finally {
+      writer.dispose();
+    }
+  };
+  const alphaRun = recognize(alpha);
+  const manager = new ProjectRuntimeManager(registry, {
+    openRuntime: ({ record }) => openProjectRuntime(record, { repoRoot: fixture.root, withLog: false, readOnly: true }),
+  });
+  fixture.deferCleanup(() => manager.dispose());
+  const alphaPublication = manager.start();
+  const runtime = manager.activeRuntime;
+  assert.ok(alphaPublication && runtime);
+  const port = await freePort();
+  const dashboard = await startClueDashboard(runtime, {
+    operator: 'selftest', port, profilesRoot: fixture.profilesRoot, projectRuntimeManager: manager,
+  });
+  try {
+    const get = async (pathname: string) => {
+      const result = await request(port, pathname);
+      assert.equal(result.status, 200, result.body);
+      return JSON.parse(result.body);
+    };
+    const switchTo = (record: ProjectProfileRecord) => request(port, `/api/projects/${record.profile.projectId}/activate`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ expectedGeneration: record.generation, expectedProfileHash: record.projectProfileHash }),
+    });
+    const assertSurface = async (record: ProjectProfileRecord, recognized: ReturnType<typeof recognize> | null) => {
+      const [config, frame, status, board, run] = await Promise.all(
+        ['/api/config', '/api/frame', '/api/status/current', '/api/proof-board', '/api/run'].map(get),
+      );
+      const { projectId, targetRoot } = record.profile;
+      assert.equal(config.project.id, projectId);
+      assert.equal(normalize(config.project.root), normalize(targetRoot));
+      assert.equal(config.projectProfiles.active.projectProfileHash, record.projectProfileHash);
+      assert.equal(frame.snapshot.configuration.project.activeProject.operationIdentity.projectId, projectId);
+      assert.equal(
+        frame.snapshot.configuration.project.activeProject.operationIdentity.targetRootIdentity,
+        record.profile.targetRootIdentity,
+      );
+      assert.equal(frame.seal.consistent, true);
+      assert.deepEqual(frame.seal, frame.snapshot.seal);
+      assert.equal(status.target.targetId, projectId);
+      assert.equal(normalize(status.target.canonicalRoot), normalize(targetRoot));
+      assert.equal(status.projectProfile.projectIdentity.projectProfileHash, record.projectProfileHash);
+      assert.equal(status.seal.targetSnapshotId, recognized?.snapshotId ?? null);
+      assert.equal(frame.seal.graph?.runId ?? null, recognized?.runId ?? null);
+      assert.equal(frame.seal.graph?.graphSha256 ?? null, recognized?.recorded.record.result_hash ?? null);
+      assert.equal(config.committedGraphPointer?.runId ?? null, recognized?.runId ?? null);
+      assert.equal(board.targetId, projectId);
+      assert.equal(board.missionVersionId, status.target.missionVersionId);
+      assert.equal(board.summary.accepts, 0);
+      assert.equal(run.state, 'idle');
+    };
+    const assertReset = async (response: IncomingMessage, record: ProjectProfileRecord, runId: string) => {
+      const [block] = await collectSseBlocks(response, 1);
+      const event = JSON.parse(block?.slice('data: '.length) ?? '');
+      assert.equal(event.type, 'navigator.reset');
+      assert.equal(event.payload.projectRecognition.operationIdentity.projectId, record.profile.projectId);
+      assert.equal(event.runId, runId);
+    };
+
+    await assertSurface(alpha, alphaRun);
+    const oldNav = await openSse(port, '/api/navigator-events');
+    await assertReset(oldNav.response, alpha, alphaRun.runId);
+    const oldNavClosed = new Promise<void>((resolve) => oldNav.response.once('close', resolve));
+    const oldFrame = await openSse(port, '/api/console-events');
+    const oldFrameClosed = new Promise<void>((resolve) => oldFrame.response.once('close', resolve));
+    oldFrame.response.resume();
+
+    const lease = manager.lease();
+    try {
+      const busy = await switchTo(beta);
+      assert.equal(busy.status, 409);
+      assert.equal(JSON.parse(busy.body).error.code, 'PROJECT_RUNTIME_BUSY');
+      await assertSurface(alpha, alphaRun);
+    } finally {
+      lease.release();
+    }
+
+    const switched = await switchTo(beta);
+    assert.equal(switched.status, 200, switched.body);
+    await Promise.all([oldNavClosed, oldFrameClosed]);
+    const betaPublication = JSON.parse(switched.body).data.result;
+    assert.notEqual(betaPublication.databaseIdentity, alphaPublication.databaseIdentity);
+    assert.notEqual(betaPublication.greatBookIdentity, alphaPublication.greatBookIdentity);
+    await assertSurface(beta, null);
+    const betaRun = recognize(beta);
+    assert.equal(betaRun.plan.fullRescanReason, 'no-previous-recognition');
+    assert.notEqual(betaRun.snapshotId, alphaRun.snapshotId);
+    assert.equal((await request(port, '/api/control/refresh', { method: 'POST' })).status, 200);
+    await assertSurface(beta, betaRun);
+    const betaNav = await openSse(port, '/api/navigator-events');
+    await assertReset(betaNav.response, beta, betaRun.runId);
+    betaNav.request.destroy();
+
+    const restored = await switchTo(alpha);
+    assert.equal(restored.status, 200, restored.body);
+    const alphaRestored = JSON.parse(restored.body).data.result;
+    assert.equal(alphaRestored.databaseIdentity, alphaPublication.databaseIdentity);
+    assert.equal(alphaRestored.greatBookIdentity, alphaPublication.greatBookIdentity);
+    assert.ok(alphaRestored.runtimeGeneration > betaPublication.runtimeGeneration);
+    await assertSurface(alpha, alphaRun);
+    const alphaNav = await openSse(port, '/api/navigator-events');
+    await assertReset(alphaNav.response, alpha, alphaRun.runId);
+    alphaNav.request.destroy();
+  } finally {
+    await dashboard.stop();
+  }
+});
 
 test('DEV-P1-15: non-loopback exposure is refused before listen unless a real token is supplied', async () => {
   const port = await freePort();

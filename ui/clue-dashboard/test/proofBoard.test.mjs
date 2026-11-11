@@ -5,6 +5,7 @@ import test from 'node:test';
 
 import {
   PROOF_BOARD_VIEW_SCHEMA,
+  mountProofBoard,
   normalizeProofBoard,
   renderProofBoard,
 } from '../workspaces/proofBoard.js';
@@ -122,6 +123,65 @@ function fixture() {
 }
 
 const clone = (value) => JSON.parse(JSON.stringify(value));
+
+test('Proof Board clears project history and ignores a late response after activation', async () => {
+  const originalDocument = globalThis.document;
+  globalThis.document = { getElementById: () => ({}) };
+  try {
+    const button = Object.assign(new EventTarget(), { dataset: {} });
+    const overlay = {
+      body: { innerHTML: '', querySelector: () => null },
+      setSub() {},
+    };
+    let activeProject = 'clu';
+    let switching = false;
+    const pending = [];
+    const board = mountProofBoard({
+      overlayUi: { panelButton: () => button, makeOverlay: () => overlay, esc: String },
+      fetchJson: () => new Promise((resolve) => pending.push(resolve)),
+      activeProjectId: () => activeProject,
+      isProjectTransition: () => switching,
+    });
+
+    const first = board.refresh();
+    pending.shift()(fixture());
+    await first;
+    assert.equal(button.dataset.proofState, 'accepted');
+
+    const late = board.refresh();
+    const resolveLate = pending.shift();
+    switching = true;
+    board.invalidate();
+    assert.equal(board.current, null);
+    assert.equal(button.dataset.proofState, undefined);
+    assert.match(overlay.body.innerHTML, /Awaiting active project proof history/u);
+    await board.refresh();
+    assert.equal(pending.length, 0);
+
+    activeProject = 'fixture-b';
+    switching = false;
+    const successor = board.refresh();
+    const nextBoard = fixture();
+    nextBoard.targetId = activeProject;
+    nextBoard.proofAttempts[0].targetId = activeProject;
+    pending.shift()(nextBoard);
+    await successor;
+    resolveLate(fixture());
+    await late;
+    assert.equal(board.current.targetId, activeProject);
+    assert.match(overlay.body.innerHTML, /class="pb-board" data-target-id="fixture-b"/u);
+
+    const wrongScope = board.refresh();
+    pending.shift()(fixture());
+    await wrongScope;
+    assert.equal(board.current, null);
+    assert.equal(button.dataset.proofState, 'unavailable');
+    assert.match(overlay.body.innerHTML, /does not belong to the active project/u);
+  } finally {
+    if (originalDocument === undefined) delete globalThis.document;
+    else globalThis.document = originalDocument;
+  }
+});
 
 test('P2-B6 UI: a valid durable board normalizes and renders exact identities', () => {
   const view = normalizeProofBoard(fixture());

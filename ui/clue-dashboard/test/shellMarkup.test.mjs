@@ -165,7 +165,7 @@ test('DEV-P1-17: Configuration loads on first arrival, however the operator got 
 
 test('P2-B6: the Proof Board is mounted through the shared overlay seam', () => {
   assert.match(app, /import \{ mountProofBoard \} from '\.\/workspaces\/proofBoard\.js';/);
-  assert.match(app, /mountProofBoard\(\{ overlayUi: CLUE_UI, fetchJson, interfaceApi: ClueInterface \}\)/);
+  assert.match(app, /mountProofBoard\(\{\s*overlayUi: CLUE_UI,\s*fetchJson,\s*interfaceApi: ClueInterface,/);
   assert.match(app, /ULTIMATE-2026\.08-Q1-V9-REPOSITORY-OBSERVATORY-R1/);
   assert.match(proofBoard, /panelButton\('q4', 'proofBoardBtn'/);
   assert.match(proofBoard, /makeOverlay\(\s*'proofBoardOverlay'/);

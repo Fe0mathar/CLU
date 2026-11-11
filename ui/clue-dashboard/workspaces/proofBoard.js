@@ -384,8 +384,8 @@ export function renderProofBoard(view, escape = defaultEscape) {
         <td><code>${esc(short(run.resultArtifactHash, 16))}</code></td>
       </tr>`).join('');
 
-  return `<div class="pb-board">
-    <div class="pb-toolbar"><div><b>Durable evidence board</b><span>Projection schema ${esc(view.projection.schemaVersion)} · log ${esc(view.projection.lastSequence ?? 'empty')}</span></div><button type="button" data-proof-refresh>↻ refresh</button></div>
+  return `<div class="pb-board" data-target-id="${esc(view.targetId)}">
+    <div class="pb-toolbar"><div><b>Durable evidence board</b><span>${esc(view.targetId)} · Projection schema ${esc(view.projection.schemaVersion)} · log ${esc(view.projection.lastSequence ?? 'empty')}</span></div><button type="button" data-proof-refresh>↻ refresh</button></div>
     <section class="pb-stats">${cards}</section>
     <section class="pb-section"><div class="pb-section-head"><h3>Proof attempts</h3><span>verdicts are displayed, never calculated in this browser</span></div>${attemptRows}</section>
     <section class="pb-section"><div class="pb-section-head"><h3>Benchmark runs</h3><span>${esc(benchmark.path ?? 'no registered file')}</span></div>
@@ -412,7 +412,10 @@ function injectProofBoardStyles() {
   document.head.appendChild(style);
 }
 
-export function mountProofBoard({ overlayUi, fetchJson, interfaceApi = null }) {
+export function mountProofBoard({
+  overlayUi, fetchJson, interfaceApi = null,
+  activeProjectId = () => null, isProjectTransition = () => false,
+}) {
   if (!overlayUi || typeof overlayUi.panelButton !== 'function' || typeof overlayUi.makeOverlay !== 'function') {
     throw new Error('Proof Board requires the shared overlay UI');
   }
@@ -427,16 +430,35 @@ export function mountProofBoard({ overlayUi, fetchJson, interfaceApi = null }) {
     { accent: '#39ff88', code: 'PB' },
   );
   let current = null;
+  let requestGeneration = 0;
+
+  const invalidate = () => {
+    requestGeneration += 1;
+    current = null;
+    delete button.dataset.proofState;
+    overlay.setSub('awaiting project-bound proof history');
+    overlay.body.innerHTML = '<div class="clue-ov-empty">Awaiting active project proof history.</div>';
+  };
 
   const refresh = async () => {
+    if (isProjectTransition()) return null;
+    const generation = ++requestGeneration;
+    const expectedTarget = activeProjectId();
     overlay.body.innerHTML = '<div class="clue-ov-loading">loading durable proof history…</div>';
     try {
-      current = normalizeProofBoard(await fetchJson('/api/proof-board', { cache: 'no-store' }));
+      const board = normalizeProofBoard(await fetchJson('/api/proof-board', { cache: 'no-store' }));
+      if (generation !== requestGeneration || isProjectTransition()) return null;
+      const target = activeProjectId() ?? expectedTarget;
+      if (target && board.targetId !== target) {
+        throw new Error('Proof history does not belong to the active project.');
+      }
+      current = board;
       overlay.body.innerHTML = renderProofBoard(current, overlayUi.esc);
       overlay.setSub(`${current.summary.benchmarkRuns} benchmark run(s) · ${current.summary.proofAttempts} proof attempt(s) · projection v${current.projection.schemaVersion}`);
       overlay.body.querySelector('[data-proof-refresh]')?.addEventListener('click', () => void refresh());
       button.dataset.proofState = current.summary.openAttempts > 0 ? 'open' : current.summary.accepts > 0 ? 'accepted' : 'idle';
     } catch (error) {
+      if (generation !== requestGeneration || isProjectTransition()) return null;
       current = null;
       overlay.setSub('projection unavailable');
       overlay.body.innerHTML = `<div class="clue-ov-empty">Proof Board unavailable — ${overlayUi.esc(error?.message ?? error)}</div>`;
@@ -454,6 +476,7 @@ export function mountProofBoard({ overlayUi, fetchJson, interfaceApi = null }) {
     button,
     overlay,
     refresh,
+    invalidate,
     get current() { return current; },
     interfaceVersion: interfaceApi?.version ?? null,
   };

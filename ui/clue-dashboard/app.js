@@ -1080,13 +1080,46 @@ const ConsoleFrameBus = (() => {
 })();
 
 /* ----------------------------- Q1 NAVIGATOR ------------------------------ */
+const navigatorProjectGuard = createQ1ProjectGenerationGuard();
 (function initQ1Navigator() {
   const nav = $('nav');
   const q1status = $('q1status');
   try {
     if (!nav) throw new Error('navigator host #nav not found');
-    const adapter = new SseNavigatorAdapter(nav, '/api/navigator-events');
-    window.__q1Navigator = { nav, adapter };
+    const adapter = new SseNavigatorAdapter(nav, '/api/navigator-events', {
+      acceptEnvelope: ({ payload, streamId, runId, emittedAt, type }) => navigatorProjectGuard.decide({
+        projectRecognition: payload?.projectRecognition, streamId, runId, emittedAt,
+      }, type).accept,
+    });
+    let previousScope = null;
+    let parked = false;
+    window.__q1Navigator = {
+      nav,
+      adapter,
+      parkProject(input) {
+        const previous = navigatorProjectGuard.pending() ?? navigatorProjectGuard.current();
+        const identity = navigatorProjectGuard.authorizeNext(input);
+        if (!identity) return false;
+        previousScope = previous;
+        parked = true;
+        adapter.disconnect({ resetReplay: true });
+        nav.navigator?.resetProjectReplay(identity.projectId);
+        return true;
+      },
+      resumeProject({ cancelled = false } = {}) {
+        if (!parked) return;
+        const restoredScope = cancelled ? previousScope : null;
+        if (cancelled) {
+          if (restoredScope) navigatorProjectGuard.authorizeNext(restoredScope);
+          else navigatorProjectGuard.reset();
+          nav.navigator?.resetProjectReplay(restoredScope?.projectId);
+        }
+        previousScope = null;
+        parked = false;
+        adapter.connect();
+        return restoredScope;
+      },
+    };
     adapter.addEventListener('status', (event) => {
       const connected = Boolean(event.detail?.connected);
       const q1decision = q1PanelDecision(connected ? 'connected' : 'reconnecting');
@@ -1098,7 +1131,7 @@ const ConsoleFrameBus = (() => {
     (async () => {
       try {
         await nav.ready;
-        adapter.connect();
+        if (!parked) adapter.connect();
         if (typeof nav.updateProgress === 'function') await nav.updateProgress({ status: 'AWAITING RECOGNITION STREAM' });
         { const d = q1PanelDecision('awaiting'); ClueInterface.setPanelState('q1', d.state, d.label); }
       } catch (error) {
@@ -2226,11 +2259,18 @@ const ConsoleFrameBus = (() => {
     if (!state.resizeObserver) window.addEventListener('resize', resize);
 
     resize();
-    ingestAvailableRuntimeState();
+    const pendingScope = navigatorProjectGuard.pending();
+    if (pendingScope) {
+      state.projectGenerationGuard.authorizeNext(pendingScope);
+      resetProjectProjection(pendingScope, 'AWAITING PROJECT RECOGNITION');
+    } else {
+      ingestAvailableRuntimeState();
+    }
     updateAllDerivedState();
     setMode('surf', { requestCore: true, initial: true });
     state.raf = requestAnimationFrame(tick);
 
+    let previousProjectScope = null;
     const api = {
       version: 'Q1-SURF-DIVE-REPOSITORY-NAVIGATOR-R2-PERF01',
       renderer: 'canvas2d-contract-bridge',
@@ -2246,15 +2286,25 @@ const ConsoleFrameBus = (() => {
        * Project B reset/start boundary can then populate the projection.
        */
       activateProjectGeneration: (input) => {
+        const previous = state.projectGenerationGuard.pending() ?? state.projectGenerationGuard.current();
         const identity = state.projectGenerationGuard.authorizeNext(input);
         if (!identity) return false;
+        previousProjectScope = previous;
         resetProjectProjection(identity, 'PROJECT ACTIVATION PENDING');
         return true;
       },
-      cancelProjectGenerationActivation: () => {
-        const identity = state.projectGenerationGuard.cancelPending();
-        if (!identity) return false;
-        resetProjectProjection(identity, 'PROJECT ACTIVATION CANCELLED · REPLAY REQUIRED');
+      finishProjectGenerationActivation: () => {
+        previousProjectScope = null;
+        if (state.projectGenerationGuard.pending()) {
+          state.inventoryPhase = 'AWAITING PROJECT RECOGNITION';
+          updateAllDerivedState();
+        }
+      },
+      cancelProjectGenerationActivation: (restoredScope = previousProjectScope) => {
+        if (restoredScope) state.projectGenerationGuard.authorizeNext(restoredScope);
+        else state.projectGenerationGuard.reset();
+        resetProjectProjection(restoredScope, 'PROJECT ACTIVATION CANCELLED · REPLAY REQUIRED');
+        previousProjectScope = null;
         return true;
       },
       exportInventory: () => ({
@@ -2282,6 +2332,7 @@ const ConsoleFrameBus = (() => {
         projectProfileHash: state.projectProfileHash,
         profileGeneration: state.profileGeneration,
         recognitionConfigHash: state.recognitionConfigHash,
+        awaitingProjectRecognition: state.projectGenerationGuard.pending() !== null,
         snapshotId: state.snapshotId,
         runId: state.recognitionRunId,
         files: activeFiles().length,
@@ -2854,9 +2905,12 @@ const ConsoleFrameBus = (() => {
       state.usedSlotsByEnvironment.clear();
       state.environmentSlots.clear();
       state.familySlots.clear();
+      state.familyWindows.clear();
       state.familyBounds.clear();
       state.environmentBounds.clear();
       state.semanticAvailabilityCache.clear();
+      state.frame = null;
+      state.projectionErrors.length = 0;
       state.screenEntities = [];
       state.spatialBuckets.clear();
       state.repositoryId = identity?.projectId ?? null;
@@ -2867,13 +2921,17 @@ const ConsoleFrameBus = (() => {
       state.recognitionConfigHash = identity?.recognitionConfigHash ?? null;
       state.snapshotId = null;
       state.inventoryHash = null;
+      state.taxonomyVersion = null;
+      state.taxonomyHash = null;
       state.recognitionRunId = identity?.runId ?? null;
       state.durableResultHash = null;
       state.inventoryExpectedCount = null;
       state.inventoryPhase = phase;
       state.hasFitInitialInventory = false;
       state.userMovedCamera = false;
+      state.hovered = null;
       state.diveContext = null;
+      closeSemanticWarning();
       setSelection(null);
       updateAllDerivedState();
     }
@@ -3112,7 +3170,15 @@ const ConsoleFrameBus = (() => {
 
     function ingestAvailableRuntimeState() {
       try {
-        const candidates = [
+        if (state.projectGenerationGuard.pending() || navigatorProjectGuard.pending()) return;
+        const trustedScope = navigatorProjectGuard.current();
+        if (state.projectGenerationGuard.current()) return;
+        if (trustedScope) {
+          const decision = state.projectGenerationGuard.decide(trustedScope, 'inventory-started');
+          if (!decision.accept) return;
+          resetProjectProjection(decision.identity, 'AWAITING PROJECT RECOGNITION');
+        }
+        const candidates = (trustedScope ? [adapter?.repositoryInventoryModel] : [
           navigatorInstance.repositoryInventoryModel,
           navigatorInstance.inventoryModel,
           navigatorInstance.repositoryModel,
@@ -3121,7 +3187,7 @@ const ConsoleFrameBus = (() => {
           navigatorInstance.model,
           adapter?.repositoryInventoryModel,
           adapter?.inventory,
-        ].filter(Boolean);
+        ]).filter(Boolean);
 
         for (const candidate of candidates) {
           extractTaxonomy(candidate);
@@ -3145,27 +3211,28 @@ const ConsoleFrameBus = (() => {
             state.snapshotId = firstText(objects, ['snapshotId', 'snapshot.id']) || state.snapshotId;
           }
           state.inventoryExpectedCount = finite(firstValue(objects, [
-            'fileCount', 'counts.files', 'inventoryFileCount',
+            'fileCount', 'counts.files', 'inventoryFileCount', 'expectedFileCount',
           ]), state.inventoryExpectedCount);
         }
         state.recognitionRunId = adapter?.repositoryInventoryModel?.runId ?? state.recognitionRunId;
 
-        const modelNodes = navigatorInstance.model?.nodes;
-        if (modelNodes instanceof Map) {
-          for (const [id, raw] of modelNodes.entries()) {
-            upsertFile(raw, id, 'explicit-file-node');
+        if (!trustedScope) {
+          const modelNodes = navigatorInstance.model?.nodes;
+          if (modelNodes instanceof Map) {
+            for (const [id, raw] of modelNodes.entries()) {
+              upsertFile(raw, id, 'explicit-file-node');
+            }
+          } else {
+            for (const raw of asValues(modelNodes)) {
+              upsertFile(raw, raw?.id || null, 'explicit-file-node');
+            }
           }
-        } else {
-          for (const raw of asValues(modelNodes)) {
-            upsertFile(raw, raw?.id || null, 'explicit-file-node');
+          const frameNodes = Array.isArray(state.frame?.nodes) ? state.frame.nodes :
+            Array.isArray(navigatorInstance.lastRenderNodes) ?
+              navigatorInstance.lastRenderNodes : [];
+          for (const raw of frameNodes) {
+            upsertFile(raw?.sourceNode || raw, raw?.id || null, 'render-frame-explicit-file');
           }
-        }
-
-        const frameNodes = Array.isArray(state.frame?.nodes) ? state.frame.nodes :
-          Array.isArray(navigatorInstance.lastRenderNodes) ?
-            navigatorInstance.lastRenderNodes : [];
-        for (const raw of frameNodes) {
-          upsertFile(raw?.sourceNode || raw, raw?.id || null, 'render-frame-explicit-file');
         }
         if (
           state.files.size > 0 &&
@@ -3233,24 +3300,8 @@ const ConsoleFrameBus = (() => {
         }
       };
 
-      const attachKnownTargets = () => {
-        for (const target of [
-          adapter,
-          nav,
-          adapter?.source,
-          adapter?.eventSource,
-          adapter?._source,
-          adapter?.connection,
-        ]) attachTarget(target);
-      };
-
-      attachKnownTargets();
-      const sourceProbeTimer = window.setTimeout(
-        attachKnownTargets,
-        500,
-      );
-      state.eventDisposers.push(() =>
-        clearTimeout(sourceProbeTimer));
+      attachTarget(adapter);
+      attachTarget(nav);
 
       if (adapter?.addEventListener) {
         const statusListener = (event) => {
@@ -3262,7 +3313,6 @@ const ConsoleFrameBus = (() => {
             state.inventoryPhase =
               'STREAM LIVE · AWAITING INVENTORY';
           }
-          attachKnownTargets();
           markDirty();
         };
         adapter.addEventListener('status', statusListener);
@@ -10789,6 +10839,8 @@ const cfg = $('cfg');
 let configurationController = null;
 let configurationLoad = null;
 let configurationFocusRequest = 0;
+let proofBoard = null;
+let bookViewer = null;
 
 function projectRecordIdentity(record) {
   if (!record?.profile || !Number.isSafeInteger(record.generation)) return null;
@@ -10802,6 +10854,8 @@ function projectRecordIdentity(record) {
 
 function clearProjectBoundDashboard(reason = 'PROJECT SWITCH · AWAITING PROJECT-BOUND EVIDENCE') {
   runGeneration += 1;
+  proofBoard?.invalidate();
+  bookViewer?.invalidate();
   try { window.__q2Field?.setProjection?.(null); window.__q2LastView = null; } catch { /* Q2 remains isolated */ }
   try { window.__q3Cluster?.clearTelemetry?.(reason); } catch { /* Q3 remains isolated */ }
   renderWork(null);
@@ -10828,30 +10882,48 @@ function onProjectActivationPending(record, validation) {
     q1?.cancelProjectGenerationActivation?.();
     return false;
   }
+  if (window.__q1Navigator?.parkProject(recognitionIdentity) === false) {
+    ConsoleFrameBus.cancelProjectTransition();
+    q1?.cancelProjectGenerationActivation?.();
+    return false;
+  }
   projectTransition = true;
   clearProjectBoundDashboard();
   return true;
 }
 
 function onProjectActivationCancelled() {
-  try { window.__q1V9?.cancelProjectGenerationActivation?.(); } catch { /* Q1 optional */ }
+  const restoredScope = window.__q1Navigator?.resumeProject({ cancelled: true });
+  try { window.__q1V9?.cancelProjectGenerationActivation?.(restoredScope); } catch { /* Q1 optional */ }
   ConsoleFrameBus.cancelProjectTransition();
   projectTransition = false;
   clearProjectBoundDashboard('PROJECT ACTIVATION CANCELLED · AWAITING REPLAY');
-  void pollRun();
+  refreshProjectBoundDashboard();
 }
 
 function onActiveProjectChanged({ record, pointer }) {
   ConsoleFrameBus.activateProjectIdentity(pointer);
   const identity = projectRecordIdentity(record);
   window.__clueActiveProject = Object.freeze({ ...pointer });
+  projectTransition = false;
+  clearProjectBoundDashboard();
+  window.__q1V9?.finishProjectGenerationActivation?.();
+  window.__q1Navigator?.resumeProject();
+  refreshProjectBoundDashboard();
   try {
     window.dispatchEvent(new CustomEvent('clue:active-project-changed', {
       detail: Object.freeze({ pointer: { ...pointer }, operationIdentity: identity }),
     }));
   } catch { /* diagnostics only */ }
-  projectTransition = false;
-  clearProjectBoundDashboard();
+}
+
+function refreshProjectBoundDashboard() {
+  const generation = runGeneration;
+  void fetchJson('/api/console/current', { cache: 'no-store' }).then((frame) => {
+    if (generation === runGeneration) ConsoleFrameBus.acceptFetchedFrame(frame);
+  }).catch(() => { /* sealed stream can replay independently */ });
+  if (proofBoard?.overlay.isOpen()) void proofBoard.refresh();
+  if (bookViewer?.overlay.isOpen()) void bookViewer.refresh();
   void pollRun();
   try { void clueStatus.refresh(); } catch { /* next poll remains authoritative */ }
 }
@@ -11264,7 +11336,13 @@ body.clue-overlay-lock{overflow:hidden!important}
 window.__clueOverlayUi = CLUE_UI;
 
 try {
-  mountProofBoard({ overlayUi: CLUE_UI, fetchJson, interfaceApi: ClueInterface });
+  proofBoard = mountProofBoard({
+    overlayUi: CLUE_UI,
+    fetchJson,
+    interfaceApi: ClueInterface,
+    activeProjectId: () => ConsoleFrameBus.projectIdentity()?.projectId ?? null,
+    isProjectTransition: () => projectTransition,
+  });
 } catch (error) {
   console.error('[Proof Board] workspace unavailable:', error);
 }
@@ -11278,6 +11356,17 @@ try {
     const ov = CLUE_UI.makeOverlay('bookOverlay', 'GREAT BOOK OF EFFICIENCY', 'Proven improvements · detailed evidence log', { accent: '#f4af2d', code: 'BK' });
     window.__clueBook = ov;
     let entries = [];
+    let requestGeneration = 0;
+    bookViewer = {
+      overlay: ov,
+      refresh: load,
+      invalidate() {
+        requestGeneration += 1;
+        entries = [];
+        ov.setSub('awaiting project-bound history');
+        ov.body.innerHTML = '<div class="clue-ov-empty">Awaiting active project Great Book history.</div>';
+      },
+    };
     btn.addEventListener('click', () => { ov.open(); load(); });
 
     const vColor = (s) => s.invalidated ? '#ff5500' : (s.certified === false ? '#ffd166' : ((s.normalizedContribution ?? 0) >= 0 ? '#39e08b' : '#ff7a3d'));
@@ -11289,10 +11378,16 @@ try {
       return out;
     }
     async function load() {
+      if (projectTransition) return;
+      const generation = ++requestGeneration;
       ov.body.innerHTML = '<div class="clue-ov-loading">loading Great Book…</div>';
       let view = null;
       try { view = window.__q2LastView || (await fetchJson('/api/improvement-field')).improvementField; }
-      catch (e) { ov.body.innerHTML = '<div class="clue-ov-empty">Great Book unavailable — ' + esc(e.message) + '</div>'; return; }
+      catch (e) {
+        if (generation === requestGeneration) ov.body.innerHTML = '<div class="clue-ov-empty">Great Book unavailable — ' + esc(e.message) + '</div>';
+        return;
+      }
+      if (generation !== requestGeneration) return;
       entries = collect(view);
       ov.setSub(`${entries.length} proven entries · native evidence preserved`);
       render('');

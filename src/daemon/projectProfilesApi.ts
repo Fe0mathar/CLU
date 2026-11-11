@@ -18,6 +18,7 @@ import {
 } from '../ai/gateway/openaiModelCatalogue.js';
 import { GATEWAY_TASK_TYPES, loadGatewayPolicies } from '../ai/gateway/policy.js';
 import { loadLegacyConfig, type Runtime } from '../control/runtime.js';
+import { ProjectRuntimeManagerError } from '../control/projectProfiles/projectRuntimeManager.js';
 import { resolveProjectGatewayCredential } from '../control/projectProfiles/gatewayReadiness.js';
 import {
   assessAuthorityConflicts,
@@ -352,7 +353,9 @@ export class ProjectProfilesApiService {
     }
     const result = await this.activateProject(record, actor);
     const pointer = this.registry.active();
-    if (pointer === null || pointer.projectId !== record.profile.projectId) {
+    if (pointer === null || pointer.projectId !== record.profile.projectId ||
+        pointer.profileGeneration !== record.generation || pointer.projectProfileHash !== record.projectProfileHash ||
+        pointer.targetRootIdentity !== record.profile.targetRootIdentity) {
       throw new ProjectProfilesApiError(
         'ACTIVATION_PUBLICATION_MISMATCH',
         'The runtime switch returned without publishing the requested registry generation.',
@@ -718,7 +721,7 @@ export async function handleProjectProfilesApiRequest(
         ),
       );
     }
-    if (request.method === 'POST' && action === 'activate') {
+    if (request.method === 'POST' && parts.length === 4 && action === 'activate') {
       const body = requireObject(await readJsonBody(request));
       const expectedHash = body['expectedProfileHash'];
       if (typeof expectedHash !== 'string') {
@@ -919,6 +922,10 @@ function reply(response: ServerResponse, status: number, value: unknown): true {
 
 function mapError(error: unknown): ProjectProfilesApiError {
   if (error instanceof ProjectProfilesApiError) return error;
+  if (error instanceof ProjectRuntimeManagerError) {
+    const status = error.code === 'PROJECT_RUNTIME_ROLLBACK_FAILED' ? 500 : 409;
+    return new ProjectProfilesApiError(error.code, safeMessage(error), status);
+  }
   if (error instanceof ProjectProfileDraftPreparationError) {
     const status = error.code.includes('ALREADY_REGISTERED') ? 409 : 400;
     return new ProjectProfilesApiError(error.code, error.message, status, error.details);

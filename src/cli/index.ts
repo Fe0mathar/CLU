@@ -65,6 +65,7 @@ import { registerMissionCommands } from './commands/missionCommands.js';
 import { registerProjectCommands } from './commands/projectCommands.js';
 
 import { requireAuthority } from './commandAuthority.js';
+import { withDashboardRuntime } from './dashboardStartup.js';
 import { setActiveCommandMissionRequirement } from '../shared/commandContext.js';
 import { write } from './output/formatter.js';
 
@@ -268,10 +269,11 @@ export function buildProgram(): Command {
         if (!Number.isFinite(refreshIntervalMs) || refreshIntervalMs < 0) {
           throw new Error(`--refresh must be a non-negative integer (milliseconds); got "${options.refresh}".`);
         }
-        return withRuntimeAsync({ withLog: false }, async (runtime) => {
+        return withDashboardRuntime(async (runtime, projectRuntimeManager) => {
           const handle = await startClueDashboard(runtime, {
             operator: options.operator,
             refreshIntervalMs,
+            ...(projectRuntimeManager === undefined ? {} : { projectRuntimeManager }),
             ...(options.host !== undefined ? { host: options.host } : {}),
             ...(options.port !== undefined ? { port: Number.parseInt(options.port, 10) } : {}),
             ...(options.missionTitle !== undefined ? { missionTitle: options.missionTitle } : {}),

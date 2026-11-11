@@ -54,6 +54,7 @@ export type ProjectRuntimeManagerErrorCode =
   | 'PROJECT_RUNTIME_SWITCH_IN_PROGRESS'
   | 'PROJECT_RUNTIME_BLOCKED'
   | 'PROJECT_RUNTIME_DISPOSED'
+  | 'PROJECT_RUNTIME_TARGET_STALE'
   | 'PROJECT_RUNTIME_IDENTITY_CONTRADICTION'
   | 'PROJECT_RUNTIME_POINTER_CONTRADICTION'
   | 'PROJECT_RUNTIME_ROLLBACK_FAILED';
@@ -104,6 +105,10 @@ export interface ProjectRuntimeActivationRequest {
   readonly reason?: string;
   /** Optional stale-controller guard. */
   readonly expectedCurrentIdentity?: ProjectOperationIdentity | null;
+  readonly expectedTargetGeneration?: number;
+  readonly expectedTargetProfileHash?: string;
+  /** Build read models for the successor before changing the registry pointer. */
+  readonly prepareRuntime?: (runtime: Runtime) => void;
 }
 
 export interface ProjectRuntimeManagerOptions {
@@ -267,7 +272,15 @@ export class ProjectRuntimeManager {
     const previous = this.activeGeneration;
     if (previous?.record.profile.projectId === request.projectId) {
       const current = this.registry.getProfile(request.projectId);
-      if (current.projectProfileHash === previous.record.projectProfileHash) {
+      this.assertExpectedTargetRecord(request, current);
+      if (current.generation === previous.record.generation && current.projectProfileHash === previous.record.projectProfileHash) {
+        this.assertRegistryPointerUnchanged(previous.pointer);
+        if (request.expectedTargetGeneration !== undefined && previous.runtime.projectProfile?.generation !== current.generation) {
+          throw new ProjectRuntimeManagerError(
+            'PROJECT_RUNTIME_TARGET_STALE',
+            'The dashboard is still using an older generation of this profile. Reopen the dashboard to load the saved generation.',
+          );
+        }
         return previous.publication;
       }
     }
@@ -286,10 +299,12 @@ export class ProjectRuntimeManager {
 
     try {
       targetRecord = this.registry.getProfile(request.projectId);
+      this.assertExpectedTargetRecord(request, targetRecord);
       this.inject('after-target-profile-load', targetRecord);
 
       stagedRuntime = this.openTargetRuntime(targetRecord);
       this.validateRuntime(targetRecord, stagedRuntime);
+      request.prepareRuntime?.(stagedRuntime);
       browserSwitch = this.options.browserSessions?.begin(targetRecord) ?? null;
       this.inject('after-target-runtime-open', targetRecord);
       this.inject('before-registry-activation', targetRecord);
@@ -483,6 +498,16 @@ export class ProjectRuntimeManager {
     const missingPolicy: WorkspaceIdentityMissingPolicy =
       record.profile.provenance.source === 'native' ? 'initialize-new' : 'reject';
     return this.runtimeOpener({ record, workspaceIdentityOnMissing: missingPolicy });
+  }
+
+  private assertExpectedTargetRecord(request: ProjectRuntimeActivationRequest, record: ProjectProfileRecord): void {
+    if ((request.expectedTargetGeneration !== undefined && request.expectedTargetGeneration !== record.generation) ||
+      (request.expectedTargetProfileHash !== undefined && request.expectedTargetProfileHash !== record.projectProfileHash)) {
+      throw new ProjectRuntimeManagerError(
+        'PROJECT_RUNTIME_TARGET_STALE',
+        'The requested Project Profile generation changed before activation. Reload and validate the saved profile.',
+      );
+    }
   }
 
   private buildActiveGeneration(

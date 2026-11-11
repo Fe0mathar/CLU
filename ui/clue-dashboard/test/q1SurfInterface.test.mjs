@@ -26,7 +26,7 @@ function sourceSection(startMarker, endMarker) {
   return app.slice(start, end);
 }
 
-function rendererIngestHarness({ model, physicalInventory, nav, errors } = {}) {
+function rendererIngestHarness({ model, physicalInventory, nav, errors, navigatorProjectGuard, hydrated } = {}) {
   const noop = () => {};
   const state = {
     snapshotId: null,
@@ -46,6 +46,7 @@ function rendererIngestHarness({ model, physicalInventory, nav, errors } = {}) {
     '({ state, ingestNavigatorEvent, ingestAvailableRuntimeState, installEventBridge })',
   ].join('\n'), {
     state,
+    navigatorProjectGuard: navigatorProjectGuard ?? createQ1ProjectGenerationGuard(),
     navigatorInstance: { model },
     adapter: { repositoryInventoryModel: physicalInventory },
     nav,
@@ -57,7 +58,7 @@ function rendererIngestHarness({ model, physicalInventory, nav, errors } = {}) {
     updateDiveContextUi: noop,
     markDirty: noop,
     ingestEdge: noop,
-    upsertFile: noop,
+    upsertFile: hydrated ? (record) => hydrated.push(record) : noop,
     normalizeEntityKind: noop,
     recordProjectionError: errors ? (reason) => errors.push(reason) : (reason) => assert.fail(reason),
   });
@@ -151,6 +152,26 @@ test('Q1 SURF: a named graph commit repairs the physical binding after an unboun
   assert.equal(state.snapshotId, null);
   ingestNavigatorEvent(navigatorEventRoutes['named adapter event'](commit));
   assert.equal(state.snapshotId, 'physical-snapshot');
+});
+
+test('Q1 SURF: fallback hydration stays empty during a project handoff', () => {
+  const oldFile = { fileLocationId: 'old-file' };
+  const hydrated = [];
+  const { state, ingestAvailableRuntimeState } = rendererIngestHarness({
+    model: { files: [oldFile], nodes: [oldFile] },
+    physicalInventory: { files: [oldFile], snapshotId: 'old-snapshot' },
+    hydrated,
+  });
+  assert.ok(state.projectGenerationGuard.authorizeNext({
+    projectId: 'fixture-b',
+    targetRootIdentity: 'path:v1:linux:' + 'a'.repeat(64),
+    projectProfileHash: 'profile:v1:' + 'b'.repeat(64),
+    profileGeneration: 1,
+    recognitionConfigHash: 'c'.repeat(64),
+  }));
+  ingestAvailableRuntimeState();
+  assert.deepEqual(hydrated, []);
+  assert.equal(state.snapshotId, null);
 });
 
 test('Q1 SURF: late hydration uses an explicit physical model and ignores the semantic graph snapshot', () => {

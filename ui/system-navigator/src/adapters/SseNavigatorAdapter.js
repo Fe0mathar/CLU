@@ -155,38 +155,49 @@ export class SseNavigatorAdapter extends EventTarget {
 
   connect() {
     if (this.source) return this;
-    this.source = new EventSource(this.url, { withCredentials: this.options.withCredentials });
-    this.source.addEventListener('open', () => {
+    const source = new EventSource(this.url, { withCredentials: this.options.withCredentials });
+    this.source = source;
+    source.addEventListener('open', () => {
+      if (source !== this.source) return;
       this.connected = true;
       this.dispatchEvent(new CustomEvent('status', { detail: { connected: true, url: this.url } }));
     });
-    this.source.addEventListener('error', (event) => {
+    source.addEventListener('error', (event) => {
+      if (source !== this.source) return;
       this.connected = false;
       this.dispatchEvent(new CustomEvent('status', {
         detail: { connected: false, url: this.url, event },
       }));
     });
-    this.source.addEventListener('message', (event) => {
+    source.addEventListener('message', (event) => {
+      if (source !== this.source) return;
       const serialized = event.data;
       // EventSource preserves wire order; the adapter must preserve it too. `applyEvent`
       // crosses an async custom-element readiness seam, so consuming messages independently
       // could let a later sequence reach the semantic model first and cause the model's
       // high-water mark to reject the earlier event. One promise tail makes application,
       // replay-model projection and exact-event forwarding a single ordered pipeline.
-      this.consumeTail = this.consumeTail.then(() => this.#consume(serialized));
+      this.consumeTail = this.consumeTail.then(() => this.#consume(serialized, source));
     });
     return this;
   }
 
-  disconnect() {
+  disconnect({ resetReplay = false } = {}) {
     this.source?.close();
     this.source = null;
     this.connected = false;
+    if (resetReplay) {
+      this.streamSequences.clear();
+      Object.assign(this.repositoryInventoryModel, createInventoryModel());
+    }
   }
 
-  async #consume(serialized) {
+  async #consume(serialized, source) {
+    if (source !== this.source) return;
     try {
       const envelope = JSON.parse(serialized);
+      const target = await this.#resolveTarget();
+      if (source !== this.source || this.options.acceptEnvelope?.(envelope) === false) return;
       const streamId = typeof envelope?.streamId === 'string' ? envelope.streamId : '';
       const sequence = Number(envelope?.sequence);
       if (envelope?.type === 'navigator.reset' && streamId !== '' && !this.streamSequences.has(streamId)) {
@@ -199,8 +210,8 @@ export class SseNavigatorAdapter extends EventTarget {
       if (streamId !== '' && Number.isSafeInteger(sequence) && sequence <= previous) return;
       if (streamId !== '' && Number.isSafeInteger(sequence)) this.streamSequences.set(streamId, sequence);
       this.#projectPhysicalState(envelope);
-      const target = await this.#resolveTarget();
       const accepted = await target.applyEvent(envelope);
+      if (source !== this.source) return;
       if (accepted) this.received += 1;
 
       const physicalEvent = PHYSICAL_EVENT_TYPES.has(envelope.type);
@@ -224,7 +235,7 @@ export class SseNavigatorAdapter extends EventTarget {
         }));
       }
     } catch (error) {
-      this.dispatchEvent(new CustomEvent('error', { detail: error }));
+      if (source === this.source) this.dispatchEvent(new CustomEvent('error', { detail: error }));
     }
   }
 
@@ -235,12 +246,7 @@ export class SseNavigatorAdapter extends EventTarget {
     if (typeof envelope?.runId === 'string') model.runId = envelope.runId;
 
     if (envelope?.type === 'navigator.reset') {
-      const reset = createInventoryModel();
-      Object.assign(model, reset);
-      model.familiesById = reset.familiesById;
-      model.environmentsById = reset.environmentsById;
-      model.filesById = reset.filesById;
-      model.fileEdges = reset.fileEdges;
+      Object.assign(model, createInventoryModel());
       model.streamId = typeof envelope?.streamId === 'string' ? envelope.streamId : null;
       model.runId = typeof envelope?.runId === 'string' ? envelope.runId : null;
       model.repositoryId = payload.repositoryId ?? null;

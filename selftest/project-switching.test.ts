@@ -145,6 +145,40 @@ test('an asynchronous operation keeps the project lease until settlement', async
   assert.equal(manager.activate({ projectId: 'beta', actor: 'creator' }).projectId, 'beta');
 });
 
+test('activation pins the requested target generation and stages its read model before publication', (t) => {
+  const { alpha, beta, manager, registry } = setup(t);
+  const first = manager.start();
+  assert.throws(() => manager.activate({
+    projectId: alpha.profile.projectId,
+    actor: 'daemon',
+    expectedTargetGeneration: alpha.generation + 1,
+  }), { code: 'PROJECT_RUNTIME_TARGET_STALE' });
+
+  const updated = registry.update({ ...beta.profile, displayName: 'Updated Beta' }, beta.generation);
+  assert.equal(updated.projectProfileHash, beta.projectProfileHash);
+  const request = {
+    projectId: beta.profile.projectId,
+    actor: 'daemon' as const,
+    expectedTargetGeneration: beta.generation,
+    expectedTargetProfileHash: beta.projectProfileHash,
+  };
+  assert.throws(() => manager.activate(request), { code: 'PROJECT_RUNTIME_TARGET_STALE' });
+  assert.equal(registry.active()?.projectId, alpha.profile.projectId);
+
+  const refreshedRequest = { ...request, expectedTargetGeneration: updated.generation };
+  assert.throws(() => manager.activate({
+    ...refreshedRequest,
+    prepareRuntime: (runtime) => {
+      assert.equal(runtime.projectProfile?.generation, updated.generation);
+      assert.equal(registry.active()?.projectId, alpha.profile.projectId);
+      throw new Error('Cannot construct successor read model');
+    },
+  }), /Cannot construct successor read model/u);
+  assert.equal(registry.active()?.projectId, alpha.profile.projectId);
+  assert.equal(manager.publication?.runtimeGeneration, first?.runtimeGeneration);
+  assert.equal(manager.activate(refreshedRequest).projectId, beta.profile.projectId);
+});
+
 for (const point of ['before-registry-activation', 'before-runtime-publication'] as const) {
   test(`a competing project activation at ${point} is preserved`, (t) => {
     const { fixture, registry, manager } = setup(t, point, (registry) => registry.activate('gamma'));

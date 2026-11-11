@@ -383,3 +383,56 @@ test('Q1 SURF/DIVE: a complete inventory envelope authorizes the sealed SURF pha
     globalThis.EventSource = originalEventSource;
   }
 });
+
+test('Q1 SURF/DIVE drops old queued and wrong-project envelopes before either projection', async () => {
+  const originalEventSource = globalThis.EventSource;
+  globalThis.EventSource = class extends EventTarget { close() {} };
+  try {
+    const applied = [];
+    const target = new EventTarget();
+    target.navigator = { applyEvent: (event) => { applied.push(event); return true; } };
+    let expectedProject = 'a';
+    const adapter = new SseNavigatorAdapter(target, '/events', {
+      acceptEnvelope: (event) => event.payload.projectId === expectedProject,
+    });
+    const send = (source, type, sequence, projectId, payload = {}) => {
+      source.dispatchEvent(new MessageEvent('message', {
+        data: JSON.stringify(envelope(type, sequence, { projectId, ...payload })),
+      }));
+    };
+    adapter.connect();
+    const previous = adapter.source;
+    send(previous, 'navigator.reset', 0, 'a');
+    send(previous, 'files.upserted', 1, 'a', { files: [{ fileLocationId: 'file-a' }] });
+    await adapter.consumeTail;
+    assert.equal(adapter.repositoryInventoryModel.filesById.has('file-a'), true);
+
+    send(previous, 'files.upserted', 2, 'a', { files: [{ fileLocationId: 'late-file-a' }] });
+    adapter.disconnect({ resetReplay: true });
+    expectedProject = 'b';
+    adapter.connect();
+    const successor = adapter.source;
+    send(successor, 'files.upserted', 1, 'a', { files: [{ fileLocationId: 'wrong-file-a' }] });
+    send(successor, 'navigator.reset', 0, 'b');
+    send(successor, 'files.upserted', 1, 'b', { files: [{ fileLocationId: 'file-b' }] });
+    await adapter.consumeTail;
+    assert.deepEqual([...adapter.repositoryInventoryModel.filesById.keys()], ['file-b']);
+    assert.deepEqual(applied.map((event) => [event.type, event.payload.projectId]), [
+      ['navigator.reset', 'a'],
+      ['files.upserted', 'a'],
+      ['navigator.reset', 'b'],
+      ['files.upserted', 'b'],
+    ]);
+
+    adapter.disconnect({ resetReplay: true });
+    expectedProject = 'a';
+    adapter.connect();
+    send(adapter.source, 'navigator.reset', 0, 'a');
+    send(adapter.source, 'files.upserted', 1, 'a', { files: [{ fileLocationId: 'file-a' }] });
+    await adapter.consumeTail;
+    assert.deepEqual([...adapter.repositoryInventoryModel.filesById.keys()], ['file-a']);
+  } finally {
+    if (originalEventSource === undefined) delete globalThis.EventSource;
+    else globalThis.EventSource = originalEventSource;
+  }
+});

@@ -35,6 +35,7 @@ import { createInterface } from 'node:readline';
 import { ConsoleStateService } from './consoleStateService.js';
 import { parseConsoleSnapshot, type ConsoleSnapshot } from '../ui/viewModel.js';
 import { loadMeasurementCatalogue } from '../analysis/measure/catalogue.js';
+import { readGraphPointer } from '../analysis/source/navigatorEvents.js';
 import type { Runtime } from '../control/runtime.js';
 import { projectStatusFromRuntime } from '../status/statusFromRuntime.js';
 import { STATUS_SCHEMA_VERSION } from '../status/statusContractV5.js';
@@ -62,8 +63,14 @@ import {
   ProjectProfileRegistry,
 } from '../control/projectProfiles/index.js';
 import {
+  ProjectRuntimeManagerError,
+  type ProjectRuntimeLease,
+  type ProjectRuntimeManager,
+} from '../control/projectProfiles/projectRuntimeManager.js';
+import {
   handleProjectProfilesApiRequest,
   PROJECT_PROFILES_API_VERSION,
+  ProjectProfilesApiError,
   ProjectProfilesApiService,
 } from './projectProfilesApi.js';
 import type { Actor, ProjectProfileRecord } from '../shared/schemas.js';
@@ -186,7 +193,9 @@ export interface ClueDashboardOptions {
   readonly childKillGraceMs?: number;
   /** Explicit Project Profile registry root. Defaults to the v3 selector or installation layout. */
   readonly profilesRoot?: string;
-  /** Atomic live switch seam. Omitted by legacy single-runtime dashboard startup. */
+  /** Owns the active runtime for a registry-bound dashboard. */
+  readonly projectRuntimeManager?: ProjectRuntimeManager;
+  /** Optional activation seam for caller-managed runtimes. */
   readonly activateProjectProfile?: (record: ProjectProfileRecord, actor: Actor) => Promise<unknown> | unknown;
   /** Scenario runner seam for dashboard tests. The default runs the installed WebGPU canary. */
   readonly chromeTestRun?: DashboardChromeTestRunner;
@@ -268,7 +277,7 @@ class FrameSink {
 }
 
 export async function startClueDashboard(
-  runtime: Runtime,
+  initialRuntime: Runtime,
   options: ClueDashboardOptions,
 ): Promise<ClueDashboardHandle> {
   const host = (options.host ?? '127.0.0.1').replace(/^\[([^\]]+)\]$/u, '$1');
@@ -299,13 +308,18 @@ export async function startClueDashboard(
     );
   }
 
+  const runtimeManager = options.projectRuntimeManager;
+  if (runtimeManager !== undefined && runtimeManager.activeRuntime !== initialRuntime) {
+    throw new Error('The Project Runtime Manager does not own the initial dashboard runtime.');
+  }
+  let runtime = initialRuntime;
   const sink = new FrameSink();
-  const serviceOptions = {
+  const makeService = (bound: Runtime): ConsoleStateService => new ConsoleStateService(bound, sink, {
     operator: options.operator,
-    navigatorPath: join(runtime.workspaceRoot, 'graph', 'system-navigator.ndjson'),
+    navigatorPath: join(bound.workspaceRoot, 'graph', 'system-navigator.ndjson'),
     ...(options.missionTitle !== undefined ? { missionTitle: options.missionTitle } : {}),
-  };
-  const service = new ConsoleStateService(runtime, sink, serviceOptions);
+  });
+  let service = makeService(runtime);
   service.refresh();
 
   const profilesRoot = configuredProjectProfilesRoot(
@@ -314,19 +328,23 @@ export async function startClueDashboard(
     options.profilesRoot,
   );
   const projectProfilesRegistry = new ProjectProfileRegistry(profilesRoot);
-  const projectProfilesApi = new ProjectProfilesApiService({
-    registry: projectProfilesRegistry,
-    runtime,
-    actor: 'daemon',
-    allowHostConnections: isLoopbackHost(host),
-    ...(options.activateProjectProfile === undefined
-      ? {}
-      : { activateProject: options.activateProjectProfile }),
-  });
+  function makeProfilesApi(bound: Runtime): ProjectProfilesApiService {
+    const activateProject = runtimeManager === undefined
+      ? options.activateProjectProfile
+      : (record: ProjectProfileRecord, actor: Actor) => activateRuntime(bound, record, actor);
+    return new ProjectProfilesApiService({
+      registry: projectProfilesRegistry,
+      runtime: bound,
+      actor: 'daemon',
+      allowHostConnections: isLoopbackHost(host),
+      ...(activateProject === undefined ? {} : { activateProject }),
+    });
+  }
+  let projectProfilesApi = makeProfilesApi(runtime);
 
   /* ---------------------------- control plane ---------------------------- */
 
-  const run: RunState = {
+  const idleRun = (): RunState => ({
     state: 'idle',
     dispatchId: null,
     phase: null,
@@ -336,32 +354,34 @@ export async function startClueDashboard(
     lastLine: null,
     eventAppends: null,
     receipts: [],
-  };
-  const cycleProgress = createDashboardCycleProgress(runtime);
+  });
+  let run = idleRun();
+  let cycleProgress = createDashboardCycleProgress(runtime);
   let precedingClosedCycleId: string | null = null;
   let child: ChildProcess | null = null;
   let stopping = false;
   const activeReadinessChecks = new Set<ReadinessCapability>();
-  const chromeTest = createDashboardChromeTest(
+  const makeChromeTest = (bound: Runtime) => createDashboardChromeTest(
     options.chromeTestRun ?? ((record, assertRunning) => withDashboardWebGpuCanary(
-      runtime.repoRoot,
-      (scenario) => runProjectBrowserScenario(runtime.repoRoot, record.profile.projectId, scenario, assertRunning),
+      bound.repoRoot,
+      (scenario) => runProjectBrowserScenario(bound.repoRoot, record.profile.projectId, scenario, assertRunning),
       assertRunning,
     )),
     () => {
       if (stopping) throw new Error('The dashboard is shutting down.');
-      if (!dashboardProfileCurrent()) throw new Error('Project settings changed. Restart the dashboard before testing Chrome.');
+      if (bound !== runtime || !dashboardProfileCurrent()) throw new Error('Project settings changed. Restart the dashboard before testing Chrome.');
     },
-    (text) => runtime.secrets.redact(text),
+    (text) => bound.secrets.redact(text),
   );
-  const consoleTest = createDashboardSessionTest(
+  let chromeTest = makeChromeTest(runtime);
+  const makeConsoleTest = (bound: Runtime) => createDashboardSessionTest(
     'Test Console',
     'Running Test Console. The diagnostic host closes automatically.',
     async (record, assertRunning) => {
-      const result = await (options.consoleTestRun ?? probeDashboardConsole)(runtime, record);
+      const result = await (options.consoleTestRun ?? probeDashboardConsole)(bound, record);
       if (result.state !== 'ready') return result;
       assertRunning();
-      const cmd = await checkDashboardCmd(runtime);
+      const cmd = await checkDashboardCmd(bound);
       return {
         ...result,
         checks: [...result.checks, cmd, {
@@ -371,16 +391,12 @@ export async function startClueDashboard(
     },
     () => {
       if (stopping) throw new Error('The dashboard is shutting down.');
-      if (!dashboardProfileCurrent()) throw new Error('Project settings changed. Restart the dashboard before testing Console.');
+      if (bound !== runtime || !dashboardProfileCurrent()) throw new Error('Project settings changed. Restart the dashboard before testing Console.');
     },
-    (text) => runtime.secrets.redact(text),
+    (text) => bound.secrets.redact(text),
   );
-  const cliEntry = join(runtime.repoRoot, 'dist', 'src', 'cli', 'index.js');
-  const expectedRuntime = hashCanonicalJson([
-    runtime.config.project.root,
-    runtime.workspaceRoot,
-    runtime.projectBinding?.recognition.identity ?? null,
-  ]);
+  let consoleTest = makeConsoleTest(runtime);
+  const cliEntry = join(initialRuntime.repoRoot, 'dist', 'src', 'cli', 'index.js');
 
   /**
    * Launches one pipeline phase as a child process, under a time budget.
@@ -403,6 +419,11 @@ export async function startClueDashboard(
     run.phase = phase;
     const startedAt = new Date().toISOString();
     const startedMs = Date.now();
+    const expectedRuntime = hashCanonicalJson([
+      runtime.config.project.root,
+      runtime.workspaceRoot,
+      runtime.projectBinding?.recognition.identity ?? null,
+    ]);
     const args = [cliEntry, 'cycle', 'drive', '--navigator', '--expect-runtime', expectedRuntime, '--verify-recovery'];
     const env = { ...process.env };
     const credentials = new Set([
@@ -411,7 +432,14 @@ export async function startClueDashboard(
     for (const name of Object.keys(env)) {
       if (credentials.has(name.toUpperCase())) delete env[name];
     }
-    const spawned = spawn(process.execPath, args, { cwd: runtime.repoRoot, env });
+    const lease = runtimeManager?.lease(runtime.projectIdentity ?? undefined);
+    let spawned: ChildProcess;
+    try {
+      spawned = spawn(process.execPath, args, { cwd: runtime.repoRoot, env });
+    } catch (error) {
+      lease?.release();
+      throw error;
+    }
     child = spawned;
 
     let timedOut = false;
@@ -479,7 +507,13 @@ export async function startClueDashboard(
         run.lastLine =
           `${phase} exceeded its ${String(childTimeoutMs)} ms budget and was terminated`;
       }
-      try { service.refresh(); } catch { /* the next tick retries */ }
+      try {
+        service.refresh();
+      } catch {
+        /* The next tick retries. */
+      } finally {
+        lease?.release();
+      }
     });
   }
 
@@ -593,46 +627,113 @@ export async function startClueDashboard(
     return startAccepted('started', useCurrentCycle ? cycle.cycleId : null);
   }
 
-  const agentCredential = runtime.projectProfile?.profile.integrations.gpt.credential;
-  const operatorAgent = createAgentApi({
-    repoRoot: runtime.repoRoot,
-    workspaceRoot: runtime.workspaceRoot,
-    scope: hashCanonicalJson([
-      runtime.config.project.id,
-      runtime.projectIdentity?.targetRootIdentity ?? runtime.config.project.root,
-    ]),
-    profileCredential: agentCredential?.source === 'project-override'
-      ? agentCredential.value
-      : `env:${runtime.config.gateway.api_key_env}`,
-    local: isLoopbackHost(host),
-    readBody: readRequestBody,
-    profileCurrent: dashboardProfileCurrent,
-    stopping: () => stopping,
-    redact: (text) => runtime.secrets.redact(text),
-    observe: () => {
-      const current = runSnapshot();
-      const frame = sink.current?.snapshot;
-      return {
-        cycleId: current.cycleId,
-        cycleStage: current.cycleStage,
-        recoveryRequired: current.recoveryRequired,
-        workerState: current.state,
-        missionId: current.missionId ?? frame?.shell.identity.missionId ?? null,
-        statusHash: frame?.seal.statusHash ?? null,
-        capturedAt: frame?.seal.capturedAt ?? null,
-        readiness: frame?.dashboard.startStop.phase ?? null,
-      };
-    },
-  });
+  function makeOperatorAgent(bound: Runtime) {
+    const credential = bound.projectProfile?.profile.integrations.gpt.credential;
+    return createAgentApi({
+      repoRoot: bound.repoRoot,
+      workspaceRoot: bound.workspaceRoot,
+      scope: hashCanonicalJson([
+        bound.config.project.id,
+        bound.projectIdentity?.targetRootIdentity ?? bound.config.project.root,
+      ]),
+      profileCredential: credential?.source === 'project-override'
+        ? credential.value
+        : `env:${bound.config.gateway.api_key_env}`,
+      local: isLoopbackHost(host),
+      readBody: readRequestBody,
+      profileCurrent: () => bound === runtime && dashboardProfileCurrent(),
+      stopping: () => stopping,
+      redact: (text) => bound.secrets.redact(text),
+      observe: () => {
+        const current = runSnapshot();
+        const frame = sink.current?.snapshot;
+        return {
+          cycleId: current.cycleId,
+          cycleStage: current.cycleStage,
+          recoveryRequired: current.recoveryRequired,
+          workerState: current.state,
+          missionId: current.missionId ?? frame?.shell.identity.missionId ?? null,
+          statusHash: frame?.seal.statusHash ?? null,
+          capturedAt: frame?.seal.capturedAt ?? null,
+          readiness: frame?.dashboard.startStop.phase ?? null,
+        };
+      },
+    });
+  }
+  let operatorAgent = makeOperatorAgent(runtime);
+
+  function prepareDashboard(next: Runtime) {
+    const nextService = makeService(next);
+    return {
+      runtime: next,
+      service: nextService,
+      frame: nextService.capture(),
+      profilesApi: makeProfilesApi(next),
+      cycleProgress: createDashboardCycleProgress(next),
+      operatorAgent: makeOperatorAgent(next),
+      chromeTest: makeChromeTest(next),
+      consoleTest: makeConsoleTest(next),
+    };
+  }
+
+  function activateRuntime(previous: Runtime, record: ProjectProfileRecord, actor: Actor) {
+    if (stopping || runtimeManager === undefined || previous !== runtime) {
+      throw new ProjectProfilesApiError(
+        'DASHBOARD_RUNTIME_CHANGED', 'The dashboard runtime changed before this activation request was applied.', 409,
+      );
+    }
+
+    const prepared: { value?: ReturnType<typeof prepareDashboard> } = {};
+    let publication: ReturnType<ProjectRuntimeManager['activate']>;
+    try {
+      publication = runtimeManager.activate({
+        projectId: record.profile.projectId,
+        actor,
+        reason: 'DASHBOARD_ACTIVATE_PROFILE',
+        expectedCurrentIdentity: previous.projectIdentity,
+        expectedTargetGeneration: record.generation,
+        expectedTargetProfileHash: record.projectProfileHash,
+        prepareRuntime: (next) => {
+          prepared.value = prepareDashboard(next);
+          operatorAgent.close();
+        },
+      });
+    } catch (error) {
+      if (runtimeManager.activeRuntime !== runtime) disconnectEventStreams();
+      throw error;
+    }
+    const successor = prepared.value;
+    if (successor === undefined) return publication; // Same verified active generation.
+
+    // The manager already prepared the frame before moving the durable pointer. Replace all
+    // server bindings in this turn, and have clients reconnect from the successor stream prefix.
+    disconnectEventStreams();
+    runtime = successor.runtime;
+    service = successor.service;
+    projectProfilesApi = successor.profilesApi;
+    cycleProgress = successor.cycleProgress;
+    operatorAgent = successor.operatorAgent;
+    chromeTest = successor.chromeTest;
+    consoleTest = successor.consoleTest;
+    run = idleRun();
+    precedingClosedCycleId = null;
+    sink.publish(successor.frame);
+    return publication;
+  }
 
   function dashboardProfileCurrent(): boolean {
+    if (runtimeManager !== undefined && runtimeManager.activeRuntime !== runtime) return false;
     const active = runtime.projectProfile;
     if (active === null) return true; // Gateway admission independently checks the runtime digest.
     try {
       const saved = projectProfilesRegistry.getProfile(active.profile.projectId);
       const pointer = projectProfilesRegistry.active();
       return saved.generation === active.generation && saved.projectProfileHash === active.projectProfileHash &&
-        (pointer === null || pointer.projectId === active.profile.projectId);
+        (pointer === null || (
+          pointer.projectId === active.profile.projectId && pointer.profileGeneration === active.generation &&
+          pointer.projectProfileHash === active.projectProfileHash &&
+          pointer.targetRootIdentity === active.profile.targetRootIdentity
+        ));
     } catch {
       return false;
     }
@@ -647,13 +748,10 @@ export async function startClueDashboard(
       path,
       present: existsSync(join(runtime.repoRoot, path)),
     }));
-    const pointerPath = join(runtime.workspaceRoot, 'graph', 'current.json');
-    let pointer: unknown = null;
-    try {
-      pointer = JSON.parse(readFileSync(pointerPath, 'utf8'));
-    } catch {
-      pointer = null;
-    }
+    const pointer = readGraphPointer(
+      join(runtime.workspaceRoot, 'graph', 'system-navigator.ndjson'),
+      runtime.projectBinding?.recognition.identity,
+    );
     const publication = describeTargetPublication(
       config.project.remote,
       config.project.credential_env,
@@ -901,14 +999,18 @@ export async function startClueDashboard(
 
   /* ---------------------- navigator stream: replay+tail ------------------- */
 
-  const navigatorFile = join(runtime.workspaceRoot, 'graph', 'system-navigator.ndjson');
-
   // Every long-lived response is owned by the handle. `stop()` closes both console and
   // Navigator SSE clients before closing the listener; otherwise an open Navigator response
   // keeps `server.close()` pending indefinitely.
   const eventStreams = new Set<ServerResponse>();
 
-  async function streamNavigator(response: ServerResponse): Promise<void> {
+  function disconnectEventStreams(): void {
+    for (const stream of eventStreams) stream.destroy();
+    eventStreams.clear();
+  }
+
+  function streamNavigator(response: ServerResponse): void {
+    const navigatorFile = join(runtime.workspaceRoot, 'graph', 'system-navigator.ndjson');
     response.writeHead(200, {
       'content-type': 'text/event-stream',
       'cache-control': 'no-cache',
@@ -1111,8 +1213,6 @@ export async function startClueDashboard(
       }
     };
 
-    await pumpOnce(); // replay everything already recorded
-    if (closed) return;
     pumpTimer = setInterval(() => {
       void pumpOnce();
     }, 250);
@@ -1120,15 +1220,20 @@ export async function startClueDashboard(
       // Do not add heartbeats behind an already backpressured data stream.
       if (!closed && !response.writableNeedDrain) response.write(': heartbeat\n\n');
     }, 15000);
+    void pumpOnce(); // Replay asynchronously so an SSE client does not hold an operation lease.
   }
 
   /* ------------------------------ the server ------------------------------ */
 
+  const pendingRequests = new Set<Promise<void>>();
   const server = createServer((request: IncomingMessage, response: ServerResponse) => {
-    void handle(request, response).catch(() => {
+    const pending = dispatch(request, response).catch(() => {
+      if (response.destroyed) return;
       if (!response.headersSent) response.writeHead(500);
       response.end();
     });
+    pendingRequests.add(pending);
+    void pending.finally(() => pendingRequests.delete(pending));
   });
 
   /**
@@ -1177,10 +1282,44 @@ export async function startClueDashboard(
     return false;
   }
 
-  async function handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
+  async function dispatch(request: IncomingMessage, response: ServerResponse): Promise<void> {
     if (refuseIfDisallowed(request, response)) return;
 
     const url = new URL(request.url ?? '/', `http://${httpHost(host)}:${boundPort}`);
+    const parts = url.pathname.split('/').filter(Boolean);
+    const projectRoute = parts[0] === 'api' && parts[1] === 'projects';
+    const activation = projectRoute && request.method === 'POST' && parts.length === 4 && parts[3] === 'activate';
+    // The saved-profile editor can inspect the registry after changing a profile whose live
+    // runtime now requires reopening. These reads never consume the active runtime.
+    const registryRead = projectRoute && (
+      (request.method === 'GET' && parts.length <= 3) ||
+      (request.method === 'POST' && parts.length === 4 && parts[3] === 'validate')
+    );
+    let lease: ProjectRuntimeLease | undefined;
+    if (runtimeManager !== undefined && parts[0] === 'api' && !activation && !registryRead) {
+      try {
+        lease = runtimeManager.lease(runtime.projectIdentity ?? undefined);
+        if (lease.runtime !== runtime) {
+          throw new ProjectProfilesApiError('DASHBOARD_RUNTIME_CHANGED', 'The dashboard runtime binding changed.', 409);
+        }
+      } catch (error) {
+        lease?.release();
+        if (runtimeManager.activeRuntime !== runtime) disconnectEventStreams();
+        const code = error instanceof ProjectRuntimeManagerError || error instanceof ProjectProfilesApiError
+          ? error.code : 'DASHBOARD_RUNTIME_UNAVAILABLE';
+        response.writeHead(409, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+        response.end(JSON.stringify({ code, detail: 'The active Project Profile runtime is unavailable. Reopen the dashboard to bind the saved profile.' }));
+        return;
+      }
+    }
+    try {
+      await handle(request, response, url);
+    } finally {
+      lease?.release();
+    }
+  }
+
+  async function handle(request: IncomingMessage, response: ServerResponse, url: URL): Promise<void> {
     const pathname = url.pathname;
 
     if (await handleProjectProfilesApiRequest(request, response, projectProfilesApi, url)) return;
@@ -1300,7 +1439,7 @@ export async function startClueDashboard(
       eventStreams.add(response);
       if (sink.current !== null) response.write(`data: ${JSON.stringify(sink.current)}\n\n`);
       const unsubscribe = sink.subscribe((frame) => {
-        response.write(`data: ${JSON.stringify(frame)}\n\n`);
+        if (!response.destroyed) response.write(`data: ${JSON.stringify(frame)}\n\n`);
       });
       const heartbeat = setInterval(() => response.write(': heartbeat\n\n'), 15000);
       response.on('close', () => {
@@ -1311,7 +1450,7 @@ export async function startClueDashboard(
       return;
     }
     if (request.method === 'GET' && pathname === '/api/navigator-events') {
-      await streamNavigator(response);
+      streamNavigator(response);
       return;
     }
     if (request.method === 'GET' && pathname === '/api/catalogue') {
@@ -1680,8 +1819,13 @@ export async function startClueDashboard(
 
   const refreshTimer = setInterval(() => {
     try {
-      service.refresh();
+      if (runtimeManager === undefined) service.refresh();
+      else runtimeManager.withLease(runtime.projectIdentity ?? undefined, (lease) => {
+        if (lease.runtime === runtime) service.refresh();
+        else disconnectEventStreams();
+      });
     } catch {
+      if (runtimeManager !== undefined && runtimeManager.activeRuntime !== runtime) disconnectEventStreams();
       /* transient read/write race while the cycle child writes; next tick recovers */
     }
   }, Math.max(250, refreshMs));
@@ -1692,8 +1836,7 @@ export async function startClueDashboard(
       stopping = true;
       operatorAgent.close();
       clearInterval(refreshTimer);
-      for (const stream of eventStreams) stream.end();
-      eventStreams.clear();
+      disconnectEventStreams();
       const serverStopped = new Promise<void>((resolveClose) => server.close(() => resolveClose()));
       const activeChild = child;
       if (activeChild !== null) {
@@ -1707,6 +1850,7 @@ export async function startClueDashboard(
         });
       }
       await serverStopped;
+      await Promise.all(pendingRequests);
     },
   };
 }
