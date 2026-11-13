@@ -185,7 +185,9 @@ export function classifyProviderHttpError(
   });
 }
 
-function extractOutputText(body: Record<string, unknown>): string {
+export function extractOutputText(value: unknown): string {
+  const body = asRecord(value);
+  if (body === null) return '';
   const direct = body['output_text'];
   if (typeof direct === 'string') return direct;
   const output = body['output'];

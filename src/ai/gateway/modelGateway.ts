@@ -299,6 +299,15 @@ export interface GatewayRuntimeOptions {
   readonly requireInteractive?: boolean;
   /** Bind operator context to the exact project/workspace captured by the caller. */
   readonly expectedRuntimeDigest?: string;
+  /** Prove the task still holds its lease when the gateway records the call. Never sent to the provider. */
+  readonly expectedTaskLease?: {
+    readonly taskId: string;
+    readonly worker: string;
+    readonly token: string;
+    readonly missionId: string;
+    /** Recheck the caller's scope after the model probe, immediately before the provider request. */
+    readonly isCurrent: () => boolean;
+  };
 }
 
 interface RuntimeGatewayBinding {
@@ -499,6 +508,15 @@ function prepareGatewayCall(
     },
     (runtime) => {
       const callId = newCallId();
+      const lease = options.expectedTaskLease;
+      if (lease !== undefined && (request.attribution.task_id !== lease.taskId ||
+          runtime.currentMissionId() !== lease.missionId ||
+          !runtime.requireQueue().leaseHeldBy(lease.taskId, lease.worker, lease.token))) {
+        return {
+          state: 'refused', callId, code: 'GATEWAY_TASK_LEASE_CHANGED',
+          reason: 'The attributed task no longer holds the exact live lease.',
+        };
+      }
       if (options.expectedRuntimeDigest !== undefined && options.expectedRuntimeDigest !== hashCanonicalJson([
         runtime.config.project.root,
         runtime.workspaceRoot,
@@ -970,6 +988,9 @@ export async function invokeGateway(
   try {
     if (prepared.policies.routing.validate_model_before_use) {
       await adapter.probeModel(prepared.model);
+    }
+    if (options.expectedTaskLease !== undefined && !options.expectedTaskLease.isCurrent()) {
+      throw new OpenAiGatewayError('GATEWAY_TASK_LEASE_CHANGED', 'The task scope changed before provider submission.');
     }
     if (prepared.mode === 'interactive') {
       const response = await adapter.invokeInteractive({

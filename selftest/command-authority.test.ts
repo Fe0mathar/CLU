@@ -146,16 +146,21 @@ test('DEV-P1-07: read-only and mission are the defaults, and the exceptions are 
   // reading a file the operator hands you needs no mission, but reading or writing the
   // workspace's own retained history is work under a mission and is declared as such.
 
-  // Most of the surface is read-only; every mutating command states why it writes.
+  // The pre-supersession inventory was majority read-only. Later explicit write
+  // capabilities are checked individually here and still need a written rationale.
   const mutating = COMMAND_AUTHORITIES.filter((entry) => entry.mutates);
   assert.ok(mutating.length < COMMAND_AUTHORITIES.length, 'not every command mutates');
   const supersession = requireAuthority('cycle supersede');
   assert.equal(supersession.mutates, true);
   assert.equal(supersession.requiresMission, true);
   assert.equal(supersession.capability, 'fs.write.workspace');
+  const gatewayCheck = requireAuthority('task gateway-check');
+  assert.equal(gatewayCheck.mutates, true);
+  assert.equal(gatewayCheck.requiresMission, true);
+  assert.equal(gatewayCheck.capability, 'model.call');
   assert.ok(
     COMMAND_AUTHORITIES.filter((entry) => !entry.mutates).length >=
-      mutating.filter((entry) => entry !== supersession).length,
+      mutating.filter((entry) => entry !== supersession && entry !== gatewayCheck).length,
     'read-only is at least as common as mutating in the pre-supersession command inventory',
   );
   for (const entry of mutating) {

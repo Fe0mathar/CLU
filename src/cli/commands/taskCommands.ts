@@ -43,6 +43,7 @@
 import type { Command } from 'commander';
 
 import { withRuntime, type Runtime } from '../../control/runtime.js';
+import { runTaskGatewayCheck } from '../../control/taskGatewayBridge.js';
 import { z } from 'zod';
 import type { TaskLane, TaskState } from '../../control/tasks.js';
 import { printChecks, SYMBOL, short, truncate, write } from '../output/formatter.js';
@@ -409,6 +410,14 @@ function commandTaskAbandon(taskId: string, reason: string): number {
 /** Registers the `task` command group. */
 export function registerTaskCommands(program: Command): void {
   const task = program.command('task').description('durable work');
+  task
+    .command('gateway-check')
+    .description('run one fixed, profile-bound task through the live Model Gateway')
+    .action(async () => {
+      const result = await runTaskGatewayCheck();
+      write(JSON.stringify(result));
+      process.exitCode = result.state === 'COMPLETED' || result.state === 'ALREADY_COMPLETED' ? 0 : 1;
+    });
   task
     .command('list')
     .description('list tasks')

@@ -54,6 +54,8 @@ import { join, relative, sep } from 'node:path';
 import type Database from 'better-sqlite3';
 import { z } from 'zod';
 
+import { gatewayCallIdSchema, readGatewayCall } from '../ai/gateway/gatewayProjection.js';
+import { extractOutputText } from '../ai/gateway/openaiAdapter.js';
 import { hashCanonicalJson, hashText, nowIso, requireSha256, type Sha256 } from '../shared/ids.js';
 import {
   EvidenceChainError,
@@ -529,6 +531,10 @@ const KNOWN_PACKET_FILES: ReadonlySet<string> = new Set([
 /** Subdirectory a worker places produced attachments in; its contents are not part of the packet identity. */
 const ATTACHMENT_DIR = 'artifacts';
 
+const gatewayPacketBindingSchema = z.object({
+  metadata: z.object({ clue_packet_hash: z.string(), clue_task_attempt: z.string() }),
+});
+
 export class SessionPacketService {
   private readonly log: EventLog;
   private readonly projections: ProjectionStore;
@@ -565,6 +571,7 @@ export class SessionPacketService {
     sections: readonly ContextSection[],
     destinationDirectory: string,
     leaseToken: string | null = null,
+    options: { readonly portable?: boolean } = {},
   ): { manifest: PacketManifest; directory: string } {
     const entry = this.schemas.forTaskType(task.type);
     if (entry === null) {
@@ -658,12 +665,14 @@ export class SessionPacketService {
     writeFileSync(join(directory, 'manifest.json'), JSON.stringify(manifest, null, 2), 'utf8');
     writeFileSync(join(directory, 'task.json'), taskBody, 'utf8');
     writeFileSync(join(directory, 'output-schema.json'), outputSchemaBody, 'utf8');
-    writeFileSync(
-      join(directory, 'result-template.json'),
-      JSON.stringify(this.resultTemplate(task, manifest, entry, leaseToken), null, 2),
-      'utf8',
-    );
-    writeFileSync(join(directory, 'INSTRUCTIONS.md'), this.instructions(task, manifest, entry, validated), 'utf8');
+    if (options.portable !== false) {
+      writeFileSync(
+        join(directory, 'result-template.json'),
+        JSON.stringify(this.resultTemplate(task, manifest, entry, leaseToken), null, 2),
+        'utf8',
+      );
+      writeFileSync(join(directory, 'INSTRUCTIONS.md'), this.instructions(task, manifest, entry, validated), 'utf8');
+    }
 
     for (const file of sectionFiles) {
       writeFileSync(join(directory, file.name), file.body, 'utf8');
@@ -685,8 +694,16 @@ export class SessionPacketService {
    * silently discards bad results learns nothing from producing them.
    */
   public import(resultDirectory: string): ImportReport {
+    return this.importEnvelope(resultDirectory, this.readResult(resultDirectory));
+  }
+
+  /** Integrates an in-memory result without persisting its bearer token in a result file. */
+  public importEnvelope(
+    resultDirectory: string,
+    raw: unknown,
+    gatewayReceipt?: { readonly callId: string; readonly responseArtifactHash: string },
+  ): ImportReport {
     const timestamp = nowIso();
-    const raw = this.readResult(resultDirectory);
     const envelope = parseOrThrow(sessionResultSchema, raw, 'session result envelope');
 
     const task = this.queue.get(envelope.task_id);
@@ -767,6 +784,10 @@ export class SessionPacketService {
         .map((issue) => `${issue.path.join('.') || '<root>'}: ${issue.message}`)
         .join('; ');
       return this.reject(task.id, envelope.worker, 'schema-invalid', issues, timestamp);
+    }
+
+    if (gatewayReceipt !== undefined) {
+      this.requireGatewayResult(gatewayReceipt, envelope, packet);
     }
 
     const serialised = JSON.stringify(validation.data);
@@ -905,6 +926,10 @@ export class SessionPacketService {
         mode: envelope.mode,
         imported_at: timestamp,
         attachments: attachmentManifest,
+        ...(gatewayReceipt === undefined ? {} : {
+          gateway_call_id: gatewayReceipt.callId,
+          gateway_response_artifact_hash: gatewayReceipt.responseArtifactHash,
+        }),
       },
       task.id,
     );
@@ -1202,6 +1227,39 @@ export class SessionPacketService {
   }
 
   /* ------------------------------ internals --------------------------- */
+
+  private requireGatewayResult(
+    receipt: { readonly callId: string; readonly responseArtifactHash: string },
+    envelope: SessionResult,
+    packet: PacketManifest,
+  ): void {
+    const callId = parseOrThrow(gatewayCallIdSchema, receipt.callId, 'session result gateway call id');
+    const responseHash = requireSha256(receipt.responseArtifactHash, 'session result gateway response');
+    const call = readGatewayCall(this.projections, callId);
+    if (call?.state !== 'completed' || call.responseArtifactHash !== responseHash ||
+        call.requestArtifactHash === null || call.attribution.taskId !== envelope.task_id ||
+        call.missionVersion !== envelope.mission_version || call.mode !== 'interactive' ||
+        envelope.mode !== 'interactive' || call.model !== envelope.model) {
+      throw new Error('Session result gateway receipt does not bind this task, mission, and model.');
+    }
+
+    const request = this.artifacts.getJson(requireSha256(call.requestArtifactHash, 'session result gateway request'));
+    const binding = gatewayPacketBindingSchema.safeParse(request);
+    if (!binding.success || binding.data.metadata.clue_packet_hash !== packet.packet_hash ||
+        binding.data.metadata.clue_task_attempt !== String(packet.lease_attempt)) {
+      throw new Error('Session result gateway request does not bind this packet and lease attempt.');
+    }
+
+    let providerOutput: unknown;
+    try {
+      providerOutput = JSON.parse(extractOutputText(this.artifacts.getJson(responseHash))) as unknown;
+    } catch {
+      throw new Error('Session result gateway artifact does not contain a valid JSON reply.');
+    }
+    if (hashCanonicalJson(providerOutput) !== hashCanonicalJson(envelope.output)) {
+      throw new Error('Session result output differs from the recorded gateway reply.');
+    }
+  }
 
   private readResult(directory: string): unknown {
     const path = join(directory, 'result.json');

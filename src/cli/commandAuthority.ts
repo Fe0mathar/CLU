@@ -571,6 +571,13 @@ export const COMMAND_AUTHORITIES: readonly CommandAuthority[] = [
     rationale: 'creates a task from a ranked candidate',
   },
   {
+    command: 'task gateway-check',
+    capability: 'model.call',
+    mutates: true,
+    requiresMission: true,
+    rationale: 'leases a fixed Project Profile task, calls the governed gateway, and imports its validated result',
+  },
+  {
     command: 'task export',
     capability: 'fs.write.workspace',
     mutates: true,
