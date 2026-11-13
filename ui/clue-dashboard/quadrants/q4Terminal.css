@@ -47,6 +47,38 @@
   padding: 2px 4px;
 }
 
+#q4 .q4-findings {
+  padding: 6px 8px;
+  border: 1px solid #21475b;
+  border-radius: 7px;
+  background: #0a1926;
+  color: #cce7f7;
+  font: 11px/1.45 ui-monospace, Consolas, monospace;
+  overflow-wrap: anywhere;
+}
+
+#q4 .q4-findings-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+#q4 .q4-findings button {
+  padding: 2px 6px;
+  border: 1px solid #326981;
+  border-radius: 4px;
+  background: #0b2635;
+  color: #c2ecff;
+  font: inherit;
+}
+
+#q4 .q4-findings button:disabled { opacity: .55; }
+#q4 .q4-findings p { margin: 4px 0 0; }
+#q4 .q4-findings details { margin-top: 4px; color: #a0bdd1; }
+#q4 .q4-findings dl { margin: 4px 0 0; }
+#q4 .q4-findings dd { margin: 0 0 4px; }
+
 #q4 .q4-command-pane {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;

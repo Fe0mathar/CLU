@@ -32,6 +32,7 @@ export const DASHBOARD_ACTIONS = Object.freeze({
   publishCatalogue: action({ method: 'POST', path: '/api/catalogues', mutating: true, payload: 'json', description: 'Publish a measurement catalogue to the server library.' }),
   readConfig: action({ method: 'GET', path: '/api/config', mutating: false, payload: 'none', description: 'Read operational configuration health.' }),
   readRun: action({ method: 'GET', path: '/api/run', mutating: false, payload: 'none', description: 'Read current run state.' }),
+  readCurrentFindings: action({ method: 'GET', path: '/api/findings/current', mutating: false, payload: 'none', description: 'Read the recorded findings decision for the active screened cycle.' }),
   listProjects: action({ method: 'GET', path: '/api/projects', mutating: false, payload: 'none', description: 'List registered Project Profiles and the active pointer.' }),
   readProject: action({ method: 'GET', path: '/api/projects/:projectId', params: ['projectId'], mutating: false, payload: 'request', body: false, description: 'Read one exact Project Profile record.' }),
   prepareProjectDraft: action({ method: 'POST', path: '/api/projects/prepare-draft', mutating: false, payload: 'json', description: 'Ask the backend to resolve physical identity and prepare a non-persistent strict profile draft.' }),

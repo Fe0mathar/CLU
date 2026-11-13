@@ -555,6 +555,27 @@ test('P2-B6: /api/proof-board exposes a no-store, read-only durable projection',
   }
 });
 
+test('P39: current findings is a same-origin, no-store read with a fixed scope', async () => {
+  const root = makeRepo();
+  try {
+    await withServer(root, {}, async ({ port, runtime }) => {
+      const before = runtime.projections.status();
+      const result = await request(port, '/api/findings/current');
+      assert.equal(result.status, 200, result.body);
+      assert.equal(result.headers['cache-control'], 'no-store');
+      assert.equal(JSON.parse(result.body), null);
+      assert.equal((await request(port, '/api/findings/current?projectId=elsewhere')).status, 400);
+      assert.equal((await request(port, '/api/findings/current', { method: 'POST' })).status, 405);
+      assert.equal((await request(port, '/api/findings/current', {
+        headers: { Origin: 'http://other.invalid' },
+      })).status, 403);
+      assert.deepEqual(runtime.projections.status(), before);
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true, maxRetries: 3 });
+  }
+});
+
 test('P2-CLOSURE-04: /api/p2-closure is no-store and refuses to call a pending tree closed', async () => {
   const root = makeRepo();
   try {

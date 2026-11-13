@@ -57,6 +57,7 @@ import { registerSnapshotCommands } from './commands/snapshotCommands.js';
 import { registerGraphCommands } from './commands/graphCommands.js';
 import { registerMetricsCommands } from './commands/metricsCommands.js';
 import { registerCandidatesCommands } from './commands/candidatesCommands.js';
+import { registerFindingsCommands } from './commands/findingsCommands.js';
 import { registerClaimsCommands } from './commands/claimsCommands.js';
 import { registerConflictsCommands } from './commands/conflictsCommands.js';
 import { registerSeedsCommands } from './commands/seedsCommands.js';
@@ -237,6 +238,7 @@ export function buildProgram(): Command {
   registerGraphCommands(program);
   registerMetricsCommands(program);
   registerCandidatesCommands(program);
+  registerFindingsCommands(program);
   registerClaimsCommands(program);
   registerConflictsCommands(program);
   registerSeedsCommands(program);

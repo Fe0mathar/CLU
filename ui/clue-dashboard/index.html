@@ -175,6 +175,13 @@
         <section class="q4-operation-pane" aria-label="Operational feed" tabindex="0">
           <h2 class="q4-pane-title">Operational feed</h2>
           <div id="work"><div class="empty" style="grid-column:1/-1">No current work contract</div></div>
+          <section id="q4-findings" class="q4-findings" aria-labelledby="q4-findings-title">
+            <div class="q4-findings-heading">
+              <h3 class="q4-pane-title" id="q4-findings-title">Candidate selection</h3>
+              <button type="button" id="q4-findings-refresh" disabled>Refresh</button>
+            </div>
+            <div id="q4-findings-content" aria-live="polite">Awaiting a screened cycle.</div>
+          </section>
           <ol id="q4-command-receipts" class="q4-command-receipts" aria-label="CLUE activity and command receipts" hidden></ol>
           <div id="feed"><div class="empty">No operational traffic recorded. Enter /start in the console to begin.</div></div>
         </section>

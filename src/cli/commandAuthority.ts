@@ -571,6 +571,13 @@ export const COMMAND_AUTHORITIES: readonly CommandAuthority[] = [
     rationale: 'creates a task from a ranked candidate',
   },
   {
+    command: 'findings plan',
+    capability: 'fs.write.workspace',
+    mutates: true,
+    requiresMission: true,
+    rationale: 'records one evidence-bound findings assessment for a current screened profile cycle',
+  },
+  {
     command: 'task gateway-check',
     capability: 'model.call',
     mutates: true,

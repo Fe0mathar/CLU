@@ -158,9 +158,13 @@ test('DEV-P1-07: read-only and mission are the defaults, and the exceptions are 
   assert.equal(gatewayCheck.mutates, true);
   assert.equal(gatewayCheck.requiresMission, true);
   assert.equal(gatewayCheck.capability, 'model.call');
+  const findingsPlan = requireAuthority('findings plan');
+  assert.equal(findingsPlan.mutates, true);
+  assert.equal(findingsPlan.requiresMission, true);
+  assert.equal(findingsPlan.capability, 'fs.write.workspace');
   assert.ok(
     COMMAND_AUTHORITIES.filter((entry) => !entry.mutates).length >=
-      mutating.filter((entry) => entry !== supersession && entry !== gatewayCheck).length,
+      mutating.filter((entry) => entry !== supersession && entry !== gatewayCheck && entry !== findingsPlan).length,
     'read-only is at least as common as mutating in the pre-supersession command inventory',
   );
   for (const entry of mutating) {

@@ -47,6 +47,7 @@ import {
 } from './quadrants/q1Navigator.js';
 import { mountRibbon } from './components/ribbon.js';
 import { mountQ4Terminal } from './quadrants/q4Terminal.js';
+import { mountQ4Findings } from './quadrants/q4Findings.js';
 import { mountAgentsPanel } from './configuration/agentsPanel.js';
 import { createFullscreenContract } from './fullscreen/fullscreenContract.js';
 import { createActionClient } from './configuration/actionContracts.js';
@@ -10781,6 +10782,7 @@ async function pollRun() {
   try {
     const run = await fetchJson('/api/run', { cache: 'no-store' });
     if (generation !== runGeneration) return;
+    findingsPanel.observe(run, ConsoleFrameBus.getLastFrame());
     const { processState: state, stage, stageLabel, guidance, detail } = describeDashboardRun(run);
     if (state === 'running') ribbon.notice(null);
     ribbon.updateRun(run);
@@ -10817,6 +10819,7 @@ async function pollRun() {
     }
   } catch {
     if (generation !== runGeneration) return;
+    findingsPanel.invalidate('Current cycle is unavailable.');
     document.body.dataset.clueRunState = 'unreachable';
     ribbon.updateRun(null);
   } finally {
@@ -10854,6 +10857,7 @@ function projectRecordIdentity(record) {
 
 function clearProjectBoundDashboard(reason = 'PROJECT SWITCH · AWAITING PROJECT-BOUND EVIDENCE') {
   runGeneration += 1;
+  findingsPanel.invalidate();
   proofBoard?.invalidate();
   bookViewer?.invalidate();
   try { window.__q2Field?.setProjection?.(null); window.__q2LastView = null; } catch { /* Q2 remains isolated */ }
@@ -11051,6 +11055,12 @@ const terminal = mountQ4Terminal({
   async dialogue({ signal }) {
     if (projectTransition) return null;
     return requireAction(await actionClient.invoke('readAgentDialogue', undefined, { signal }));
+  },
+});
+const findingsPanel = mountQ4Findings({
+  root: $('q4-findings'),
+  async read({ signal }) {
+    return requireAction(await actionClient.invoke('readCurrentFindings', undefined, { signal }));
   },
 });
 setInterval(pollRun, 1000);

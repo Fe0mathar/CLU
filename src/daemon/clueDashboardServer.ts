@@ -37,6 +37,7 @@ import { parseConsoleSnapshot, type ConsoleSnapshot } from '../ui/viewModel.js';
 import { loadMeasurementCatalogue } from '../analysis/measure/catalogue.js';
 import { readGraphPointer } from '../analysis/source/navigatorEvents.js';
 import type { Runtime } from '../control/runtime.js';
+import { readCurrentFindings } from '../control/cycleFindings.js';
 import { projectStatusFromRuntime } from '../status/statusFromRuntime.js';
 import { STATUS_SCHEMA_VERSION } from '../status/statusContractV5.js';
 import { describeTargetPublication } from '../shared/targetPublication.js';
@@ -1384,6 +1385,41 @@ export async function startClueDashboard(
         seal: sink.current.seal,
         operationalConsole: sink.current.snapshot.dashboard.operationalConsole,
       }));
+      return;
+    }
+    if (pathname === '/api/findings/current') {
+      const headers = { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' };
+      if (request.method !== 'GET') {
+        response.writeHead(405, { ...headers, allow: 'GET' });
+        response.end(JSON.stringify({ code: 'FINDINGS_READ_ONLY' }));
+        return;
+      }
+      if (url.search !== '') {
+        response.writeHead(400, headers);
+        response.end(JSON.stringify({ code: 'FINDINGS_SCOPE_FIXED' }));
+        return;
+      }
+      if (!dashboardProfileCurrent()) {
+        response.writeHead(409, headers);
+        response.end(JSON.stringify({ code: 'DASHBOARD_RUNTIME_CHANGED' }));
+        return;
+      }
+      let findings: string;
+      try {
+        findings = JSON.stringify(readCurrentFindings(runtime));
+        if (Buffer.byteLength(findings) > 16 * 1024) throw new Error('Findings projection exceeds response limit.');
+      } catch {
+        response.writeHead(503, headers);
+        response.end(JSON.stringify({ code: 'FINDINGS_UNAVAILABLE' }));
+        return;
+      }
+      if (!dashboardProfileCurrent()) {
+        response.writeHead(409, headers);
+        response.end(JSON.stringify({ code: 'DASHBOARD_RUNTIME_CHANGED' }));
+        return;
+      }
+      response.writeHead(200, headers);
+      response.end(findings);
       return;
     }
     // P2 B6 / ADR-0015 — a read-only dashboard projection over durable benchmark and proof
