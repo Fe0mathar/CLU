@@ -22,8 +22,13 @@ const excludedFromFixture = new Set(['.git', 'dist', 'node_modules', 'workspace'
 const sealNames = ['SHA256SUMS_v9.txt', 'SHA256SUMS_v10.txt'];
 const proofTemplate = 'templates/p2-closure/proof-contract.template.json';
 const selector = 'config/documentation-pack.json';
+const releaseConfig = 'config/clue.config.yaml';
 const localProfileSelector = 'config/project-profiles.yaml';
 const localConfigBackup = 'config/backups/clue.config.v2.1bd8e5d20223.yaml';
+const localDocumentationBackups = [
+  'config/backups/clue.config.2026-11-14T10-10-10-100Z.yaml',
+  'config/backups/documentation-pack.2026-11-14T10-10-10-100Z.json',
+];
 const operatorPaths = [
   '.gitattributes',
   'agents/clue/identity.md',
@@ -37,6 +42,27 @@ const operatorPaths = [
   'templates/project-profiles/governed-document.operator-input.template.json',
   'templates/project-profiles/project-profile.operator-input.template.json',
 ];
+
+interface DocumentationSelector {
+  readonly schemaVersion: string;
+  readonly releaseName: string;
+  readonly releaseVersion: string;
+  readonly sealFile: string;
+  readonly manifestFile: string;
+  readonly installHint: string;
+}
+
+interface DocumentationSeal {
+  readonly path: string;
+  readonly sha256: string;
+  readonly pass: boolean;
+}
+
+interface ReleaseAuthority {
+  readonly documentationPack: DocumentationSelector;
+  readonly documentationSeal: DocumentationSeal;
+  readonly documentationSeals: { readonly v9: DocumentationSeal; readonly v10: DocumentationSeal };
+}
 
 interface ReleaseReport {
   readonly verdict: string;
@@ -55,6 +81,8 @@ interface ReleaseReport {
     readonly formalPass: boolean;
     readonly nativeProofIntegration: boolean;
   };
+  readonly authority: ReleaseAuthority;
+  readonly smoke: { readonly structural: ReleaseAuthority & { readonly pass: boolean } };
 }
 
 function fixture(t: TestContext): { readonly root: string; readonly parent: string; readonly env: NodeJS.ProcessEnv } {
@@ -155,14 +183,55 @@ function addLocalProfileState(root: string, canary: string): void {
   writeFileSync(join(root, localConfigBackup), `# ${canary}\n`);
 }
 
-test('release archive carries both verified packs, v9 selector, and operator inputs without local state', (t) => {
+function packSelector(pack: 'v9' | 'v10'): DocumentationSelector {
+  return {
+    schemaVersion: 'clue-documentation-pack-selector/1',
+    releaseName: `CLU-E RPI Documentation Pack ${pack}`,
+    releaseVersion: pack === 'v9' ? '9.0' : '10.0-rc1',
+    sealFile: `SHA256SUMS_${pack}.txt`,
+    manifestFile: `DOCUMENTATION_MANIFEST_${pack}.json`,
+    installHint: 'fixture only',
+  };
+}
+
+function selectFixturePack(root: string, pack: 'v9' | 'v10'): DocumentationSelector {
+  const active = packSelector(pack);
+  const configPath = join(root, releaseConfig);
+  const config = readFileSync(configPath, 'utf8').replace(
+    /"(CLUE_(?:AI_Utilization|Git_Integration|Status_Contract|Q1_System_Navigator|Architecture|Execution_Model|Interface_Design|Project_Directory))_v(?:9|10)\.md"/gu,
+    `"$1_${pack}.md"`,
+  );
+  writeFileSync(configPath, config);
+  writeFileSync(join(root, selector), JSON.stringify(active));
+  return active;
+}
+
+function assertPackIdentity(report: ReleaseReport, entries: ReadonlyMap<string, Buffer>, active: DocumentationSelector): void {
+  assert.deepEqual(JSON.parse(entries.get(selector)!.toString('utf8')), active);
+  assert.equal(report.smoke.structural.pass, true);
+  for (const authority of [report.authority, report.smoke.structural]) {
+    assert.deepEqual(authority.documentationPack, active);
+    assert.equal(authority.documentationSeal.path, active.sealFile);
+    assert.equal(authority.documentationSeal.sha256, sha256(entries.get(active.sealFile)!));
+    for (const pack of ['v9', 'v10'] as const) {
+      const seal = authority.documentationSeals[pack];
+      assert.equal(seal.path, packSelector(pack).sealFile);
+      assert.equal(seal.pass, true);
+      assert.equal(seal.sha256, sha256(entries.get(seal.path)!));
+    }
+  }
+}
+
+test('release archive carries both verified packs, the active v10 selector, and operator inputs without local state', (t) => {
   const { root, parent, env } = fixture(t);
+  const active = selectFixturePack(root, 'v10');
   const canary = randomBytes(24).toString('hex');
   env['OPENAI_API_KEY'] = canary;
   addLocalProfileState(root, canary);
   for (const path of [
     '.env.local', 'config/.env', 'src/.env', 'config/.npmrc', 'config/local-test.pem',
     'workspace/events/events.ndjson', 'release/old.zip',
+    ...localDocumentationBackups,
   ]) {
     mkdirSync(dirname(join(root, path)), { recursive: true });
     writeFileSync(join(root, path), canary);
@@ -182,9 +251,9 @@ test('release archive carries both verified packs, v9 selector, and operator inp
       assert.equal(sha256(entry), match[1], match[2]);
     }
   }
-  const active = JSON.parse(entries.get(selector)!.toString('utf8')) as { sealFile: string; releaseVersion: string };
-  assert.equal(active.releaseVersion, '9.0');
-  assert.equal(active.sealFile, sealNames[0]);
+  assertPackIdentity(report, entries, active);
+  const candidateManifest = JSON.parse(entries.get(active.manifestFile)!.toString('utf8'));
+  assert.equal(candidateManifest.status, 'release-candidate-not-ratified');
   for (const file of readdirSync(join(root, 'templates', 'p2-closure'))) {
     assert.ok(entries.has(`templates/p2-closure/${file}`), file);
   }
@@ -196,20 +265,47 @@ test('release archive carries both verified packs, v9 selector, and operator inp
     'tools/p2-closure-inventory.mjs',
   ]) assert.ok(entries.has(file), file);
   for (const path of operatorPaths) assert.deepEqual(entries.get(path), readFileSync(join(root, path)), path);
-  for (const path of [localProfileSelector, localConfigBackup]) assert.equal(entries.has(path), false, path);
+  for (const path of [localProfileSelector, localConfigBackup, ...localDocumentationBackups]) {
+    assert.equal(entries.has(path), false, path);
+  }
   for (const [path, data] of entries) {
     assert.doesNotMatch(path, /(?:^|\/)(?:\.env(?:\.|$)|\.npmrc$|workspace\/|release\/|\.git\/|node_modules\/)|\.pem$/iu);
     assert.equal(data.includes(canary), false, path);
   }
 });
 
-test('release refuses broken seals, missing operator inputs, and a promoted selector', (t) => {
+test('release preserves the historical v9 selection while still verifying v10', (t) => {
   const { root, parent, env } = fixture(t);
-  const v10Path = join(root, 'CLUE_Architecture_v10.md');
-  const v10Bytes = readFileSync(v10Path);
-  writeFileSync(v10Path, Buffer.concat([v10Bytes, Buffer.from('\nfixture tamper\n')]));
-  expectRefusal(root, join(parent, 'bad-seal'), env, /(?:v10|CLUE_Architecture_v10).*?(?:mismatch|seal)|(?:seal|mismatch).*?v10/iu);
-  writeFileSync(v10Path, v10Bytes);
+  const active = selectFixturePack(root, 'v9');
+  const { report, entries } = inspectRelease(root, join(parent, 'v9'), env);
+  assertPackIdentity(report, entries, active);
+
+  const configPath = join(root, releaseConfig);
+  const config = readFileSync(configPath, 'utf8');
+  writeFileSync(configPath, config.replace('"CLUE_Architecture_v9.md"', '"CLUE_Architecture_v10.md"'));
+  expectRefusal(root, join(parent, 'v9-v10-authority'), env, /tracked authority|CLUE_Architecture_v10/iu);
+});
+
+test('release refuses v9-only authority when v10 is active', (t) => {
+  const { root, parent, env } = fixture(t);
+  selectFixturePack(root, 'v10');
+  const configPath = join(root, releaseConfig);
+  const config = readFileSync(configPath, 'utf8');
+  writeFileSync(configPath, config.replace('"CLUE_Architecture_v10.md"', '"CLUE_Architecture_v9.md"'));
+  expectRefusal(root, join(parent, 'v10-v9-authority'), env, /tracked authority|CLUE_Architecture_v9/iu);
+});
+
+test('release refuses broken seals and missing operator inputs', (t) => {
+  const { root, parent, env } = fixture(t);
+  selectFixturePack(root, 'v10');
+  for (const pack of ['v9', 'v10']) {
+    const document = `CLUE_Architecture_${pack}.md`;
+    const path = join(root, document);
+    const bytes = readFileSync(path);
+    writeFileSync(path, Buffer.concat([bytes, Buffer.from('\nfixture tamper\n')]));
+    expectRefusal(root, join(parent, `bad-seal-${pack}`), env, new RegExp(`hash mismatch ${document}`, 'iu'));
+    writeFileSync(path, bytes);
+  }
   const templatePath = join(root, proofTemplate);
   const templateBytes = readFileSync(templatePath);
   rmSync(templatePath);
@@ -220,15 +316,24 @@ test('release refuses broken seals, missing operator inputs, and a promoted sele
   rmSync(launcherPath);
   expectRefusal(root, join(parent, 'missing-launcher'), env, /CLUE-Windows-WFP-Diagnostic\.bat/u);
   writeFileSync(launcherPath, launcherBytes);
-  writeFileSync(join(root, selector), JSON.stringify({
-    schemaVersion: 'clue-documentation-pack-selector/1',
-    releaseName: 'CLU-E RPI Documentation Pack v10',
-    releaseVersion: '10.0',
-    sealFile: sealNames[1],
-    manifestFile: 'DOCUMENTATION_MANIFEST_v10.json',
-    installHint: 'test only',
-  }));
-  expectRefusal(root, join(parent, 'wrong-selector'), env, /v9/iu);
+});
+
+test('release refuses unsupported, crossed, and malformed documentation selectors', (t) => {
+  const { root, parent, env } = fixture(t);
+  const active = selectFixturePack(root, 'v10');
+  const { installHint: _installHint, ...missingHint } = active;
+  const cases = {
+    'unsupported-version': { ...active, releaseVersion: '10.0' },
+    'crossed-seal': { ...active, sealFile: packSelector('v9').sealFile },
+    'crossed-manifest': { ...active, manifestFile: packSelector('v9').manifestFile },
+    'missing-hint': missingHint,
+    'extra-key': { ...active, unknown: true },
+    'bad-schema': { ...active, schemaVersion: 'not-supported' },
+  };
+  for (const [name, value] of Object.entries(cases)) {
+    writeFileSync(join(root, selector), JSON.stringify(value));
+    expectRefusal(root, join(parent, name), env, /documentation-pack\.json|selector/iu);
+  }
 });
 
 test('release Git binding requires exact archived bytes at the clean local repository HEAD', (t) => {

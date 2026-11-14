@@ -3,7 +3,7 @@
  *
  * This command closes REL-P0-01 / DEV-P1-08 / DEV-P1-30 at the release boundary:
  *
- *   1. validate both documentation packs, the v9 selector, and active target registration;
+ *   1. validate both documentation packs, the active selector, and active target registration;
  *   2. run clean/typecheck/build against the source tree;
  *   3. create a deterministic, source-only ZIP with stored entries from an explicit allowlist plus every
  *      governed authority and active-target input required to interpret the installation;
@@ -76,6 +76,7 @@ const DOCUMENTATION_PACKS = {
   v9: { sealFile: 'SHA256SUMS_v9.txt', manifestFile: 'DOCUMENTATION_MANIFEST_v9.json', releaseVersion: '9.0' },
   v10: { sealFile: 'SHA256SUMS_v10.txt', manifestFile: 'DOCUMENTATION_MANIFEST_v10.json', releaseVersion: '10.0-rc1' },
 };
+const SELECTOR_KEYS = ['schemaVersion', 'releaseName', 'releaseVersion', 'sealFile', 'manifestFile', 'installHint'];
 
 const REQUIRED_OPERATOR_PATHS = [
   'CLUE-Dashboard.bat',
@@ -295,10 +296,17 @@ function verifySeal(root, pack) {
 
 function readDocumentationPacks(root) {
   const selector = JSON.parse(readReleaseFile(root, DOCUMENTATION_PACK_SELECTOR).toString('utf8'));
-  const active = DOCUMENTATION_PACKS.v9;
   if (selector?.schemaVersion !== 'clue-documentation-pack-selector/1' ||
-      Object.entries(active).some(([key, value]) => selector[key] !== value)) {
-    throw new Error(`${DOCUMENTATION_PACK_SELECTOR}: pre-P2 release packaging requires the v9 documentation selector`);
+      Object.keys(selector).length !== SELECTOR_KEYS.length ||
+      !SELECTOR_KEYS.every((key) => typeof selector[key] === 'string' && selector[key].trim() !== '' &&
+        !/[\r\n\u0000]/u.test(selector[key]))) {
+    throw new Error(`${DOCUMENTATION_PACK_SELECTOR}: invalid documentation pack selector`);
+  }
+  const active = Object.keys(DOCUMENTATION_PACKS).find((version) =>
+    Object.entries(DOCUMENTATION_PACKS[version]).every(([key, value]) => selector[key] === value),
+  );
+  if (active === undefined) {
+    throw new Error(`${DOCUMENTATION_PACK_SELECTOR}: selector must name one complete supported documentation pack (v9 or v10)`);
   }
 
   const seals = {};
@@ -312,6 +320,7 @@ function readDocumentationPacks(root) {
       throw new Error(`documentation ${version} seal failed: ${detail}`);
     }
     const manifest = JSON.parse(readReleaseFile(root, pack.manifestFile).toString('utf8'));
+    // The sealed RC manifest describes its original publication. Live ratification is journal evidence.
     if (manifest?.releaseVersion !== pack.releaseVersion ||
         (version === 'v10' && manifest?.status !== 'release-candidate-not-ratified')) {
       throw new Error(`${pack.manifestFile}: unexpected version or candidate status`);
@@ -331,7 +340,7 @@ function readDocumentationPacks(root) {
     if (seen.size !== sealed.size) throw new Error(`${pack.sealFile} contains paths absent from ${pack.manifestFile}`);
     seals[version] = seal;
   }
-  return { selector, seals };
+  return { selector, active, seals };
 }
 
 function readYamlFile(root, path) {
@@ -436,7 +445,7 @@ function readAuthority(root) {
     throw new Error(`${profilePath}: id ${JSON.stringify(profile?.id)} does not match directory ${activeTarget}`);
   }
 
-  const { selector: documentationPack, seals: documentationSeals } = readDocumentationPacks(root);
+  const { selector: documentationPack, active: activeDocumentation, seals: documentationSeals } = readDocumentationPacks(root);
 
   const trackedDocuments = Array.isArray(config?.constitution?.tracked_documents)
     ? config.constitution.tracked_documents.map(canonicalRelativePath)
@@ -445,10 +454,12 @@ function readAuthority(root) {
     typeof config?.constitution?.file === 'string'
       ? canonicalRelativePath(config.constitution.file)
       : null;
-  const v9Files = new Set(documentationSeals.v9.entries.map((entry) => entry.path));
-  const v10OnlyFiles = documentationSeals.v10.entries.filter((entry) => !v9Files.has(entry.path));
-  if (v10OnlyFiles.some((entry) => entry.path === constitutionFile || trackedDocuments.includes(entry.path))) {
-    throw new Error(`${CONFIG_PATH}: tracked authority selects a document reserved for the v10 candidate pack`);
+  const seal = documentationSeals[activeDocumentation];
+  const sealedPaths = new Set(seal.entries.map(({ path }) => path));
+  const unsealedAuthority = [...new Set([constitutionFile, ...trackedDocuments])]
+    .filter((path) => path !== null && !sealedPaths.has(path));
+  if (unsealedAuthority.length > 0) {
+    throw new Error(`${CONFIG_PATH}: tracked authority outside the selected ${activeDocumentation} seal: ${unsealedAuthority.join(', ')}`);
   }
 
   const targetDirectory = canonicalRelativePath(`targets/${activeTarget}`);
@@ -486,7 +497,8 @@ function readAuthority(root) {
     profile,
     trackedDocuments,
     constitutionFile,
-    seal: documentationSeals.v9,
+    seal,
+    activeDocumentation,
     documentationPack,
     documentationSeals,
     targetDirectory,
@@ -503,9 +515,10 @@ function releaseExclusions(root, config, outputDirectory = null) {
   const protectedRoots = outputDirectory === null ? liveRoots : [...liveRoots, outputDirectory];
   return (path) => {
     if (path.split('/').some(isExcludedAnywhere)) return true;
-    // These Configuration-v3 files describe this installation and can contain local state.
+    // Installation selectors and configuration backups can contain local state.
     if (path.toLowerCase() === 'config/project-profiles.yaml' ||
-      /^config\/backups\/clue\.config\.v2\.[^/]*\.yaml$/iu.test(path)) return true;
+      /^config\/backups\/clue\.config\.v2\.[^/]*\.yaml$/iu.test(path) ||
+      /^config\/backups\/(?:clue\.config|documentation-pack)\.\d{4}(?:-\d{2}){2}T\d{2}(?:-\d{2}){2}-\d{3}Z\.(?:yaml|json)$/iu.test(path)) return true;
     const absolute = resolve(root, path);
     return protectedRoots.some((directory) => relative(directory, absolute) === '' || pathInside(directory, absolute));
   };
@@ -1258,6 +1271,9 @@ function structuralSmoke(extractedRoot, expectedEntries, expectedAuthority) {
   const sealsMatch = Object.keys(DOCUMENTATION_PACKS).every((version) =>
     authority?.documentationSeals[version].sha256 === expectedAuthority.documentationSeals[version].sha256,
   );
+  const selectorMatches = SELECTOR_KEYS.every((key) =>
+    authority?.documentationPack[key] === expectedAuthority.documentationPack[key],
+  );
   const targetProfilePresent = existsSync(join(extractedRoot, expectedAuthority.profilePath));
   const masterBenchmarkCandidates = expectedAuthority.targetFiles.filter((path) =>
     /(^|\/)benchmark\/master-benchmark\.md$/u.test(path),
@@ -1268,6 +1284,8 @@ function structuralSmoke(extractedRoot, expectedEntries, expectedAuthority) {
       exactTree.pass &&
       error === null &&
       sealsMatch &&
+      selectorMatches &&
+      authority?.seal.sha256 === expectedAuthority.seal.sha256 &&
       authority?.activeTarget === expectedAuthority.activeTarget &&
       targetProfilePresent &&
       requiredMissing.length === 0,
@@ -1932,7 +1950,7 @@ async function main() {
   const initialGit = gitFacts();
   process.stdout.write(
     `  [ok] documentation seals v9 (${authority.documentationSeals.v9.entries.length} files), ` +
-      `v10 (${authority.documentationSeals.v10.entries.length} files), v9 active\n` +
+      `v10 (${authority.documentationSeals.v10.entries.length} files), ${authority.activeDocumentation} active\n` +
       `  [ok] active target ${authority.activeTarget} · ${authority.profilePath}\n`,
   );
 
