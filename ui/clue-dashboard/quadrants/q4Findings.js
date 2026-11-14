@@ -1,3 +1,5 @@
+import { describeFindingsRun } from '../state/runPresentation.js';
+
 const hash = /^[a-f0-9]{64}$/u;
 
 function screenedScope(run, frame) {
@@ -32,6 +34,7 @@ export function mountQ4Findings({ root, read }) {
   const doc = root.ownerDocument;
   let scope = null;
   let scopeKey = null;
+  let expectedAssessment = null;
   let pending = null;
 
   function message(text) {
@@ -89,9 +92,14 @@ export function mountQ4Findings({ root, read }) {
     try {
       const receipt = await read({ signal: request.signal });
       if (pending !== request || scope === null) return;
-      if (receipt === null) message('No findings decision recorded for this screened cycle.');
-      else if (!matchesScope(receipt, scope)) message('A findings decision for this screened cycle is unavailable.');
-      else display(receipt);
+      if (receipt === null && expectedAssessment === null) {
+        message('No findings decision recorded for this screened cycle.');
+      } else if (!matchesScope(receipt, scope) || (expectedAssessment !== null &&
+          (receipt.eventId !== expectedAssessment.eventId || receipt.outcome !== expectedAssessment.outcome))) {
+        message('A findings decision for this screened cycle is unavailable.');
+      } else {
+        display(receipt);
+      }
     } catch {
       if (pending === request) message('The candidate selection receipt is unavailable.');
     } finally {
@@ -107,6 +115,7 @@ export function mountQ4Findings({ root, read }) {
     pending = null;
     scope = null;
     scopeKey = null;
+    expectedAssessment = null;
     button.disabled = true;
     message(text);
   }
@@ -116,11 +125,20 @@ export function mountQ4Findings({ root, read }) {
     observe(run, frame) {
       const next = screenedScope(run, frame);
       const nextKey = next === null ? null : JSON.stringify(next);
-      if (nextKey === scopeKey) return;
-      invalidate();
-      scope = next;
-      scopeKey = nextKey;
-      if (next !== null) void refresh();
+      const findings = describeFindingsRun(run);
+      const nextAssessment = findings?.eventId ? findings : null;
+      if (nextKey !== scopeKey) {
+        invalidate();
+        scope = next;
+        scopeKey = nextKey;
+        expectedAssessment = nextAssessment;
+        if (next !== null) void refresh();
+      } else if (scope !== null && nextAssessment !== null && nextAssessment.eventId !== expectedAssessment?.eventId) {
+        pending?.abort();
+        pending = null;
+        expectedAssessment = nextAssessment;
+        void refresh();
+      }
     },
     invalidate,
   };

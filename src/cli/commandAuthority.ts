@@ -416,9 +416,8 @@ export const COMMAND_AUTHORITIES: readonly CommandAuthority[] = [
     mutates: true,
     requiresMission: true,
     rationale:
-      'DEV-P2-08 S5: advances the cycle through lock, opening evidence, recognition and ' +
-      'screening — evidence production end to end; the gate here flows from this declaration ' +
-      'alone (DEV-P1-36 flip, D4)',
+      'Advances the cycle through lock, opening evidence, recognition and screening. The optional ' +
+      'findings assessment records the evidence-bound decision for the same screened cycle.',
   },
   {
     command: 'cycle suspend',

@@ -27,11 +27,12 @@ import {
   verifyLockedContract,
   type PerformedRun,
 } from '../../control/benchmarkRun.js';
+import { assessCurrentFindings, CycleFindingsError } from '../../control/cycleFindings.js';
 import { CycleOrchestrator } from '../../cycle/cycleOrchestrator.js';
 import { readCurrentCycle } from '../../cycle/cycleRegistry.js';
 import { hashCanonicalJson, requireSha256 } from '../../shared/ids.js';
 import { resolveNavigatorPath } from './recognizeCommands.js';
-import { printChecks, short, write, type Check } from '../output/formatter.js';
+import { printChecks, short, truncate, write, type Check } from '../output/formatter.js';
 import { guarded as guardedWith } from './shared.js';
 
 const runGuarded = (work: () => number): number => guardedWith(work, write);
@@ -82,14 +83,17 @@ interface CycleDriveOptions {
   readonly navigator?: boolean;
   readonly expectRuntime?: string;
   readonly verifyRecovery?: boolean;
+  readonly assessFindings?: boolean;
 }
 
-function commandCycleDrive(options: CycleDriveOptions): number {
-  const verifyRecovery = options.verifyRecovery === true;
+export function commandCycleDrive(options: CycleDriveOptions, repoRoot = findRepoRoot()): number {
+  const measureEventAppends = options.verifyRecovery === true;
+  const verifyRecovery = measureEventAppends || options.assessFindings === true;
   return withRuntime({
+    repoRoot,
     withLog: true,
     verifyLog: verifyRecovery ? 'full' : 'tail',
-    measureEventAppends: verifyRecovery,
+    measureEventAppends,
     allowStaleHeartbeatReclaim: !verifyRecovery,
     // Recovery must first restore a verified lagging projection before checking mission authority.
     ...(verifyRecovery ? { requireMission: false } : {}),
@@ -131,10 +135,36 @@ function commandCycleDrive(options: CycleDriveOptions): number {
       write('');
       write(`Cycle ${result.cycle.id} at ${result.cycle.stage} (${result.cycle.grade ?? 'ungraded'}).`);
     }
-    if (verifyRecovery) {
+    let exitCode = 0;
+    if (options.assessFindings === true) {
+      let decision: {
+        outcome: 'SELECTED' | 'NO_CANDIDATE' | 'BLOCKED';
+        eventId: string | null;
+        code: string | null;
+        cycleId: string;
+        reason: string;
+      };
+      try {
+        // The assessor owns the profile, mission, stage, and source checks. It reuses a
+        // receipt only after verifying the exact screened inputs under this writer lock.
+        const receipt = assessCurrentFindings(runtime);
+        decision = { outcome: receipt.outcome, eventId: receipt.eventId, code: null,
+          cycleId: receipt.cycleId, reason: receipt.reason };
+      } catch (error) {
+        const known = error instanceof CycleFindingsError;
+        decision = { outcome: 'BLOCKED', eventId: null,
+          code: known ? error.code : 'FINDINGS_WORKSPACE_UNAVAILABLE', cycleId: result.cycle.id,
+          reason: known ? error.message : 'The current workspace or its governed evidence could not be verified.' };
+        exitCode = 1;
+      }
+      decision.reason = truncate(runtime.secrets.redact(decision.reason).replace(/[\x00-\x1f\x7f]/gu, ' '), 600);
+      write(JSON.stringify({ cycleFindings: decision }));
+      write(`Findings ${decision.outcome} · ${decision.eventId ?? decision.code} · ${decision.reason}`);
+    }
+    if (measureEventAppends) {
       write(JSON.stringify({ eventAppends: runtime.log?.appendTiming() ?? null }));
     }
-    return 0;
+    return exitCode;
   });
 }
 
@@ -284,6 +314,7 @@ export function registerCycleCommands(program: Command): void {
     .option('--navigator', 'publish the recognition stream to the workspace Navigator')
     .option('--expect-runtime <hash>', 'refuse if the project and workspace binding differ from the caller')
     .option('--verify-recovery', 'verify the cycle and its evidence before continuing an interrupted drive')
+    .option('--assess-findings', 'record the evidence-bound findings decision after screening')
     .action((options: CycleDriveOptions) => {
       process.exitCode = runGuarded(() => commandCycleDrive(options));
     });

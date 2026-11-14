@@ -148,6 +148,14 @@ test('ADR-0017: manual Git sync is one distinct declared action and Start never 
   ]);
 });
 
+test('screening with findings is a distinct mutating action with a fixed route and no request body', async () => {
+  const { client, sent } = harness();
+  assert.equal((await client.invoke('startWithFindings', { args: ['--other'] })).refused, 'unexpected-payload');
+  assert.equal((await harness({ allowMutating: false }).client.invoke('startWithFindings')).refused, 'read-only-client');
+  assert.equal((await client.invoke('startWithFindings')).ok, true);
+  assert.deepEqual(sent, [{ method: 'POST', path: '/api/control/start-with-findings' }]);
+});
+
 test('PP-35: Project Profile routes bind explicit IDs, methods, bodies and readiness operation', async () => {
   const { client, sent } = harness();
 

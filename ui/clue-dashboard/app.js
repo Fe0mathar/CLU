@@ -10783,7 +10783,7 @@ async function pollRun() {
     const run = await fetchJson('/api/run', { cache: 'no-store' });
     if (generation !== runGeneration) return;
     findingsPanel.observe(run, ConsoleFrameBus.getLastFrame());
-    const { processState: state, stage, stageLabel, guidance, detail } = describeDashboardRun(run);
+    const { processState: state, stage, stageLabel, guidance, detail, findings } = describeDashboardRun(run);
     if (state === 'running') ribbon.notice(null);
     ribbon.updateRun(run);
     document.body.dataset.clueRunState = state;
@@ -10806,7 +10806,15 @@ async function pollRun() {
     const receipt = run?.receipts?.at(-1);
     if (receipt?.finishedAt && receipt.finishedAt !== lastCycleReceipt) {
       lastCycleReceipt = receipt.finishedAt;
-      if (receipt.timedOut || receipt.exitCode !== 0 || !stage) {
+      if (findings !== null) {
+        terminal.recordReceipt?.({
+          action: 'Findings assessment',
+          state: findings.outcome === 'BLOCKED' ? 'failed' : findings.outcome,
+          cycleId: run.cycleId,
+          dispatchId: run.dispatchId,
+          detail: [findings.eventId ?? run.findingsCode, run.lastLine ?? receipt.lastLine].filter(Boolean).join(' · '),
+        });
+      } else if (receipt.timedOut || receipt.exitCode !== 0 || !stage) {
         terminal.recordReceipt?.({
           action: 'Cycle process',
           state: receipt.timedOut ? 'timeout' : receipt.exitCode === 0 ? 'exited' : 'failed',
@@ -10990,25 +10998,28 @@ function commandReceipt(action, state, detail) {
   return { reply: detail, receipt: { action, state, detail } };
 }
 
-function acceptedStart(result) {
-  const { state, detail } = describeStartReceipt(result);
-  return { reply: detail, receipt: { ...result, action: 'Cycle drive', state, detail } };
+function acceptedStart(result, action, withFindings) {
+  const { state, detail } = describeStartReceipt(result, withFindings);
+  return { reply: detail, receipt: { ...result, action, state, detail } };
 }
 
 const terminalActions = {
-  async start({ signal }) {
-    if (projectTransition) return commandReceipt('Cycle drive', 'refused', 'Project activation is in progress.');
-    const invoked = await actionClient.invoke('start', undefined, { signal });
+  async start({ signal, withFindings = false }) {
+    const action = withFindings ? 'Cycle drive with findings' : 'Cycle drive';
+    if (projectTransition) return commandReceipt(action, 'refused', 'Project activation is in progress.');
+    const invoked = withFindings
+      ? await actionClient.invoke('startWithFindings', undefined, { signal })
+      : await actionClient.invoke('start', undefined, { signal });
     if (!invoked.ok || invoked.result?.started !== true) {
       const refusal = invoked.serverDetails ?? invoked.result;
       const detail = refusal?.message ?? refusal?.reason ?? invoked.reason ?? 'Cycle dispatch could not be confirmed.';
       ribbon.notice(detail, 'failed');
-      return commandReceipt('Cycle drive', 'refused', detail);
+      return commandReceipt(action, 'refused', detail);
     }
     ribbon.notice(null);
     ClueInterface.pulse('q4');
     void pollRun();
-    return acceptedStart(invoked.result);
+    return acceptedStart(invoked.result, action, withFindings);
   },
   async gitSync({ signal }) {
     if (projectTransition) return commandReceipt('Git sync', 'refused', 'Project activation is in progress.');
@@ -11042,6 +11053,7 @@ const terminal = mountQ4Terminal({
   async send({ line, command, signal }) {
     if (projectTransition) return terminalCore(commandReceipt('Console', 'refused', 'Project activation is in progress.'));
     if (command === '/start') return terminalCore(await terminalActions.start({ signal }));
+    if (command === '/start --assess-findings') return terminalCore(await terminalActions.start({ signal, withFindings: true }));
     if (command === '/git sync') return terminalCore(await terminalActions.gitSync({ signal }));
     if (command === '/status' || command === '/cycle status') return terminalCore(await terminalActions.status({ signal }));
     const invoked = await actionClient.invoke('agentConsole', { line }, { signal });

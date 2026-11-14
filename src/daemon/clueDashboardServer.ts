@@ -31,6 +31,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { isIP } from 'node:net';
 import { extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { createInterface } from 'node:readline';
+import { z } from 'zod';
 
 import { ConsoleStateService } from './consoleStateService.js';
 import { parseConsoleSnapshot, type ConsoleSnapshot } from '../ui/viewModel.js';
@@ -215,6 +216,20 @@ interface Frame {
   readonly snapshot: ConsoleSnapshot;
 }
 
+const cycleFindingsLinePrefix = '{"cycleFindings":';
+const cycleFindingsLineSchema = z.object({
+  cycleFindings: z.object({
+    outcome: z.enum(['SELECTED', 'NO_CANDIDATE', 'BLOCKED']),
+    eventId: z.string().max(40).regex(/^EVENT-\d+$/u).nullable(),
+    code: z.string().max(80).regex(/^[A-Z][A-Z0-9_]*$/u).nullable(),
+    cycleId: z.string().max(40).regex(/^CYCLE-\d+$/u),
+    reason: z.string().min(1).max(600),
+  }).strict().refine(({ outcome, eventId, code }) => outcome === 'BLOCKED'
+    ? eventId === null && code !== null
+    : eventId !== null && code === null),
+}).strict();
+type CycleFindingsLine = z.infer<typeof cycleFindingsLineSchema>['cycleFindings'];
+
 interface RunState {
   state: 'idle' | 'running' | 'completed' | 'failed' | 'timeout';
   dispatchId: string | null;
@@ -224,6 +239,9 @@ interface RunState {
   exitCode: number | null;
   lastLine: string | null;
   eventAppends: EventAppendTiming | null;
+  findingsOutcome: CycleFindingsLine['outcome'] | null;
+  findingsEventId: string | null;
+  findingsCode: string | null;
   /** One receipt per launched phase, in order (`DEV-P1-15`, Directory §19.4). */
   receipts: PhaseReceipt[];
 }
@@ -354,9 +372,14 @@ export async function startClueDashboard(
     exitCode: null,
     lastLine: null,
     eventAppends: null,
+    findingsOutcome: null,
+    findingsEventId: null,
+    findingsCode: null,
     receipts: [],
   });
   let run = idleRun();
+  let runAssessesFindings = false;
+  let runFindingsCycleId: string | null = null;
   let cycleProgress = createDashboardCycleProgress(runtime);
   let precedingClosedCycleId: string | null = null;
   let child: ChildProcess | null = null;
@@ -415,7 +438,7 @@ export async function startClueDashboard(
    * budget" and "the run returned a non-zero exit code" are different facts about different
    * problems, and collapsing them would send an operator to read a log that says nothing.
    */
-  function launchCycle(): void {
+  function launchCycle(assessFindings: boolean): void {
     const phase = 'cycle';
     run.phase = phase;
     const startedAt = new Date().toISOString();
@@ -426,6 +449,7 @@ export async function startClueDashboard(
       runtime.projectBinding?.recognition.identity ?? null,
     ]);
     const args = [cliEntry, 'cycle', 'drive', '--navigator', '--expect-runtime', expectedRuntime, '--verify-recovery'];
+    if (assessFindings) args.push('--assess-findings');
     const env = { ...process.env };
     const credentials = new Set([
       'OPENAI_API_KEY', 'CLUE_AGENT_OPENAI_API_KEY', runtime.config.gateway.api_key_env.toUpperCase(),
@@ -445,6 +469,8 @@ export async function startClueDashboard(
 
     let timedOut = false;
     let phaseLastLine: string | null = null;
+    let findingsLineSeen = false;
+    let workerFindings: CycleFindingsLine | null = null;
     const consume = (line: string): void => {
       const text = line.trim();
       if (text.length > 0) {
@@ -454,6 +480,18 @@ export async function startClueDashboard(
     };
     if (spawned.stdout !== null) {
       createInterface({ input: spawned.stdout }).on('line', (line) => {
+        if (assessFindings && line.startsWith(cycleFindingsLinePrefix)) {
+          const accept = !findingsLineSeen && line.length <= 4096;
+          findingsLineSeen = true;
+          workerFindings = null;
+          if (accept) {
+            try {
+              const parsed = cycleFindingsLineSchema.safeParse(JSON.parse(line));
+              if (parsed.success) workerFindings = parsed.data.cycleFindings;
+            } catch { /* An invalid worker receipt cannot attest completion. */ }
+          }
+          return;
+        }
         if (line.startsWith('{"eventAppends":') && line.length <= 256) {
           try {
             const timing = JSON.parse(line).eventAppends as EventAppendTiming | null;
@@ -490,6 +528,23 @@ export async function startClueDashboard(
       clearTimeout(killTimer);
       child = null;
       const finishedAt = new Date().toISOString();
+      run.state = timedOut ? 'timeout' : code === 0 ? 'completed' : 'failed';
+      if (assessFindings && !timedOut) {
+        // Only an exact receipt re-read from the journal can confirm a successful assessment.
+        const assessment = verifyWorkerFindings(workerFindings, code);
+        if (assessment !== null) {
+          runFindingsCycleId = assessment.cycleId;
+          run.findingsOutcome = assessment.outcome;
+          run.findingsEventId = assessment.eventId;
+          run.findingsCode = assessment.code;
+          consume(assessment.reason.replace(/[\x00-\x1f\x7f]/gu, ' ').slice(0, 600));
+        } else if (code === 0 || findingsLineSeen) {
+          run.state = 'failed';
+          run.findingsOutcome = 'BLOCKED';
+          run.findingsCode = 'FINDINGS_RECEIPT_UNVERIFIED';
+          consume('The worker result could not be verified for the active cycle.');
+        }
+      }
       run.receipts.push({
         phase,
         startedAt,
@@ -500,7 +555,6 @@ export async function startClueDashboard(
         timedOut,
         lastLine: phaseLastLine,
       });
-      run.state = timedOut ? 'timeout' : code === 0 ? 'completed' : 'failed';
       run.exitCode = code;
       run.finishedAt = finishedAt;
       run.phase = null;
@@ -516,6 +570,26 @@ export async function startClueDashboard(
         lease?.release();
       }
     });
+  }
+
+  function verifyWorkerFindings(
+    reported: CycleFindingsLine | null,
+    exitCode: number | null,
+  ): CycleFindingsLine | null {
+    if (reported === null || exitCode === null) return null;
+    try {
+      if (!dashboardProfileCurrent()) return null;
+      const cycle = cycleProgress.read();
+      if (cycle?.current !== true || !cycle.missionMatches || cycle.cycleId !== reported.cycleId) return null;
+      if (reported.outcome === 'BLOCKED') return exitCode !== 0 ? reported : null;
+      if (exitCode !== 0) return null;
+      const receipt = readCurrentFindings(runtime);
+      if (receipt?.eventId !== reported.eventId || receipt.outcome !== reported.outcome ||
+          receipt.cycleId !== reported.cycleId) return null;
+      return { ...reported, reason: receipt.reason };
+    } catch {
+      return null;
+    }
   }
 
   type StartResult =
@@ -535,8 +609,13 @@ export async function startClueDashboard(
   function runSnapshot() {
     const latest = cycleProgress.read();
     const cycle = latest?.cycleId === precedingClosedCycleId ? null : latest;
+    const findingsCurrent = runFindingsCycleId === null ||
+      (cycle?.current && cycle.missionMatches && cycle.cycleId === runFindingsCycleId);
     return {
       ...run,
+      findingsOutcome: findingsCurrent ? run.findingsOutcome : null,
+      findingsEventId: findingsCurrent ? run.findingsEventId : null,
+      findingsCode: findingsCurrent ? run.findingsCode : null,
       runId: cycle?.cycleId ?? null,
       cycleId: cycle?.cycleId ?? null,
       missionId: cycle?.missionId ?? null,
@@ -574,12 +653,20 @@ export async function startClueDashboard(
     }
   }
 
-  function startPipeline(): StartResult {
+  function startPipeline(assessFindings = false): StartResult {
     if (stopping) return startRefused('DASHBOARD_STOPPING', 'The dashboard is stopping.');
     if (!dashboardProfileCurrent()) {
       return startRefused('DASHBOARD_RUNTIME_CHANGED', 'Project settings changed. Restart the dashboard before starting a cycle.');
     }
-    if (run.state === 'running') return startAccepted('attached', runSnapshot().cycleId);
+    if (assessFindings && (runtime.projectProfile === null || runtime.projectState === null)) {
+      return startRefused('FINDINGS_PROFILE_REQUIRED', 'Start with findings requires an active saved Project Profile.');
+    }
+    if (run.state === 'running') {
+      if (assessFindings && !runAssessesFindings) {
+        return startRefused('CYCLE_SCREENING_IN_PROGRESS', 'Wait for the active screening run to finish before starting with findings.');
+      }
+      return startAccepted('attached', runSnapshot().cycleId);
+    }
     const cycle = cycleProgress.read();
     const useCurrentCycle = cycle?.current === true && cycleProjectionIsFresh();
     if (useCurrentCycle) {
@@ -589,7 +676,12 @@ export async function startClueDashboard(
       if (cycle.stage === 'SUSPENDED') {
         return startRefused('CYCLE_SUSPENDED', 'The cycle is suspended. Use the CLU-E cycle resume CLI command to verify and resume it before using Start.');
       }
-      if (!cycle.recoverable) return startAccepted('already-screened', cycle.cycleId);
+      if (!cycle.recoverable) {
+        if (!assessFindings) return startAccepted('already-screened', cycle.cycleId);
+        if (cycle.stage !== 'SCREENED') {
+          return startRefused('FINDINGS_CYCLE_STAGE_UNAVAILABLE', 'The current cycle has advanced beyond screening. Inspect the cycle before starting with findings.');
+        }
+      }
     }
     // Provider billing authority is fail-closed. Finish any already durable write, but refuse
     // a new pipeline before spawning a child while the event-backed controlled pause is active.
@@ -608,6 +700,8 @@ export async function startClueDashboard(
       }
     }
     precedingClosedCycleId = cycle?.current === false ? cycle.cycleId : null;
+    runAssessesFindings = assessFindings;
+    runFindingsCycleId = null;
     run.dispatchId = randomUUID();
     run.state = 'running';
     run.startedAt = new Date().toISOString();
@@ -615,9 +709,12 @@ export async function startClueDashboard(
     run.exitCode = null;
     run.lastLine = null;
     run.eventAppends = null;
+    run.findingsOutcome = null;
+    run.findingsEventId = null;
+    run.findingsCode = null;
     run.receipts.length = 0;
     try {
-      launchCycle();
+      launchCycle(assessFindings);
     } catch (error) {
       run.state = 'failed';
       run.phase = null;
@@ -717,6 +814,8 @@ export async function startClueDashboard(
     chromeTest = successor.chromeTest;
     consoleTest = successor.consoleTest;
     run = idleRun();
+    runAssessesFindings = false;
+    runFindingsCycleId = null;
     precedingClosedCycleId = null;
     sink.publish(successor.frame);
     return publication;
@@ -1774,14 +1873,25 @@ export async function startClueDashboard(
       response.end(JSON.stringify(snapshot));
       return;
     }
-    if (request.method === 'POST' && pathname === '/api/control/start') {
+    const assessFindings = pathname === '/api/control/start-with-findings';
+    if (assessFindings || (request.method === 'POST' && pathname === '/api/control/start')) {
+      const headers = { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' };
+      if (request.method !== 'POST') {
+        response.writeHead(405, { ...headers, allow: 'POST' });
+        response.end(JSON.stringify(startRefused('FINDINGS_START_REQUIRES_POST', 'Starting with findings requires an explicit POST request.')));
+        return;
+      }
+      if (assessFindings && (url.search !== '' || request.headers['transfer-encoding'] !== undefined ||
+          (request.headers['content-length'] !== undefined && request.headers['content-length'] !== '0'))) {
+        request.resume();
+        response.writeHead(400, headers);
+        response.end(JSON.stringify(startRefused('FINDINGS_SCOPE_FIXED', 'This command uses the active profile and accepts no parameters.')));
+        return;
+      }
       const result = activeReadinessChecks.has('ai')
         ? startRefused('AI_READINESS_BUSY', 'Wait for the active AI readiness check to finish before starting a cycle.')
-        : startPipeline();
-      response.writeHead(result.started ? 202 : 409, {
-        'content-type': 'application/json; charset=utf-8',
-        'cache-control': 'no-store',
-      });
+        : startPipeline(assessFindings);
+      response.writeHead(result.started ? 202 : 409, headers);
       response.end(JSON.stringify(result));
       return;
     }

@@ -2,9 +2,10 @@ import { findCredentialLeak } from '../configuration/actionContracts.js';
 import { runIdentity } from '../state/runPresentation.js';
 
 /** Only these typed operator commands are routed. CLUE receives ordinary conversation separately. */
-const COMMANDS = new Set(['/start', '/git sync', '/status', '/cycle status', '/halt', '/resume', '/forget']);
+const COMMANDS = new Set(['/start', '/start --assess-findings', '/git sync', '/status', '/cycle status', '/halt', '/resume', '/forget']);
 const HELP = [
   '/start — drive or recover the governed cycle through screening',
+  '/start --assess-findings — screen the cycle and assess findings',
   '/git sync — synchronize Git on explicit request',
   '/status or /cycle status — show the cycle checkpoint and process status',
   '/halt [reason] — pause CLUE and stop its active turn',

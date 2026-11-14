@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import { mountQ4Terminal } from '../quadrants/q4Terminal.js';
-import { describeStartReceipt } from '../state/runPresentation.js';
+import { describeDashboardRun, describeStartReceipt } from '../state/runPresentation.js';
 
 class Element {
   children = [];
@@ -75,6 +75,7 @@ test('Q4 keeps the operational feed above and the CLUE console below, with no Ma
   for (const source of [html, app, terminal]) assert.doesNotMatch(source, /Master Agent|talkToAgent|\/api\/control\/agent/);
   assert.match(app, /invoke\('agentConsole', \{ line \}/);
   assert.match(app, /invoke\('start', undefined, \{ signal \}\)/);
+  assert.match(app, /invoke\('startWithFindings', undefined, \{ signal \}\)/);
   assert.match(app, /invoke\('syncGit', undefined, \{ signal \}\)/);
 });
 
@@ -85,17 +86,34 @@ test('Q4 passes approved typed commands and ordinary questions and refuses other
     return core(`received ${line}`, 'ok');
   } });
   await ui.submit('/START');
+  await ui.submit('/START  --ASSESS-FINDINGS');
   await ui.submit('  /git    sync  ');
   await ui.submit('/help');
   await ui.submit('/cmd whoami');
   await ui.submit('/start extra');
+  await ui.submit('/start --assess-findings extra');
   await ui.submit('Is the cycle running?');
   await ui.submit('use sk-abcdefgh12345678 for the brain');
   await ui.submit('   ');
-  assert.deepEqual(lines, [['/START', '/start'], ['/git    sync', '/git sync'], ['Is the cycle running?', null]]);
+  assert.deepEqual(lines, [['/START', '/start'], ['/START  --ASSESS-FINDINGS', '/start --assess-findings'],
+    ['/git    sync', '/git sync'], ['Is the cycle running?', null]]);
   assert.match(ui.log.textContent, /YOU › \/START.*CORE › received \/START/s);
+  assert.match(ui.log.textContent, /\/start --assess-findings — screen the cycle and assess findings/);
   assert.match(ui.log.textContent, /Unknown CLU-E command/);
   assert.doesNotMatch(ui.log.textContent, /sk-abcdefgh12345678/);
+});
+
+test('Q4 distinguishes Start acceptance and findings outcomes from the screening checkpoint', () => {
+  const started = { started: true, disposition: 'started' };
+  assert.match(describeStartReceipt(started).detail, /progress through screening/);
+  assert.match(describeStartReceipt(started, true).detail, /screening and assessment/);
+  const screened = { cycleStage: 'SCREENED', cycleId: 'CYCLE-000004' };
+  const completed = describeDashboardRun({ ...screened, state: 'completed', findingsOutcome: 'NO_CANDIDATE',
+    findingsEventId: 'EVENT-000028', lastLine: 'No measurable units.' });
+  assert.match(completed.detail, /Screening reached \(SCREENED\).*Findings NO_CANDIDATE · EVENT-000028.*No measurable units/);
+  const blocked = describeDashboardRun({ ...screened, state: 'failed', findingsOutcome: 'BLOCKED',
+    findingsCode: 'FINDINGS_INPUTS_CHANGED', lastLine: 'The screened source differs.' });
+  assert.match(blocked.detail, /Screening reached \(SCREENED\).*Findings blocked · FINDINGS_INPUTS_CHANGED.*screened source differs/);
 });
 
 test('Q4 keeps the canonical cycle and dispatch IDs on P02 command receipts', async () => {

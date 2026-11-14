@@ -11,6 +11,7 @@ const action = (value) => Object.freeze(value);
 
 export const DASHBOARD_ACTIONS = Object.freeze({
   start: action({ method: 'POST', path: '/api/control/start', mutating: true, payload: 'none', description: 'Drive the governed cycle through recognition and screening.' }),
+  startWithFindings: action({ method: 'POST', path: '/api/control/start-with-findings', mutating: true, payload: 'none', description: 'Drive the governed cycle and assess findings for the active screened Project Profile.' }),
   refresh: action({ method: 'POST', path: '/api/control/refresh', mutating: true, payload: 'none', description: 'Re-derive the sealed frame from durable state.' }),
   syncGit: action({ method: 'POST', path: '/api/control/git-sync', mutating: true, payload: 'none', description: 'Run one explicit local-first Git sync; never coupled to Start or proof.' }),
   checkCapability: action({ method: 'POST', path: '/api/control/readiness', mutating: true, payload: 'json', description: 'Explicitly check one live capability. AI checks can consume provider usage.' }),

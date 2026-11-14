@@ -102,3 +102,32 @@ test('the Q4 panel clears stale evidence across scope transitions even if the fe
   assert.match(ui.content.textContent, /Awaiting a screened cycle/);
   assert.equal(ui.button.disabled, true);
 });
+
+test('the Q4 panel refreshes once for an assessed event even if an older fetch is still in flight', async () => {
+  const requests = [];
+  const ui = harness(({ signal }) => new Promise((resolve) => { requests.push({ resolve, signal }); }));
+  ui.observe({ ...run, state: 'running' }, frame());
+  const finished = { ...run, state: 'completed', findingsOutcome: 'SELECTED', findingsEventId: selected.eventId };
+  ui.observe(finished, frame());
+  assert.equal(requests[0].signal.aborted, true);
+  requests[1].resolve(selected);
+  requests[0].resolve(null);
+  await settle();
+  assert.match(ui.content.textContent, /Selected FIND-000001/);
+  ui.observe(finished, frame());
+  assert.equal(requests.length, 2);
+});
+
+test('the Q4 panel verifies the durable event announced by the completed assessment', async () => {
+  let result = selected;
+  const ui = harness(async () => result);
+  ui.observe({ ...run, state: 'completed', findingsOutcome: 'SELECTED', findingsEventId: 'EVENT-999999' }, frame());
+  await settle();
+  assert.match(ui.content.textContent, /unavailable/);
+  assert.doesNotMatch(ui.content.textContent, /FIND-000001/);
+  result = { ...selected, eventId: 'EVENT-999999', outcome: 'NO_CANDIDATE', selected: null };
+  ui.button.refresh();
+  await settle();
+  assert.match(ui.content.textContent, /unavailable/);
+  assert.doesNotMatch(ui.content.textContent, /No candidate selected/);
+});

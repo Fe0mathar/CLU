@@ -12,8 +12,10 @@ import assert from 'node:assert/strict';
 
 import {
   appendFileSync,
+  copyFileSync,
   mkdirSync,
   mkdtempSync,
+  renameSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -795,10 +797,13 @@ process.stdout.write('{"count":3,"totalMs":2,"maxMs":1}}\\n');
       const detail = JSON.parse(String(completed['lastLine'])) as { args: string[]; credential: boolean; operatorCredential: boolean };
       assert.deepEqual(detail.args.slice(0, 4), ['cycle', 'drive', '--navigator', '--expect-runtime']);
       assert.match(detail.args[4] ?? '', /^[a-f0-9]{64}$/u);
-      assert.equal(detail.args[5], '--verify-recovery');
+      assert.deepEqual(detail.args.slice(5), ['--verify-recovery']);
       assert.equal(detail.credential, false);
       assert.equal(detail.operatorCredential, false);
       assert.deepEqual(completed['eventAppends'], { count: 3, totalMs: 2, maxMs: 1 });
+      assert.equal(completed['findingsOutcome'], null);
+      assert.equal(completed['findingsEventId'], null);
+      assert.equal(completed['findingsCode'], null);
     });
   } finally {
     if (previousKey === undefined) delete process.env['OPENAI_API_KEY'];
@@ -806,6 +811,142 @@ process.stdout.write('{"count":3,"totalMs":2,"maxMs":1}}\\n');
     if (previousAgentKey === undefined) delete process.env['CLUE_AGENT_OPENAI_API_KEY'];
     else process.env['CLUE_AGENT_OPENAI_API_KEY'] = previousAgentKey;
     rmSync(root, { recursive: true, force: true, maxRetries: 3 });
+  }
+});
+
+test('dashboard start with findings is explicit, fixed-scope, and requires a saved profile', async () => {
+  const root = makeRepo();
+  try {
+    await withServer(root, {}, async ({ port }) => {
+      const endpoint = '/api/control/start-with-findings';
+      const read = await request(port, endpoint);
+      assert.equal(read.status, 405);
+      assert.equal(read.headers.allow, 'POST');
+      const query = await request(port, `${endpoint}?cycleId=CYCLE-000002`, { method: 'POST' });
+      assert.equal(query.status, 400);
+      assert.equal(JSON.parse(query.body).code, 'FINDINGS_SCOPE_FIXED');
+      const payload = await request(port, endpoint, {
+        method: 'POST', headers: { 'content-length': '2' }, body: '{}',
+      });
+      assert.equal(payload.status, 400);
+      assert.equal(JSON.parse(payload.body).code, 'FINDINGS_SCOPE_FIXED');
+      const start = await request(port, endpoint, { method: 'POST' });
+      assert.equal(start.status, 409);
+      assert.equal(JSON.parse(start.body).code, 'FINDINGS_PROFILE_REQUIRED');
+      assert.equal(JSON.parse((await request(port, '/api/run')).body).state, 'idle');
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true, maxRetries: 3 });
+  }
+});
+
+test('dashboard findings dispatch has its own worker flag and verifies its receipt', { timeout: 20_000 }, async (t) => {
+  const fixture = makeProjectProfileFixture();
+  t.after(() => fixture.dispose());
+  writeProfileRuntimeInstallation(fixture.root);
+  mkdirSync(join(fixture.root, 'config', 'policies'), { recursive: true });
+  for (const filename of ['budget.yaml', 'routing.yaml']) {
+    const path = join('config', 'policies', filename);
+    copyFileSync(join(process.cwd(), path), join(fixture.root, path));
+  }
+  const registry = new ProjectProfileRegistry(fixture.profilesRoot);
+  const profile = registry.create(proofReadyProfile(fixture));
+  writeRecognitionTarget(profile.profile.targetRoot, 'findingsValue');
+  const initialized = bootstrapProjectWorkspace({
+    repoRoot: fixture.root,
+    registry,
+    projectId: profile.profile.projectId,
+    expectedGeneration: profile.generation,
+    expectedProfileHash: profile.projectProfileHash,
+  });
+  assert.equal(initialized.state, 'INITIALIZED');
+  registry.activate(profile.profile.projectId);
+  const writer = openProjectRuntime(profile, { repoRoot: fixture.root, withLog: true });
+  let cycleId: string;
+  try {
+    assert.ok(writer.log);
+    cycleId = new CycleRegistry({ log: writer.log, projections: writer.projections,
+      missionVersion: writer.currentMissionId }).open().id;
+  } finally {
+    writer.dispose();
+  }
+  const cliDir = join(fixture.root, 'dist', 'src', 'cli');
+  const workerInput = join(fixture.root, 'worker-test-control.json');
+  const finishWorker = (result: unknown): void => {
+    const pending = `${workerInput}.pending`;
+    writeFileSync(pending, JSON.stringify(result));
+    renameSync(pending, workerInput);
+  };
+  mkdirSync(cliDir, { recursive: true });
+  writeFileSync(join(cliDir, 'index.js'), `
+const { existsSync, readFileSync, unlinkSync } = require('node:fs');
+const input = ${JSON.stringify(workerInput)};
+const timer = setInterval(() => {
+  if (!existsSync(input)) return;
+  clearInterval(timer);
+  const { result, exitCode } = JSON.parse(readFileSync(input, 'utf8'));
+  unlinkSync(input);
+  const args = process.argv.slice(2);
+  if (result) {
+    if (args.length !== 7 || args[6] !== '--assess-findings') process.exit(2);
+    console.log(JSON.stringify({ cycleFindings: result }));
+  } else console.log(JSON.stringify(args));
+  process.exitCode = exitCode;
+}, 20);
+`);
+  const manager = new ProjectRuntimeManager(registry, {
+    openRuntime: ({ record }) => openProjectRuntime(record, { repoRoot: fixture.root, withLog: false, readOnly: true }),
+  });
+  fixture.deferCleanup(() => manager.dispose());
+  manager.start();
+  assert.ok(manager.activeRuntime);
+  const port = await freePort();
+  const dashboard = await startClueDashboard(manager.activeRuntime, {
+    operator: 'selftest', port, profilesRoot: fixture.profilesRoot, projectRuntimeManager: manager,
+  });
+  try {
+    const start = '/api/control/start';
+    const startWithFindings = '/api/control/start-with-findings';
+    const ordinary = await request(port, start, { method: 'POST' });
+    assert.equal(ordinary.status, 202, ordinary.body);
+    const conflict = await request(port, startWithFindings, { method: 'POST' });
+    assert.equal(conflict.status, 409);
+    assert.equal(JSON.parse(conflict.body).code, 'CYCLE_SCREENING_IN_PROGRESS');
+    finishWorker({ exitCode: 0 });
+    const completed = await waitForRunState(port, 'completed');
+    assert.equal(JSON.parse(String(completed['lastLine'])).includes('--assess-findings'), false);
+
+    const started = await request(port, startWithFindings, { method: 'POST' });
+    assert.equal(started.status, 202, started.body);
+    assert.equal(JSON.parse(started.body).cycleId, cycleId);
+    const duplicate = await request(port, startWithFindings, { method: 'POST' });
+    assert.equal(duplicate.status, 202);
+    assert.equal(JSON.parse(duplicate.body).disposition, 'attached');
+    assert.equal(JSON.parse(duplicate.body).dispatchId, JSON.parse(started.body).dispatchId);
+    finishWorker({ exitCode: 0, result: {
+      outcome: 'NO_CANDIDATE', eventId: 'EVENT-999999', code: null, cycleId, reason: 'no durable evidence',
+    } });
+    const unverified = await waitForRunState(port, 'failed');
+    assert.equal(unverified['findingsOutcome'], 'BLOCKED');
+    assert.equal(unverified['findingsCode'], 'FINDINGS_RECEIPT_UNVERIFIED');
+    assert.equal(unverified['findingsEventId'], null);
+
+    const retried = await request(port, startWithFindings, { method: 'POST' });
+    assert.equal(retried.status, 202, retried.body);
+    const running = await waitForRunState(port, 'running');
+    assert.equal(running['findingsOutcome'], null);
+    assert.equal(running['findingsCode'], null);
+    finishWorker({ exitCode: 1, result: {
+      outcome: 'BLOCKED', eventId: null, code: 'FINDINGS_INPUTS_CHANGED', cycleId,
+      reason: 'The current source differs from the exact screened inputs.',
+    } });
+    const refused = await waitForRunState(port, 'failed');
+    assert.equal(refused['findingsOutcome'], 'BLOCKED');
+    assert.equal(refused['findingsCode'], 'FINDINGS_INPUTS_CHANGED');
+    assert.equal(refused['findingsEventId'], null);
+    assert.equal(refused['lastLine'], 'The current source differs from the exact screened inputs.');
+  } finally {
+    await dashboard.stop();
   }
 });
 

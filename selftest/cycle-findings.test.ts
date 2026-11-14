@@ -7,14 +7,16 @@ import type { RankedCandidate, RankingResult } from '../src/analysis/metrics/ran
 import { recognize, type SourceUnit } from '../src/analysis/source/recognizer.js';
 import { runMasterBenchmark } from '../src/benchmark/benchmarkRunner.js';
 import { canonicalHarnessBody } from '../src/benchmark/harnessBlock.js';
+import { commandCycleDrive } from '../src/cli/commands/cycleCommands.js';
 import { prepareBenchmarkRunSubject, recordBenchmarkRun } from '../src/control/benchmarkRun.js';
 import { assessCurrentFindings, readCurrentFindings } from '../src/control/cycleFindings.js';
 import { selectFindingCandidate } from '../src/control/findingSelection.js';
 import { PACK_MANIFEST_FILE, PACK_SEAL_FILE } from '../src/control/mission.js';
 import { ProjectProfileRegistry } from '../src/control/projectProfiles/profileRegistry.js';
 import { enableProjectProfileStartup, projectProfileCutoverConfirmation } from '../src/control/projectProfiles/projectProfileStartup.js';
-import { withRuntime } from '../src/control/runtime.js';
+import { withRuntime, withRuntimeAsync } from '../src/control/runtime.js';
 import { CycleOrchestrator } from '../src/cycle/cycleOrchestrator.js';
+import { startClueDashboard } from '../src/daemon/clueDashboardServer.js';
 import { hashBytes, hashText, requireSha256 } from '../src/shared/ids.js';
 import { cloneProfile, makeProjectProfileFixture } from './project-profile-fixture.js';
 import { writeProfileRuntimeInstallation, writeRecognitionTarget } from './project-recognition-fixture.js';
@@ -85,8 +87,148 @@ function makeRuntimeFixture(t: TestContext, ratify = true, declareBinding = fals
   });
   enableProjectProfileStartup({ repoRoot, registry, projectId: projectProfile.profile.projectId,
     confirmation: projectProfileCutoverConfirmation(projectProfile) });
-  return { options, target: fixture.target, benchmarkPath: fixture.masterBenchmark, unit };
+  return { options, profilesRoot: fixture.profiles, target: fixture.target, benchmarkPath: fixture.masterBenchmark, unit };
 }
+
+function driveFromCommand(t: TestContext, repoRoot: string, assessFindings = false) {
+  const output: string[] = [];
+  const writer = t.mock.method(process.stdout, 'write', (line: string) => {
+    output.push(line.trimEnd());
+    return true;
+  });
+  let exitCode: number;
+  try {
+    exitCode = commandCycleDrive({ verifyRecovery: true, assessFindings }, repoRoot);
+  } finally {
+    writer.mock.restore();
+  }
+  const read = (key: 'cycleFindings' | 'eventAppends') => {
+    const line = output.find((value) => value.startsWith(`{"${key}":`));
+    return line === undefined ? null : (JSON.parse(line) as Record<string, unknown>)[key];
+  };
+  return { exitCode, output, findings: read('cycleFindings'), timing: read('eventAppends') };
+}
+
+test('cycle drive assesses findings only on opt-in and reuses the screened cycle receipt', (t) => {
+  const fixture = makeRuntimeFixture(t);
+  const { repoRoot } = fixture.options;
+  const screened = driveFromCommand(t, repoRoot);
+  assert.equal(screened.exitCode, 0);
+  assert.equal(screened.findings, null);
+  assert.match(screened.output.join('\n'), /at SCREENED \(proof-authoritative\)/u);
+
+  const first = driveFromCommand(t, repoRoot, true);
+  assert.equal(first.exitCode, 0);
+  assert.match(first.output.join('\n'), /Findings NO_CANDIDATE/u);
+  const durable = withRuntime(fixture.options, (runtime) => readCurrentFindings(runtime));
+  assert.ok(durable);
+  assert.deepEqual(first.findings, { outcome: 'NO_CANDIDATE', code: null, eventId: durable.eventId,
+    cycleId: durable.cycleId, reason: durable.reason });
+  assert.equal((first.timing as { count: number }).count, 1);
+
+  const repeated = driveFromCommand(t, repoRoot, true);
+  assert.equal(repeated.exitCode, 0);
+  assert.deepEqual(repeated.findings, first.findings);
+  assert.equal((repeated.timing as { count: number }).count, 0);
+
+  writeFileSync(join(fixture.target, 'src', 'value.ts'), 'export const finding_fixture = 5;\n');
+  const stale = driveFromCommand(t, repoRoot, true);
+  assert.equal(stale.exitCode, 1);
+  assert.deepEqual(stale.findings, { outcome: 'BLOCKED', code: 'FINDINGS_INPUTS_CHANGED', eventId: null,
+    cycleId: durable.cycleId, reason: 'The current source differs from the exact screened inputs.' });
+  assert.equal((stale.timing as { count: number }).count, 0);
+});
+
+test('opt-in findings preserves the diagnostic checkpoint and reports missing proof authority', (t) => {
+  const fixture = makeRuntimeFixture(t, false);
+  const result = driveFromCommand(t, fixture.options.repoRoot, true);
+  assert.equal(result.exitCode, 1);
+  assert.match(result.output.join('\n'), /at SCREENED \(diagnostic\)/u);
+  assert.deepEqual(result.findings, { outcome: 'BLOCKED', code: 'FINDINGS_PROOF_AUTHORITY_REQUIRED', eventId: null,
+    cycleId: 'CYCLE-000001', reason: 'Findings planning requires a proof-authoritative SCREENED cycle.' });
+  withRuntime(fixture.options, (runtime) => assert.equal(readCurrentFindings(runtime), null));
+});
+
+test('dashboard binds a real findings worker receipt to the current screened event', { timeout: 60_000 }, async (t) => {
+  const { options, profilesRoot } = makeRuntimeFixture(t);
+  const { repoRoot } = options;
+  const entry = join(repoRoot, 'dist', 'src', 'cli', 'index.js');
+  const workerUrl = new URL('../src/cli/commands/cycleCommands.js', import.meta.url).href;
+  mkdirSync(dirname(entry), { recursive: true });
+  // Use the actual command with its installation root supplied by this isolated fixture.
+  writeFileSync(entry, `
+const { parseArgs } = require('node:util');
+const { values, positionals } = parseArgs({ options: {
+  navigator: { type: 'boolean' }, 'expect-runtime': { type: 'string' },
+  'verify-recovery': { type: 'boolean' }, 'assess-findings': { type: 'boolean' },
+}, allowPositionals: true });
+if (positionals.join(' ') !== 'cycle drive') throw new Error('Expected cycle drive');
+import(${JSON.stringify(workerUrl)}).then(({ commandCycleDrive }) => {
+  process.exitCode = commandCycleDrive({ navigator: values.navigator,
+    expectRuntime: values['expect-runtime'], verifyRecovery: values['verify-recovery'],
+    assessFindings: values['assess-findings'],
+  }, process.cwd());
+});
+`);
+  await withRuntimeAsync({ repoRoot, withLog: false, readOnly: true }, async (runtime) => {
+    const dashboard = await startClueDashboard(runtime, { operator: 'selftest', port: 0, profilesRoot });
+    try {
+      const call = (path: string, method = 'GET') => fetch(new URL(path, dashboard.url), { method });
+      type RunView = {
+        state: string;
+        cycleId: string;
+        dispatchId: string;
+        cycleStage: string;
+        cycleGrade: string;
+        findingsOutcome: string | null;
+        findingsCode: string | null;
+        findingsEventId: string;
+        lastLine: string;
+        eventAppends: { count: number };
+      };
+      const poll = async () => {
+        const stopAt = Date.now() + 20_000;
+        while (Date.now() < stopAt) {
+          const view = await call('/api/run').then((response) => response.json()) as RunView;
+          if (view.state !== 'running') return view;
+          await new Promise<void>((resolve) => setTimeout(resolve, 25));
+        }
+        assert.fail('The dashboard worker did not finish.');
+      };
+
+      const screening = await call('/api/control/start', 'POST');
+      assert.equal(screening.status, 202, await screening.text());
+      const screened = await poll();
+      assert.equal(screened.state, 'completed', screened.lastLine);
+      assert.equal(screened.cycleStage, 'SCREENED');
+      assert.equal(screened.cycleGrade, 'proof-authoritative');
+      assert.equal(screened.findingsOutcome, null);
+      assert.equal(await call('/api/findings/current').then((response) => response.json()), null);
+
+      const start = await call('/api/control/start-with-findings', 'POST');
+      assert.equal(start.status, 202);
+      const dispatch = await start.json() as { disposition: string; cycleId: string; dispatchId: string };
+      assert.equal(dispatch.disposition, 'started');
+      assert.equal(dispatch.cycleId, screened.cycleId);
+      const assessed = await poll();
+      assert.equal(assessed.state, 'completed', assessed.lastLine);
+      assert.equal(assessed.dispatchId, dispatch.dispatchId);
+      assert.equal(assessed.cycleId, screened.cycleId);
+      assert.equal(assessed.findingsOutcome, 'NO_CANDIDATE');
+      assert.match(assessed.findingsEventId, /^EVENT-\d+$/u);
+      assert.equal(assessed.findingsCode, null);
+      assert.equal(assessed.eventAppends.count, 1);
+      const receipt = await call('/api/findings/current').then((response) => response.json()) as
+        ReturnType<typeof readCurrentFindings>;
+      assert.ok(receipt);
+      assert.equal(receipt.eventId, assessed.findingsEventId);
+      assert.equal(receipt.cycleId, screened.cycleId);
+      assert.equal(receipt.reason, assessed.lastLine);
+    } finally {
+      await dashboard.stop();
+    }
+  });
+});
 
 test('findings are pinned to the screened evidence and repeat without another journal event', (t) => {
   const fixture = makeRuntimeFixture(t);
