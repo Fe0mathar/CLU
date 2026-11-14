@@ -83,6 +83,7 @@
 import {
   closeSync,
   existsSync,
+  fstatSync,
   fsyncSync,
   ftruncateSync,
   mkdirSync,
@@ -91,8 +92,9 @@ import {
   readSync,
   rmSync,
   statSync,
+  type BigIntStats,
 } from 'node:fs';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes, type Hash } from 'node:crypto';
 import { hostname } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
@@ -170,6 +172,12 @@ export interface AppendEventInput {
 export interface LogHead {
   readonly sequence: number;
   readonly hash: Sha256;
+}
+
+interface VerifiedCatchUpPrefix {
+  readonly head: LogHead;
+  readonly bytes: number;
+  readonly sha256: string;
 }
 
 export type VerificationDepth = 'none' | 'tail' | 'full';
@@ -291,6 +299,7 @@ export class EventLog {
   private appendFd: number | null = null;
   private lockFd: number | null = null;
   private head: LogHead | null = null;
+  private catchUpPrefix: VerifiedCatchUpPrefix | null = null;
   private staleLockReclaimed = false;
   private reclaimedFrom: LockOwnerData | null = null;
   private ownerToken: string | null = null;
@@ -465,6 +474,85 @@ export class EventLog {
    */
   public *replay(): Generator<EventRecord> {
     yield* EventLog.readAndVerify(this.filePath);
+  }
+
+  /**
+   * Verify the projection anchor and replay the records after it. A previously verified
+   * prefix is reusable only if its exact bytes still hash identically on this read.
+   */
+  public *replayForCatchUp(
+    fromSequence: number,
+    expectedHashAtFrom: Sha256 | null,
+  ): Generator<EventRecord> {
+    const writer = this.appendFd;
+    const target = writer !== null && this.head !== null ? { ...this.head } : null;
+    const cached = writer !== null ? this.catchUpPrefix : null;
+    this.catchUpPrefix = null;
+    const fd = openSync(this.filePath, 'r');
+    try {
+      const initial = fstatSync(fd, { bigint: true });
+      const fileBytes = Number(initial.size);
+      if (!initial.isFile() || !Number.isSafeInteger(fileBytes)) {
+        throw new EventLogError('CHAIN_BROKEN', 'Projection catch-up requires a regular, addressable journal.');
+      }
+      if (writer !== null && !sameJournalIdentity(initial, fstatSync(writer, { bigint: true }))) {
+        throw new EventLogError('CHAIN_BROKEN', 'The named journal differs from the open writer during projection catch-up.');
+      }
+      let digest = createHash('sha256');
+      let offset = 0;
+      let anchor: LogHead | null = null;
+      if (cached !== null && cached.head.sequence === fromSequence && cached.head.hash === expectedHashAtFrom) {
+        if (cached.bytes <= fileBytes && hashPrefix(fd, cached.bytes, digest) && digest.copy().digest('hex') === cached.sha256) {
+          offset = cached.bytes;
+          anchor = cached.head;
+        } else {
+          // Different bytes might still describe a valid chain, for example after reformatting.
+          digest = createHash('sha256');
+        }
+      }
+
+      let bytes = offset;
+      let endsAtCommit = true;
+      const lines = readLinesFromFd(fd, offset, fileBytes, (chunk) => {
+        digest.update(chunk);
+        bytes += chunk.length;
+        endsAtCommit = chunk[chunk.length - 1] === NEWLINE;
+      });
+      let lastSequence = anchor?.sequence ?? null;
+      let lastHash: string | null = anchor?.hash ?? null;
+      let confirmedAnchor = anchor !== null || expectedHashAtFrom === null;
+      for (const record of verifyLines(lines, anchor)) {
+        if (record.sequence === fromSequence && expectedHashAtFrom !== null) {
+          if (record.hash !== expectedHashAtFrom) {
+            throw new Error(
+              `Projections claim event ${fromSequence} hashes to ${expectedHashAtFrom}, ` +
+                `but the log has ${record.hash}. History was rewritten; rebuild required.`,
+            );
+          }
+          confirmedAnchor = true;
+        }
+        lastSequence = record.sequence;
+        lastHash = record.hash;
+        if (record.sequence > fromSequence) yield record;
+      }
+
+      if (!confirmedAnchor) {
+        throw new Error(`Projections reference event ${fromSequence}, which is absent from the log.`);
+      }
+      if (target !== null && (lastSequence !== target.sequence || lastHash !== target.hash)) {
+        throw new EventLogError('CHAIN_BROKEN', 'The journal no longer reproduces the writer head during projection catch-up.');
+      }
+      if (bytes !== fileBytes || !sameJournalFile(initial, fstatSync(fd, { bigint: true })) ||
+          !sameJournalAtPath(initial, this.filePath)) {
+        throw new EventLogError('CHAIN_BROKEN', 'The journal changed during projection catch-up.');
+      }
+
+      if (target !== null && endsAtCommit) {
+        this.catchUpPrefix = { head: target, bytes, sha256: digest.digest('hex') };
+      }
+    } finally {
+      closeSync(fd);
+    }
   }
 
   /** Full-chain verification. Returns what was checked; throws on the first defect. */
@@ -843,7 +931,7 @@ export class EventLog {
       const record = decodeRecord(line);
       // The first record of a tail window has no in-window predecessor, so only the
       // records after it can have their links checked here.
-      if (previous !== null) verifyLink(previous, record);
+      if (previous !== null) verifyLink(previous.sequence, previous.hash, record);
       if (depth !== 'none') verifySelfHash(record);
       previous = record;
       verified += 1;
@@ -864,39 +952,43 @@ export class EventLog {
 
   /** Streams the file, decoding and verifying every record in order. */
   private static *readAndVerify(filePath: string): Generator<EventRecord> {
-    let previous: EventRecord | null = null;
-    for (const line of readLines(filePath)) {
-      const record = decodeRecord(line);
-      verifySelfHash(record);
-
-      if (previous === null) {
-        if (record.sequence !== 0) {
-          throw new EventLogError(
-            'SEQUENCE_GAP',
-            `Event log must start at sequence 0, found ${record.sequence}`,
-            record.sequence,
-          );
-        }
-        if (record.previous_hash !== null) {
-          throw new EventLogError(
-            'CHAIN_BROKEN',
-            'First event must have a null previous_hash',
-            record.sequence,
-          );
-        }
-      } else {
-        verifyLink(previous, record);
-      }
-
-      yield record;
-      previous = record;
-    }
+    yield* verifyLines(readLines(filePath));
   }
 }
 
 /* ------------------------------------------------------------------------- */
 /* Record decoding and verification                                           */
 /* ------------------------------------------------------------------------- */
+
+function* verifyLines(lines: Iterable<string>, anchor: LogHead | null = null): Generator<EventRecord> {
+  let previousSequence = anchor?.sequence ?? null;
+  let previousHash: string | null = anchor?.hash ?? null;
+  for (const line of lines) {
+    const record = decodeRecord(line);
+    verifySelfHash(record);
+    if (previousSequence === null) {
+      if (record.sequence !== 0) {
+        throw new EventLogError(
+          'SEQUENCE_GAP',
+          `Event log must start at sequence 0, found ${record.sequence}`,
+          record.sequence,
+        );
+      }
+      if (record.previous_hash !== null) {
+        throw new EventLogError(
+          'CHAIN_BROKEN',
+          'First event must have a null previous_hash',
+          record.sequence,
+        );
+      }
+    } else {
+      verifyLink(previousSequence, previousHash, record);
+    }
+    previousSequence = record.sequence;
+    previousHash = record.hash;
+    yield record;
+  }
+}
 
 function decodeRecord(line: string): EventRecord {
   let parsed: unknown;
@@ -924,19 +1016,19 @@ function verifySelfHash(record: EventRecord): void {
   }
 }
 
-function verifyLink(previous: EventRecord, record: EventRecord): void {
-  if (record.sequence !== previous.sequence + 1) {
+function verifyLink(previousSequence: number, previousHash: string | null, record: EventRecord): void {
+  if (record.sequence !== previousSequence + 1) {
     throw new EventLogError(
       'SEQUENCE_GAP',
-      `Event sequence jumped from ${previous.sequence} to ${record.sequence}`,
+      `Event sequence jumped from ${previousSequence} to ${record.sequence}`,
       record.sequence,
     );
   }
-  if (record.previous_hash !== previous.hash) {
+  if (record.previous_hash !== previousHash) {
     throw new EventLogError(
       'CHAIN_BROKEN',
       `Event ${record.id} references previous hash ${String(record.previous_hash)} ` +
-        `but its predecessor hashes to ${previous.hash}`,
+        `but its predecessor hashes to ${previousHash}`,
       record.sequence,
     );
   }
@@ -950,29 +1042,71 @@ function verifyLink(previous: EventRecord, record: EventRecord): void {
 function* readLines(filePath: string): Generator<string> {
   const fd = openSync(filePath, 'r');
   try {
-    const buffer = Buffer.alloc(CHUNK_BYTES);
-    const decoder = new StringDecoder('utf8');
-    let carry = '';
-    let position = 0;
-
-    for (;;) {
-      const read = readSync(fd, buffer, 0, buffer.length, position);
-      if (read === 0) break;
-      position += read;
-
-      const text = carry + decoder.write(buffer.subarray(0, read));
-      const parts = text.split('\n');
-      carry = parts.pop() ?? '';
-
-      for (const part of parts) {
-        if (part.length > 0) yield part;
-      }
-    }
-
-    // Any remainder had no terminating newline and is therefore uncommitted.
-    // repairTornTail removes it on open; ignoring it here keeps reads non-destructive.
+    yield* readLinesFromFd(fd, 0);
   } finally {
     closeSync(fd);
+  }
+}
+
+function* readLinesFromFd(
+  fd: number,
+  position: number,
+  endPosition = Number.POSITIVE_INFINITY,
+  observeBytes?: (chunk: Uint8Array) => void,
+): Generator<string> {
+  const buffer = Buffer.alloc(CHUNK_BYTES);
+  const decoder = new StringDecoder('utf8');
+  let carry = '';
+
+  while (position < endPosition) {
+    const read = readSync(fd, buffer, 0, Math.min(buffer.length, endPosition - position), position);
+    if (read === 0) break;
+    position += read;
+
+    const chunk = buffer.subarray(0, read);
+    observeBytes?.(chunk);
+    const text = carry + decoder.write(chunk);
+    const parts = text.split('\n');
+    carry = parts.pop() ?? '';
+
+    for (const part of parts) {
+      if (part.length > 0) yield part;
+    }
+  }
+
+  // Any remainder had no terminating newline and is therefore uncommitted.
+  // repairTornTail removes it on open; ignoring it here keeps reads non-destructive.
+}
+
+function hashPrefix(fd: number, bytes: number, digest: Hash): boolean {
+  const buffer = Buffer.alloc(CHUNK_BYTES);
+  let position = 0;
+  while (position < bytes) {
+    const read = readSync(fd, buffer, 0, Math.min(buffer.length, bytes - position), position);
+    if (read === 0) return false;
+    digest.update(buffer.subarray(0, read));
+    position += read;
+  }
+  return true;
+}
+
+/** Check for concurrent file changes in addition to verifying the bytes read. */
+function sameJournalFile(a: BigIntStats, b: BigIntStats): boolean {
+  return sameJournalIdentity(a, b) && a.size === b.size &&
+    a.birthtimeNs === b.birthtimeNs && a.mtimeNs === b.mtimeNs && a.ctimeNs === b.ctimeNs;
+}
+
+function sameJournalIdentity(a: BigIntStats, b: BigIntStats): boolean {
+  return b.isFile() && a.dev === b.dev && a.ino === b.ino;
+}
+
+function sameJournalAtPath(expected: BigIntStats, path: string): boolean {
+  // On Windows, path stat and descriptor stat can report different volume identifiers.
+  const named = openSync(path, 'r');
+  try {
+    return sameJournalFile(expected, fstatSync(named, { bigint: true }));
+  } finally {
+    closeSync(named);
   }
 }
 

@@ -693,12 +693,7 @@ export class ProjectionStore {
   /* ------------------------------ internals --------------------------- */
 
   /**
-   * Applies events after `fromSequence`.
-   *
-   * Stage A reads the log from the beginning and skips what is already applied. That
-   * re-verifies the entire hash chain on every start, which is the right trade while
-   * logs are small; a seek index is a later optimisation, and it is recorded here
-   * rather than left as a surprise.
+   * Applies the suffix after the event log verifies the projection anchor.
    */
   private catchUp(
     log: EventLog,
@@ -709,31 +704,12 @@ export class ProjectionStore {
       let applied = 0;
       let lastSequence = fromSequence;
       let headHash = expectedHashAtFrom;
-      let confirmedAnchor = expectedHashAtFrom === null;
 
-      for (const record of log.replay()) {
-        if (record.sequence === fromSequence && expectedHashAtFrom !== null) {
-          if (record.hash !== expectedHashAtFrom) {
-            throw new Error(
-              `Projections claim event ${fromSequence} hashes to ${expectedHashAtFrom}, ` +
-                `but the log has ${record.hash}. History was rewritten; rebuild required.`,
-            );
-          }
-          confirmedAnchor = true;
-          continue;
-        }
-        if (record.sequence <= fromSequence) continue;
-
-        this.applyRecord(record);
-        applied += 1;
+      for (const record of log.replayForCatchUp(fromSequence, expectedHashAtFrom)) {
         lastSequence = record.sequence;
         headHash = requireSha256(record.hash, 'event hash');
-      }
-
-      if (!confirmedAnchor) {
-        throw new Error(
-          `Projections reference event ${fromSequence}, which is absent from the log.`,
-        );
+        this.applyRecord(record);
+        applied += 1;
       }
 
       this.writeState(STATE_LAST_SEQUENCE, String(lastSequence));
