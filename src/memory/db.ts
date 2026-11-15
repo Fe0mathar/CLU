@@ -331,6 +331,13 @@ export interface ProjectionStoreOptions {
 /* ------------------------------------------------------------------------- */
 
 export class ProjectionStore {
+  #rehydratingFullProjection = false;
+
+  /** True only while the full rebuild runs artifact-backed projection hooks. */
+  public get isRehydratingFullProjection(): boolean {
+    return this.#rehydratingFullProjection;
+  }
+
   private readonly database: Db;
   private readonly projectors: Map<string, readonly Projector[]>;
   private readonly modules: readonly ProjectionModule[];
@@ -676,8 +683,13 @@ export class ProjectionStore {
 
       // Bulk projections rebuilt from the artifact store (not from per-row events) are
       // repopulated here by their owning module, inside the same transaction.
-      for (const module of this.modules) {
-        module.rehydrate?.(this.database);
+      this.#rehydratingFullProjection = true;
+      try {
+        for (const module of this.modules) {
+          module.rehydrate?.(this.database);
+        }
+      } finally {
+        this.#rehydratingFullProjection = false;
       }
 
       // Kernel-owned tables restored from their own durable authority (e.g. audit_entries from the
