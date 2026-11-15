@@ -499,6 +499,13 @@ export const COMMAND_AUTHORITIES: readonly CommandAuthority[] = [
       'proof-authoritative cycle after its measured target inputs change',
   },
   {
+    command: 'cycle recover-authority',
+    capability: 'fs.write.workspace',
+    mutates: true,
+    requiresMission: true,
+    rationale: 'preview or record one exactly confirmed replacement for a screened cycle that locked invalid mission authority',
+  },
+  {
     command: 'benchmark run',
     capability: 'fs.write.workspace',
     mutates: true,

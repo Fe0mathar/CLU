@@ -46,6 +46,8 @@
  */
 
 import { z } from 'zod';
+import { AUTHORITY_EVENT_TYPES } from '../control/mission.js';
+import { PROOF_EVENT_TYPES } from '../proof/proofContract.js';
 import {
   cycleClosedSchema,
   cycleInputLockSchema,
@@ -67,7 +69,7 @@ import {
   type CycleStage,
   type CycleClosed,
 } from '../shared/schemas.js';
-import { makeEntityId, nowIso, type Sha256 } from '../shared/ids.js';
+import { hashCanonicalJson, makeEntityId, nowIso, requireSha256, type Sha256 } from '../shared/ids.js';
 import { assertNoSecretMaterial } from '../shared/secretSafety.js';
 import type { EventLog } from '../memory/eventLog.js';
 import type Database from 'better-sqlite3';
@@ -85,6 +87,7 @@ export const CYCLE_EVENT_TYPES = {
   opened: 'cycle.opened',
   restarted: 'cycle.restarted',
   superseded: 'cycle.superseded',
+  authorityRecovered: 'cycle.authority_recovered',
   inputsLocked: 'cycle.inputs_locked',
   stageAdvanced: 'cycle.stage_advanced',
   suspended: 'cycle.suspended',
@@ -213,6 +216,80 @@ export function cycleSupersessionConfirmation(cycleId: string, missionVersion: s
   return `SUPERSEDE ${cycleId} ${missionVersion} ${lockDigest}`;
 }
 
+const recoveryEventRefSchema = z.object({
+  id: entityIdSchema,
+  sha256: sha256Schema,
+  mission: z.string().min(1),
+}).strict();
+
+const authorityRecoveryEvidenceSchema = z.object({
+  lock: recoveryEventRefSchema,
+  locked_ratification: recoveryEventRefSchema.nullable(),
+  locked_epoch: recoveryEventRefSchema.nullable(),
+  ratification: recoveryEventRefSchema,
+  epoch: recoveryEventRefSchema,
+  mission_basis_sha256: sha256Schema,
+  journal_head: z.object({ sequence: z.number().int().positive(), sha256: sha256Schema }).strict(),
+}).strict();
+export type CycleAuthorityRecoveryEvidence = z.infer<typeof authorityRecoveryEvidenceSchema>;
+
+export function cycleAuthorityRecoveryConfirmation(expected: CycleRestartExpectation, evidence: CycleAuthorityRecoveryEvidence): string {
+  return `RECOVER AUTHORITY ${expected.cycleId} ${expected.missionVersion} ${hashCanonicalJson({
+    lock: expected.lockDigest, evidence,
+  })}`;
+}
+
+const cycleAuthorityRecoveredSchema = z.object({
+  previous_cycle_id: entityIdSchema,
+  previous_lock_digest: sha256Schema,
+  confirmation: z.string(),
+  evidence: authorityRecoveryEvidenceSchema,
+  successor: cycleOpenedSchema,
+}).strict().refine((value) => value.previous_cycle_id !== value.successor.cycle_id &&
+  value.confirmation === cycleAuthorityRecoveryConfirmation({
+    cycleId: value.previous_cycle_id, missionVersion: value.successor.mission_version,
+    lockDigest: requireSha256(value.previous_lock_digest, 'predecessor lock digest'),
+  }, value.evidence), 'authority recovery requires a distinct cycle and the exact Creator confirmation');
+
+function projectAuthorityRecovery(db: Db, record: EventRecord): void {
+  const payload = parseOrThrow(cycleAuthorityRecoveredSchema, record.payload, `${record.id} cycle.authority_recovered`);
+  const previous = db.prepare(ACTIVE_CYCLE_SQL).get() as CycleRecord | undefined;
+  const { evidence, successor } = payload;
+  const mission = successor.mission_version;
+  const event = db.prepare(`SELECT sequence FROM events_index
+    WHERE id = ? AND hash = ? AND type = ? AND actor = ? AND subject_id IS ? AND mission_version = ?`);
+  const sequenceFor = (ref: z.infer<typeof recoveryEventRefSchema>, type: string, actor: Actor, subject: string) =>
+    (event.get(ref.id, ref.sha256, type, actor, subject, ref.mission) as { sequence: number } | undefined)?.sequence;
+  const lock = sequenceFor(evidence.lock, CYCLE_EVENT_TYPES.inputsLocked, 'daemon', payload.previous_cycle_id);
+  const ratification = sequenceFor(evidence.ratification, AUTHORITY_EVENT_TYPES.packRatified, 'creator', mission);
+  const epoch = sequenceFor(evidence.epoch, AUTHORITY_EVENT_TYPES.epochSealed, 'creator', mission);
+  const verdict = db.prepare('SELECT 1 FROM events_index WHERE type = ? AND subject_id = ? LIMIT 1')
+    .get(PROOF_EVENT_TYPES.verdictRecorded, payload.previous_cycle_id);
+  if (previous?.id !== payload.previous_cycle_id || previous.mission_version !== mission ||
+      previous.stage !== 'SCREENED' || previous.lock_digest !== payload.previous_lock_digest || verdict !== undefined ||
+      evidence.lock.mission !== mission || evidence.ratification.mission !== mission || evidence.epoch.mission !== mission ||
+      lock === undefined || ratification === undefined || epoch === undefined || ratification >= epoch ||
+      lock >= epoch || epoch >= record.sequence ||
+      evidence.journal_head.sequence !== record.sequence - 1 || evidence.journal_head.sha256 !== record.previous_hash ||
+      record.subject_id !== successor.cycle_id || record.mission_version !== mission ||
+      record.actor !== 'creator' || successor.opened_by !== 'creator') {
+    throw new Error(`${record.id} cycle.authority_recovered disagrees with its predecessor or authority evidence.`);
+  }
+  for (const [ref, type] of [
+    [evidence.locked_ratification, AUTHORITY_EVENT_TYPES.packRatified],
+    [evidence.locked_epoch, AUTHORITY_EVENT_TYPES.epochSealed],
+  ] as const) {
+    if (ref === null) continue;
+    const sequence = sequenceFor(ref, type, 'creator', ref.mission);
+    if (sequence === undefined || sequence >= lock) {
+      throw new Error(`${record.id} cycle.authority_recovered references invalid predecessor authority.`);
+    }
+  }
+  db.prepare('INSERT INTO cycle_restarts (previous_cycle_id, successor_cycle_id) VALUES (?, ?)')
+    .run(payload.previous_cycle_id, successor.cycle_id);
+  projectOpenedCycle(db, successor);
+}
+
 /**
  * The cycle projection module. Registered into the `ProjectionStore` at construction, so a
  * full rebuild clears and replays `cycles` like every other derived table — the events are
@@ -225,6 +302,7 @@ export const CYCLE_PROJECTION: ProjectionModule = {
   },
   tables: ['cycles', 'cycle_restarts'],
   projectors: {
+    [CYCLE_EVENT_TYPES.authorityRecovered]: projectAuthorityRecovery,
     [CYCLE_EVENT_TYPES.opened]: (db: Db, record: EventRecord): void => {
       const payload = parseOrThrow(cycleOpenedSchema, record.payload, `${record.id} cycle.opened`);
       projectOpenedCycle(db, payload);
@@ -338,6 +416,27 @@ export const CYCLE_PROJECTION: ProjectionModule = {
 export function readCurrentCycle(projections: ProjectionStore): CycleRecord | null {
   const row = projections.db.prepare(ACTIVE_CYCLE_SQL).get();
   return row === undefined ? null : parseOrThrow(cycleRecordSchema, row, 'current cycle row');
+}
+
+/** Follow only an exact recovery link already projected from the verified journal. */
+export function readRecordedCycleAuthorityRecovery(
+  projections: ProjectionStore,
+  expected: CycleRestartExpectation,
+  events: Iterable<EventRecord>,
+): { readonly event: EventRecord; readonly successor: CycleOpened; readonly confirmation: string } | null {
+  const link = projections.db.prepare('SELECT successor_cycle_id FROM cycle_restarts WHERE previous_cycle_id = ?')
+    .get(expected.cycleId) as { successor_cycle_id: string } | undefined;
+  if (link === undefined) return null;
+  for (const event of events) {
+    if (event.type !== CYCLE_EVENT_TYPES.authorityRecovered || event.subject_id !== link.successor_cycle_id ||
+        event.mission_version !== expected.missionVersion || event.actor !== 'creator') continue;
+    const payload = cycleAuthorityRecoveredSchema.parse(event.payload);
+    if (payload.previous_cycle_id === expected.cycleId && payload.previous_lock_digest === expected.lockDigest &&
+        payload.successor.cycle_id === event.subject_id && payload.successor.mission_version === expected.missionVersion) {
+      return { event, successor: payload.successor, confirmation: payload.confirmation };
+    }
+  }
+  return null;
 }
 
 /**
@@ -554,6 +653,44 @@ export class CycleRegistry {
     return { cycle: this.mustGet(successorId), created: true };
   }
 
+  /** Start a fresh cycle after the authority that the old lock omitted has been established. */
+  public recoverAuthority(
+    expected: CycleRestartExpectation,
+    confirmation: string,
+    inspect: () => CycleAuthorityRecoveryEvidence,
+  ): { readonly state: 'RECOVERED' | 'ALREADY_RECOVERED'; readonly event: EventRecord; readonly successor: CycleOpened } {
+    const previous = this.get(expected.cycleId);
+    const mission = this.missionVersion();
+    if (previous === null || previous.stage !== 'SCREENED' || previous.lock_digest !== expected.lockDigest ||
+        previous.mission_version !== mission || mission !== expected.missionVersion) {
+      throw new CycleTransitionError(expected.cycleId, previous?.stage ?? null, 'OPENED',
+        'authority recovery requires the exact screened cycle, lock digest and current mission');
+    }
+    const existingId = this.restartSuccessorId(previous.id);
+    if (existingId !== null) {
+      const existing = readRecordedCycleAuthorityRecovery(this.projections, expected, this.log.replay());
+      if (existing !== null && existing.confirmation === confirmation) {
+        return { state: 'ALREADY_RECOVERED', event: existing.event, successor: existing.successor };
+      }
+      throw new Error(`Recovery of ${previous.id} disagrees with the recorded Creator authorization.`);
+    }
+    if (this.current()?.id !== previous.id) {
+      throw new CycleTransitionError(previous.id, previous.stage, 'OPENED', 'only the active cycle can be recovered');
+    }
+    const evidence = inspect();
+    const exactConfirmation = cycleAuthorityRecoveryConfirmation(expected, evidence);
+    if (confirmation !== exactConfirmation) throw new Error(`The review changed or the confirmation differs. Type exactly ${exactConfirmation}.`);
+    const payload = parseOrThrow(cycleAuthorityRecoveredSchema, {
+      previous_cycle_id: previous.id,
+      previous_lock_digest: expected.lockDigest,
+      confirmation,
+      evidence,
+      successor: { cycle_id: this.nextCycleId(), mission_version: mission, opened_by: 'creator', opened_at: nowIso() },
+    }, 'cycle.authority_recovered');
+    const event = this.append(CYCLE_EVENT_TYPES.authorityRecovered, payload, payload.successor.cycle_id, 'creator');
+    return { state: 'RECOVERED', event, successor: payload.successor };
+  }
+
   /** Locks the inputs (OPENED → INPUTS_LOCKED). The lock's own schema keeps the grade honest. */
   public lockInputs(cycleId: string, lock: CycleInputLock): CycleRecord {
     const cycle = this.mustGet(cycleId);
@@ -687,8 +824,8 @@ export class CycleRegistry {
     return cycle;
   }
 
-  private append(type: string, payload: unknown, subjectId: string, actor: Actor = 'daemon'): void {
-    this.log.append({
+  private append(type: string, payload: unknown, subjectId: string, actor: Actor = 'daemon'): EventRecord {
+    const event = this.log.append({
       type,
       actor,
       missionVersion: this.missionVersion(),
@@ -696,5 +833,6 @@ export class CycleRegistry {
       payload,
     });
     this.projections.sync(this.log);
+    return event;
   }
 }

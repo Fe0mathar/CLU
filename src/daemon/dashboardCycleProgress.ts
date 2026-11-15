@@ -15,6 +15,7 @@ const checkpointKinds = [
   CYCLE_EVENT_TYPES.opened,
   CYCLE_EVENT_TYPES.restarted,
   CYCLE_EVENT_TYPES.superseded,
+  CYCLE_EVENT_TYPES.authorityRecovered,
   CYCLE_EVENT_TYPES.inputsLocked,
   CYCLE_EVENT_TYPES.stageAdvanced,
   CYCLE_EVENT_TYPES.suspended,

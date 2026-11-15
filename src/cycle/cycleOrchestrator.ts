@@ -108,6 +108,7 @@ import {
   CYCLE_EVENT_TYPES, CycleRegistry, type CycleRestartExpectation, type CycleSupersessionExpectation,
 } from './cycleRegistry.js';
 import { inspectCycleSupersession } from './cycleSupersession.js';
+import { readCurrentCycleAuthority } from './cycleAuthority.js';
 import { computeInputLock } from './cycleInputLock.js';
 import { verifyResume } from './resumePlanner.js';
 import { buildNextCycleVitalInput } from './nextCycleVitalInput.js';
@@ -411,6 +412,14 @@ export class CycleOrchestrator {
       throw new Error(`Cycle ${cycle.id} is at ${cycle.stage} — candidates run at SCREENED (§8–§15).`);
     }
     const lock = this.lockOf(cycle.id);
+    if (lock.grade === 'proof-authoritative') {
+      const missionId = this.runtime.requireMission().requireCurrent().id;
+      const { ratification, epoch } = readCurrentCycleAuthority(this.log.replay(), missionId);
+      if (cycle.mission_version !== missionId || ratification === null || epoch === null ||
+          lock.ratification_event_id !== ratification.event_id || lock.epoch_name !== epoch.epoch_name) {
+        return { ok: false, stage: 'freeze', reasons: ['The cycle lock does not bind the current mission ratification and evidence epoch.'] };
+      }
+    }
     if (lock.master_benchmark === null) {
       throw new Error(
         'The candidate arm needs a locked Master Benchmark stick (§13) — register the benchmark and open a cycle over it.',
@@ -1187,8 +1196,7 @@ export class CycleOrchestrator {
       repoRoot: this.runtime.repoRoot,
       config: this.runtime.config,
       mission,
-      ratification: missionRegistry.ratification(),
-      epoch: missionRegistry.latestEpoch(),
+      ...readCurrentCycleAuthority(this.log.replay(), mission.id),
       projectBinding: this.runtime.projectBinding,
     });
     this.registry.lockInputs(cycle.id, lock);

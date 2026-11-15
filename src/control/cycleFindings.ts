@@ -8,6 +8,7 @@ import { snapshotManifestSchema } from '../analysis/source/snapshot.js';
 import type { SourceUnit } from '../analysis/source/recognizer.js';
 import { benchmarkResultSchema } from '../benchmark/benchmarkRunner.js';
 import { readBenchmarkContract, selectHarnessBlock, verifyHarnessIntegrity } from '../benchmark/harnessBlock.js';
+import { readCurrentCycleAuthority } from '../cycle/cycleAuthority.js';
 import { computeInputLock } from '../cycle/cycleInputLock.js';
 import { CYCLE_EVENT_TYPES, readCurrentCycle } from '../cycle/cycleRegistry.js';
 import { EventLog } from '../memory/eventLog.js';
@@ -270,8 +271,9 @@ export function assessCurrentFindings(runtime: Runtime): CycleFindingsReceipt {
   insist(locks.length === 1 && lockEvent !== undefined && lockEvent.sequence < screened.event.sequence,
     'FINDINGS_EVIDENCE_INVALID', 'The screened cycle has no unique earlier input lock.');
   const locked = cycleInputsLockedSchema.parse(lockEvent.payload);
+  const authority = readCurrentCycleAuthority(events, mission.id);
   const current = computeInputLock({ repoRoot: runtime.repoRoot, config: runtime.config, mission,
-    projectBinding: runtime.projectBinding, ratification: missionRegistry.ratification(), epoch: missionRegistry.latestEpoch() });
+    projectBinding: runtime.projectBinding, ...authority });
   insist(locked.cycle_id === cycle.id && locked.lock.digest === scope.lockDigest && current.digest === scope.lockDigest &&
     current.grade === 'proof-authoritative', 'FINDINGS_LOCK_CHANGED', 'The current governed inputs differ from the cycle lock.');
   const recognition = resolveProjectRecognition(runtime);

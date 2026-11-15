@@ -21,16 +21,21 @@
 
 import type { Command } from 'commander';
 
-import { findRepoRoot, loadConfig, withRuntime } from '../../control/runtime.js';
+import { findRepoRoot, loadConfig, withProjectRuntimeSnapshot, withRuntime, type Runtime } from '../../control/runtime.js';
+import {
+  loadProjectProfileStartup, readActiveProjectProfileForBenchmark, resolveProjectProfilesRoot,
+} from '../../control/projectProfiles/projectProfileStartup.js';
 import {
   performBenchmarkRun,
   verifyLockedContract,
   type PerformedRun,
 } from '../../control/benchmarkRun.js';
 import { assessCurrentFindings, CycleFindingsError } from '../../control/cycleFindings.js';
+import { findRecordedCycleAuthorityRecovery, inspectCycleAuthorityRecovery } from '../../cycle/cycleAuthorityRecovery.js';
 import { CycleOrchestrator } from '../../cycle/cycleOrchestrator.js';
-import { readCurrentCycle } from '../../cycle/cycleRegistry.js';
+import { CycleRegistry, cycleAuthorityRecoveryConfirmation, readCurrentCycle } from '../../cycle/cycleRegistry.js';
 import { hashCanonicalJson, requireSha256 } from '../../shared/ids.js';
+import { redactSecretText } from '../../shared/secretSafety.js';
 import { resolveNavigatorPath } from './recognizeCommands.js';
 import { printChecks, short, truncate, write, type Check } from '../output/formatter.js';
 import { guarded as guardedWith } from './shared.js';
@@ -225,6 +230,61 @@ function commandCycleSupersede(
   });
 }
 
+function commandCycleRecoverAuthority(
+  cycleId: string,
+  options: { readonly expectMission: string; readonly expectLock: string; readonly confirmation?: string },
+): number {
+  const schemaVersion = 'clue-cycle-authority-recovery/1';
+  const previousCycleId = cycleId;
+  try {
+    if (!/^CYCLE-\d{6,}$/u.test(cycleId) || !/^MISSION-\d{6,}$/u.test(options.expectMission)) {
+      throw new Error('Supply exact cycle and mission IDs.');
+    }
+    const expected = { cycleId, missionVersion: options.expectMission, lockDigest: requireSha256(options.expectLock, '--expect-lock') };
+    const repoRoot = findRepoRoot();
+    const profile = readActiveProjectProfileForBenchmark(repoRoot);
+    const selector = loadProjectProfileStartup(repoRoot);
+    if (profile === null || selector === null) throw new Error('Activate a saved Project Profile before cycle authority recovery.');
+    const verifyProfile = () => {
+      const active = readActiveProjectProfileForBenchmark(repoRoot);
+      if (active?.profile.projectId !== profile.profile.projectId || active.generation !== profile.generation ||
+          active.projectProfileHash !== profile.projectProfileHash) {
+        throw new Error('The active Project Profile changed. Start a new review.');
+      }
+    };
+    const preview = (runtime: Runtime) => {
+      const existing = findRecordedCycleAuthorityRecovery(runtime, expected);
+      if (existing !== null) {
+        return { state: 'ALREADY_RECOVERED', successor: existing.successor, eventId: existing.event.id, eventSha256: existing.event.hash };
+      }
+      const evidence = inspectCycleAuthorityRecovery(runtime, expected);
+      return { state: 'PREVIEW', evidence, confirmation: cycleAuthorityRecoveryConfirmation(expected, evidence) };
+    };
+    const confirmation = options.confirmation;
+    const result = confirmation === undefined
+      ? withProjectRuntimeSnapshot(profile, repoRoot, resolveProjectProfilesRoot(repoRoot, selector.profiles.registry_root), preview)
+      : withRuntime({ repoRoot, projectProfile: profile, withLog: true, verifyLog: 'full',
+        requireMission: false, allowStaleHeartbeatReclaim: false }, (runtime) => {
+        const log = runtime.requireLog();
+        runtime.projections.catchUpVerified(log);
+        runtime.requireFreshProjections();
+        runtime.requireMission();
+        verifyProfile();
+        const registry = new CycleRegistry({ log, projections: runtime.projections, missionVersion: runtime.currentMissionId });
+        const { state, event, successor } = registry.recoverAuthority(expected, confirmation,
+          () => inspectCycleAuthorityRecovery(runtime, expected));
+        return { state, successor, eventId: event.id, eventSha256: event.hash };
+      });
+    if (confirmation === undefined) verifyProfile();
+    write(JSON.stringify({ schemaVersion, previousCycleId, ...result }));
+    return 0;
+  } catch (error) {
+    const reason = redactSecretText(error instanceof Error ? error.message : String(error)).text.slice(0, 2048);
+    write(JSON.stringify({ schemaVersion, previousCycleId, state: 'BLOCKED', reason }));
+    return 1;
+  }
+}
+
 /* ------------------------------------------------------------------------- */
 /* clue cycle close                                                           */
 /* ------------------------------------------------------------------------- */
@@ -354,5 +414,14 @@ export function registerCycleCommands(program: Command): void {
     .requiredOption('--confirmation <text>', 'require SUPERSEDE <cycle-id> <mission-id> <full-lock-digest>')
     .action((cycleId: string, options: Parameters<typeof commandCycleSupersede>[1]) => {
       process.exitCode = runGuarded(() => commandCycleSupersede(cycleId, options));
+    });
+  cycle
+    .command('recover-authority <cycle-id>')
+    .description('preview or explicitly recover a screened cycle that locked invalid mission authority')
+    .requiredOption('--expect-mission <mission-id>', 'require the exact current mission recorded on the predecessor')
+    .requiredOption('--expect-lock <sha256>', 'require the complete predecessor lock digest')
+    .option('--confirmation <text>', 'apply the exact RECOVER AUTHORITY confirmation from the read-only preview')
+    .action((cycleId: string, options: Parameters<typeof commandCycleRecoverAuthority>[1]) => {
+      process.exitCode = commandCycleRecoverAuthority(cycleId, options);
     });
 }

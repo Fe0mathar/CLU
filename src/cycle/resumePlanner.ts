@@ -37,6 +37,7 @@
  */
 
 import type { Runtime } from '../control/runtime.js';
+import { readCurrentCycleAuthority } from './cycleAuthority.js';
 import { computeInputLock } from './cycleInputLock.js';
 import type { CycleRecord } from '../shared/schemas.js';
 
@@ -92,15 +93,14 @@ export function verifyResume(
       ok: unsealedOpened,
       detail: unsealedOpened ? 'inputs have yet to be locked at OPENED' : 'the cycle carries no lock digest',
     });
-  } else if (mission === null) {
-    checks.push({ name: 'lock', ok: false, detail: 'not recomputable without a mission' });
+  } else if (mission === null || runtime.log === null) {
+    checks.push({ name: 'lock', ok: false, detail: 'not recomputable without a mission and verified event log' });
   } else {
     const lock = computeInputLock({
       repoRoot: runtime.repoRoot,
       config: runtime.config,
       mission,
-      ratification: missionRegistry.ratification(),
-      epoch: missionRegistry.latestEpoch(),
+      ...readCurrentCycleAuthority(runtime.log.replay(), mission.id),
       projectBinding: runtime.projectBinding,
     });
     checks.push({

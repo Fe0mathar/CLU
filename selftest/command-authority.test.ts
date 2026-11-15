@@ -154,6 +154,10 @@ test('DEV-P1-07: read-only and mission are the defaults, and the exceptions are 
   assert.equal(supersession.mutates, true);
   assert.equal(supersession.requiresMission, true);
   assert.equal(supersession.capability, 'fs.write.workspace');
+  const authorityRecovery = requireAuthority('cycle recover-authority');
+  assert.equal(authorityRecovery.mutates, true);
+  assert.equal(authorityRecovery.requiresMission, true);
+  assert.equal(authorityRecovery.capability, 'fs.write.workspace');
   const gatewayCheck = requireAuthority('task gateway-check');
   assert.equal(gatewayCheck.mutates, true);
   assert.equal(gatewayCheck.requiresMission, true);
@@ -163,7 +167,8 @@ test('DEV-P1-07: read-only and mission are the defaults, and the exceptions are 
   assert.equal(findingsPlan.requiresMission, true);
   assert.equal(findingsPlan.capability, 'fs.write.workspace');
   const preSupersession = COMMAND_AUTHORITIES.filter((entry) => !entry.command.startsWith('landing ') &&
-    !entry.command.startsWith('publication ') && entry !== supersession && entry !== gatewayCheck && entry !== findingsPlan);
+    !entry.command.startsWith('publication ') && entry !== supersession && entry !== authorityRecovery &&
+    entry !== gatewayCheck && entry !== findingsPlan);
   assert.ok(
     preSupersession.filter((entry) => !entry.mutates).length >= preSupersession.filter((entry) => entry.mutates).length,
     'read-only is at least as common as mutating in the pre-supersession command inventory',
