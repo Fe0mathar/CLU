@@ -197,6 +197,27 @@ export const COMMAND_AUTHORITIES: readonly CommandAuthority[] = [
     rationale: 'removes only the v3 startup selector and preserves all profile/state/history data',
   },
   {
+    command: 'landing preview',
+    capability: 'git.read.canonical',
+    mutates: false,
+    requiresMission: true,
+    rationale: 'reviews a current proof verdict and its exact local Git base without preparing objects',
+  },
+  {
+    command: 'landing apply',
+    capability: 'git.land.canonical',
+    mutates: true,
+    requiresMission: true,
+    rationale: 'invokes the Custodian for one explicitly confirmed local accepted branch and records verification',
+  },
+  {
+    command: 'landing rollback',
+    capability: 'git.land.canonical',
+    mutates: true,
+    requiresMission: true,
+    rationale: 'uses the exact prebuilt rollback for the reviewed local accepted branch',
+  },
+  {
     command: 'status show',
     capability: 'fs.read.workspace',
     mutates: false,

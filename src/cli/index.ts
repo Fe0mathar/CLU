@@ -52,6 +52,7 @@ import { registerEpochCommands } from './commands/epochCommands.js';
 import { registerCycleCommands } from './commands/cycleCommands.js';
 import { registerBenchmarkCommands } from './commands/benchmarkCommands.js';
 import { registerProofCommand } from './commands/proofCommands.js';
+import { registerLandingCommands } from './commands/landingCommands.js';
 import { registerGatewayCommands } from './commands/gatewayCommands.js';
 import { registerSnapshotCommands } from './commands/snapshotCommands.js';
 import { registerGraphCommands } from './commands/graphCommands.js';
@@ -233,6 +234,7 @@ export function buildProgram(): Command {
   registerCycleCommands(program);
   registerBenchmarkCommands(program);
   registerProofCommand(program);
+  registerLandingCommands(program);
   registerGatewayCommands(program);
   registerSnapshotCommands(program);
   registerGraphCommands(program);

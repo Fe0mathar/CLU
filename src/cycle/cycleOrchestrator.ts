@@ -51,6 +51,7 @@ import { captureSnapshot, snapshotManifestSchema } from '../analysis/source/snap
 import { assertExactRunInputs, captureExactRunInputs } from '../control/exactRunInputs.js';
 import { isBenchmarkProfileContract } from '../control/projectProfiles/benchmarkProfileInputs.js';
 import { resolveProjectRecognition } from '../control/projectProfiles/projectRecognition.js';
+import { observeLocalLandingBase, type LocalLandingBase } from '../integration/git/landableProofBasis.js';
 import {
   PROOF_EVENT_TYPES,
   freezeProofContract,
@@ -468,6 +469,11 @@ export class CycleOrchestrator {
     }
     if (armReasons.length > 0) return { ok: false, stage: 'freeze', reasons: armReasons };
 
+    // Only proof-authoritative runs can supply a candidate's exact Git parent.
+    const initialLandingBase = lock.grade === 'proof-authoritative' && lock.project_basis !== undefined
+      ? observeLocalLandingBase(this.runtime.projectProfile, config.project.root)
+      : null;
+
     const contractArtifact = this.runtime.artifacts.putJson(frozen.contract, {
       label: `proof-contract-${frozen.contract_hash.slice(0, 12)}.json`,
     });
@@ -486,6 +492,7 @@ export class CycleOrchestrator {
         cycle_id: cycle.id,
         snapshot_id: frozen.contract.snapshot_id,
         inputs_id: pinnedInputs.id,
+        ...(initialLandingBase === null ? {} : { local_landing_base: initialLandingBase }),
         contract_artifact: contractArtifact,
         frozen_at: frozen.frozen_at,
       },
@@ -784,6 +791,16 @@ export class CycleOrchestrator {
       anomalies: execution.anomalies,
     };
     const verdict = decideWithMatchedControl(verdictInput, controlBaseline);
+    let localLandingBase: LocalLandingBase | null = null;
+    if (verdict.disposition === 'ACCEPT' && initialLandingBase !== null) {
+      try {
+        assertExactRunInputs(config.project.root, pinnedInputs, 'Screened project after proof');
+        const observed = observeLocalLandingBase(this.runtime.projectProfile, config.project.root);
+        if (canonicalJson(observed) === canonicalJson(initialLandingBase)) localLandingBase = observed;
+      } catch {
+        // The completed shadow proof still records its verdict. A stale base cannot land.
+      }
+    }
     const verdictArtifact = this.runtime.artifacts.putJson(verdict, {
       label: `proof-verdict-${frozen.contract_hash.slice(0, 12)}.json`,
     });
@@ -829,6 +846,7 @@ export class CycleOrchestrator {
         candidate_digest: verdict.identity.candidate_digest,
         candidate_snapshot_id: execution.candidate_snapshot_id,
         baseline_inputs_id: pinnedInputs.id,
+        ...(localLandingBase === null ? {} : { local_landing_base: localLandingBase }),
         patch_digest: execution.patch_digest,
         change_set: execution.change_set,
         static_preparation: execution.static_preparation,
