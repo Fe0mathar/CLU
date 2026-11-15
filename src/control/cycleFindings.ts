@@ -5,6 +5,7 @@ import { z } from 'zod';
 import { METRIC_EVENT_TYPES, metricSetRecordSchema, rankingRecordSchema } from '../analysis/metrics/registry.js';
 import type { RankingResult } from '../analysis/metrics/ranking.js';
 import { snapshotManifestSchema } from '../analysis/source/snapshot.js';
+import { GRAPH_EVENT_TYPES, recognitionRecordSchema } from '../analysis/source/graph.js';
 import type { SourceUnit } from '../analysis/source/recognizer.js';
 import { benchmarkResultSchema } from '../benchmark/benchmarkRunner.js';
 import { readBenchmarkContract, selectHarnessBlock, verifyHarnessIntegrity } from '../benchmark/harnessBlock.js';
@@ -61,7 +62,9 @@ const stageEvidenceSchema = z.object({ stage: z.literal('SCREENED'), cycle_id: e
   instrumentation_candidates: z.number().int().nonnegative(), clarification_candidates: z.number().int().nonnegative(),
   excluded: z.number().int().nonnegative(), observed_evidence: z.boolean() });
 const recognizedSchema = z.object({ stage: z.literal('RECOGNIZED'), cycle_id: entityIdSchema,
-  snapshot_id: sha256Schema, result_hash: sha256Schema, run_key: sha256Schema });
+  snapshot_id: sha256Schema, capture_id: sha256Schema, result_hash: sha256Schema, run_key: sha256Schema,
+  unit_count: z.number().int().nonnegative(), edge_count: z.number().int().nonnegative(),
+  unresolved_count: z.number().int().nonnegative() });
 const assessedSchema = z.object({ receipt: receiptDataSchema, evidence: artifactRefSchema }).strict();
 const executionBoundarySchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('linux-bwrap'), sha256: sha256Schema }).strict(),
@@ -285,15 +288,28 @@ export function assessCurrentFindings(runtime: Runtime): CycleFindingsReceipt {
 
   const recognized = checkpoint(events, cycle, 'RECOGNIZED');
   const recognizedData = recognizedSchema.parse(artifact(runtime, recognized.ref));
-  const graph = runtime.requireGraph();
-  const recognitionRun = graph.recognition(scope.snapshotId);
   insist(recognized.event.sequence > lockEvent.sequence && recognized.event.sequence < metricEvent.sequence &&
     recognizedData.cycle_id === cycle.id && recognizedData.snapshot_id === scope.snapshotId &&
-    recognitionRun?.result_hash === recognizedData.result_hash && recognitionRun.run_key === recognizedData.run_key &&
     recognition.projectRecognitionIdentity !== null,
-  'FINDINGS_EVIDENCE_INVALID', 'The recognition checkpoint and exact profile graph disagree.');
-  const source = graph.resultOf(scope.snapshotId, recognition.projectRecognitionIdentity);
-  insist(source !== null, 'FINDINGS_EVIDENCE_INVALID', 'The recognized source graph is missing.');
+  'FINDINGS_EVIDENCE_INVALID', 'The recognition checkpoint does not match the screened cycle and profile.');
+  const runEvents = events.filter((event) => event.type === GRAPH_EVENT_TYPES.recognitionCompleted &&
+    event.actor === 'daemon' && event.subject_id === null && event.mission_version === cycle.mission_version &&
+    event.sequence > lockEvent.sequence && event.sequence < recognized.event.sequence &&
+    (event.payload as { run_key?: unknown } | undefined)?.run_key === recognizedData.run_key);
+  const runEvent = runEvents[0];
+  insist(runEvents.length === 1 && runEvent !== undefined,
+    'FINDINGS_EVIDENCE_INVALID', 'Expected one recorded recognition run for the screened checkpoint.');
+  const run = recognitionRecordSchema.safeParse(runEvent.payload);
+  insist(run.success && run.data.snapshot_id === recognizedData.snapshot_id &&
+    run.data.result_hash === recognizedData.result_hash && run.data.unit_count === recognizedData.unit_count &&
+    run.data.edge_count === recognizedData.edge_count && run.data.unresolved_count === recognizedData.unresolved_count,
+  'FINDINGS_EVIDENCE_INVALID', 'The recorded recognition run does not match the screened checkpoint.');
+  let units: readonly SourceUnit[];
+  try {
+    units = runtime.requireGraph().resultOfRecordedRun(run.data, recognizedData.capture_id, recognition.projectRecognitionIdentity).units;
+  } catch {
+    throw new CycleFindingsError('FINDINGS_EVIDENCE_INVALID', 'The screened recognition artifact could not be verified.');
+  }
   const metricEvidenceSha256 = metricSetRecordSchema.parse(metricEvent.payload).artifact_hash;
   runtime.artifacts.getBytes(requireSha256(metricEvidenceSha256, 'screened metrics'));
   const ranking = runtime.artifacts.getJson(requireSha256(scope.rankingSha256, 'screened ranking')) as RankingResult;
@@ -301,14 +317,15 @@ export function assessCurrentFindings(runtime: Runtime): CycleFindingsReceipt {
     ranking.instrumentationCandidates?.length === data.instrumentation_candidates &&
     ranking.clarificationCandidates?.length === data.clarification_candidates && ranking.excluded?.length === data.excluded,
   'FINDINGS_EVIDENCE_INVALID', 'The ranking artifact does not reproduce the screened census.');
-  const benchmark = observedBindings(runtime, events, locked.lock, scope, data.inputs.id, source.units);
+  const benchmark = observedBindings(runtime, events, locked.lock, scope, data.inputs.id, units);
   const head = log.getHead();
   insist(head !== null, 'FINDINGS_EVIDENCE_INVALID', 'The event journal has no committed head.');
-  const selection = selectFindingCandidate({ ranking, units: source.units, isProtected: runtime.isProtected,
+  const selection = selectFindingCandidate({ ranking, units, isProtected: runtime.isProtected,
     signalBindings: benchmark.signals, firstFindingSequence: (head.sequence + 1) * 100 });
   const { findings, ...decision } = selection;
   const receipt = receiptDataSchema.parse({ ...scope, schemaVersion: 'clue-cycle-findings/1', ...decision });
   const body = { receipt, findings, recognitionEventId: recognized.event.id, recognitionSha256: recognizedData.result_hash,
+    recognitionRunEventId: runEvent.id, recognitionRunKey: recognizedData.run_key, recognitionArtifactSha256: run.data.artifact_hash,
     metricEventId: metricEvent.id, metricEvidenceSha256,
     rankingEventId: rankingEvent.id, benchmarkSha256: benchmark.benchmarkSha256, benchmarkEventId: benchmark.openingEventId,
     screenedEventId: screened.event.id, screenedInputsId: data.inputs.id };

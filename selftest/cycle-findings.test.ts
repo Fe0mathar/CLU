@@ -14,7 +14,8 @@ import { selectFindingCandidate } from '../src/control/findingSelection.js';
 import { PACK_MANIFEST_FILE, PACK_SEAL_FILE } from '../src/control/mission.js';
 import { ProjectProfileRegistry } from '../src/control/projectProfiles/profileRegistry.js';
 import { enableProjectProfileStartup, projectProfileCutoverConfirmation } from '../src/control/projectProfiles/projectProfileStartup.js';
-import { withRuntime, withRuntimeAsync } from '../src/control/runtime.js';
+import { runRecognition } from '../src/control/recognitionRun.js';
+import { withRuntime, withRuntimeAsync, type Runtime } from '../src/control/runtime.js';
 import { CycleOrchestrator } from '../src/cycle/cycleOrchestrator.js';
 import { startClueDashboard } from '../src/daemon/clueDashboardServer.js';
 import { hashBytes, hashText, requireSha256 } from '../src/shared/ids.js';
@@ -107,6 +108,19 @@ function driveFromCommand(t: TestContext, repoRoot: string, assessFindings = fal
     return line === undefined ? null : (JSON.parse(line) as Record<string, unknown>)[key];
   };
   return { exitCode, output, findings: read('cycleFindings'), timing: read('eventAppends') };
+}
+
+function recaptureRecognizedSnapshot(runtime: Runtime, snapshotId: string) {
+  const graph = runtime.requireGraph();
+  const screened = graph.recognition(snapshotId);
+  assert.ok(screened?.run_key && screened.artifact_hash);
+  const refreshed = runRecognition(runtime, { force: true, navigatorPath: null, expectedSnapshotId: snapshotId });
+  assert.equal(refreshed.snapshotId, snapshotId);
+  assert.equal(refreshed.recorded.record.result_hash, screened.result_hash);
+  assert.notEqual(refreshed.recorded.record.run_key, screened.run_key);
+  assert.notEqual(refreshed.recorded.record.artifact_hash, screened.artifact_hash);
+  assert.equal(graph.recognition(snapshotId)?.run_key, refreshed.recorded.record.run_key);
+  return screened;
 }
 
 test('cycle drive assesses findings only on opt-in and reuses the screened cycle receipt', (t) => {
@@ -304,7 +318,26 @@ test('a damaged findings artifact is refused before it can become a dashboard re
   });
 });
 
-test('declared benchmark coverage requires an opening receipt, then can select its exact source unit', async (t) => {
+test('a damaged historical recognition artifact blocks findings even when the latest graph is intact', (t) => {
+  const fixture = makeRuntimeFixture(t);
+  withRuntime(fixture.options, (runtime) => {
+    const { cycle } = new CycleOrchestrator(runtime).drive(null, { verifyRecovery: true });
+    assert.equal(cycle.stage, 'SCREENED');
+    const snapshotId = runtime.snapshots?.latest('canonical')?.id;
+    assert.ok(snapshotId);
+    const screened = recaptureRecognizedSnapshot(runtime, snapshotId);
+    assert.ok(screened.artifact_hash);
+    const artifactPath = runtime.artifacts.pathFor(requireSha256(screened.artifact_hash, 'screened recognition artifact'));
+    chmodSync(artifactPath, 0o600);
+    writeFileSync(artifactPath, '{}\n');
+    assert.ok(runtime.requireGraph().resultOf(snapshotId)?.units.length);
+    const head = runtime.requireLog().getHead();
+    assert.throws(() => assessCurrentFindings(runtime), { code: 'FINDINGS_EVIDENCE_INVALID' });
+    assert.deepEqual(runtime.requireLog().getHead(), head);
+  });
+});
+
+test('declared benchmark coverage selects the screened unit after the benchmark re-recognizes the same snapshot', async (t) => {
   const fixture = makeRuntimeFixture(t, true, true);
   const contract = { path: fixture.benchmarkPath, registered: true };
   const prepared = withRuntime(fixture.options, (runtime) => {
@@ -336,6 +369,8 @@ test('declared benchmark coverage requires an opening receipt, then can select i
     executionBoundary: { kind: 'linux-bwrap', sha256: hashText('test boundary') } });
   assert.ok(outcome.ok, outcome.ok ? undefined : outcome.reason);
   withRuntime(fixture.options, (runtime) => {
+    // Recognition scenarios record a fresh capture of the same source inside the benchmark.
+    const screened = recaptureRecognizedSnapshot(runtime, prepared.subject.snapshot_id);
     const opening = recordBenchmarkRun(runtime, { ...prepared, outcome, contract });
     assert.equal((opening.event.payload as { proof_eligible: boolean }).proof_eligible, true);
     const receipt = assessCurrentFindings(runtime);
@@ -343,6 +378,14 @@ test('declared benchmark coverage requires an opening receipt, then can select i
     assert.equal(receipt.selected?.unitId, fixture.unit.logicalId);
     assert.equal(receipt.selected?.signalId, 'SIG-001');
     assert.match(receipt.selected?.reason ?? '', new RegExp(opening.event.id));
+    const evidence = runtime.artifacts.getJson(requireSha256(receipt.evidenceSha256, 'findings evidence')) as {
+      recognitionSha256: string;
+      recognitionEventId: string;
+    };
+    assert.equal(evidence.recognitionSha256, screened.result_hash);
+    const recognitionEvent = [...runtime.requireLog().replay()].find(({ id }) => id === evidence.recognitionEventId);
+    assert.equal(recognitionEvent?.type, 'cycle.stage_advanced');
+    assert.equal(recognitionEvent.subject_id, receipt.cycleId);
     assert.deepEqual(readCurrentFindings(runtime), receipt);
   });
 });

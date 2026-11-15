@@ -40,7 +40,7 @@
 import type Database from 'better-sqlite3';
 import { z } from 'zod';
 
-import { hashCanonicalJson, nowIso, requireSha256 } from '../../shared/ids.js';
+import { hashCanonicalJson, nowIso, requireSha256, type Sha256 } from '../../shared/ids.js';
 import {
   EvidenceChainError,
   requireSpineHash,
@@ -200,6 +200,15 @@ export const recognitionRecordSchema = z
   .strict();
 
 export type RecognitionRecord = z.infer<typeof recognitionRecordSchema>;
+
+function recognitionRunKey(snapshotId: string, resultHash: string, compilerOptionsHash: string, basisHash: string): Sha256 {
+  return hashCanonicalJson({
+    snapshot_id: snapshotId,
+    result_hash: resultHash,
+    compiler_options_hash: compilerOptionsHash,
+    basis_hash: basisHash,
+  });
+}
 
 /** Current schema version of the complete recognition artifact. */
 export const RECOGNITION_ARTIFACT_VERSION = 1;
@@ -598,14 +607,9 @@ export const GRAPH_PROJECTORS: Readonly<Record<string, Projector>> = {
   [GRAPH_EVENT_TYPES.recognitionCompleted]: (db, record) => {
     const recognition = parseOrThrow(recognitionRecordSchema, record.payload, 'recognition.completed');
     const basisHash = recognition.basis_hash ?? '';
-    const runKey =
-      recognition.run_key ??
-      hashCanonicalJson({
-        snapshot_id: recognition.snapshot_id,
-        result_hash: recognition.result_hash,
-        compiler_options_hash: recognition.compiler_options_hash,
-        basis_hash: basisHash,
-      });
+    const runKey = recognition.run_key ?? recognitionRunKey(
+      recognition.snapshot_id, recognition.result_hash, recognition.compiler_options_hash, basisHash,
+    );
     const artifactHash = recognition.artifact_hash ?? '';
     // The current-run pointer for the snapshot: overwritten when the snapshot is recognised again.
     db.prepare(
@@ -777,12 +781,7 @@ export class GraphRegistry {
       resultHash: contentHash,
     });
 
-    const runKey = hashCanonicalJson({
-      snapshot_id: snapshotId,
-      result_hash: contentHash,
-      compiler_options_hash: canonical.compilerOptionsHash,
-      basis_hash: canonical.basisHash,
-    });
+    const runKey = recognitionRunKey(snapshotId, contentHash, canonical.compilerOptionsHash, canonical.basisHash);
 
     // DEV-P0-05: persist ONE complete, versioned recognition artifact — basis, basis hash, run
     // identity, completeness, stats, merge provenance, and the graph content — and parse it strictly
@@ -1839,8 +1838,42 @@ export class GraphRegistry {
       };
     }
 
-    // Parse the complete artifact through the strict schema and verify its content hash. A corrupt,
-    // truncated, or field-missing artifact is refused here rather than yielding a partial graph.
+    return this.readRecognitionArtifact(snapshotId, resultHash, artifactHash, expectedProjectRecognition).content;
+  }
+
+  /** Read the immutable graph named by a verified journal record. */
+  public resultOfRecordedRun(
+    record: RecognitionRecord,
+    captureId: string,
+    expectedProjectRecognition: ProjectRecognitionIdentity,
+  ): { units: SourceUnit[]; edges: SourceEdge[]; unresolved: UnresolvedReference[] } {
+    if (!record.complete || !record.artifact_hash || !record.run_key || !record.basis_hash) {
+      throw new Error('The recorded recognition lacks a complete versioned artifact or run identity.');
+    }
+    const { artifact, content } = this.readRecognitionArtifact(
+      record.snapshot_id, record.result_hash, record.artifact_hash, expectedProjectRecognition,
+    );
+    const basisHash = hashCanonicalJson(artifact.basis);
+    const runKey = recognitionRunKey(record.snapshot_id, record.result_hash, record.compiler_options_hash, basisHash);
+    if (!artifact.complete || artifact.basis.snapshotId !== record.snapshot_id ||
+        artifact.basis.captureId !== requireSha256(captureId, 'recognition capture id') ||
+        artifact.basis.snapshotParityVerified !== true || artifact.basis.compilerOptionsHash !== record.compiler_options_hash ||
+        artifact.basis_hash !== basisHash || record.basis_hash !== basisHash ||
+        artifact.run_key !== runKey || record.run_key !== runKey ||
+        content.units.length !== record.unit_count || content.edges.length !== record.edge_count ||
+        content.unresolved.length !== record.unresolved_count) {
+      throw new Error('The recorded recognition artifact differs from the verified run identity or census.');
+    }
+    return content;
+  }
+
+  // Validate the complete artifact and content hash for both latest and historical readers.
+  private readRecognitionArtifact(
+    snapshotId: string,
+    resultHash: string,
+    artifactHash: string,
+    expectedProjectRecognition?: ProjectRecognitionIdentity,
+  ) {
     const raw = this.artifacts.getJson(requireSha256(artifactHash, 'artifact hash'));
     const artifact = parseOrThrow(
       recognitionArtifactSchema,
@@ -1855,9 +1888,9 @@ export class GraphRegistry {
       );
     }
     const content = {
-      units: artifact.units,
-      edges: artifact.edges,
-      unresolved: artifact.unresolved,
+      units: artifact.units as unknown as SourceUnit[],
+      edges: artifact.edges as unknown as SourceEdge[],
+      unresolved: artifact.unresolved as unknown as UnresolvedReference[],
     };
     const contentHash = hashCanonicalJson(content);
     if (contentHash !== artifact.content_hash || contentHash !== resultHash) {
@@ -1867,11 +1900,7 @@ export class GraphRegistry {
         contentHash,
       );
     }
-    return {
-      units: artifact.units as unknown as SourceUnit[],
-      edges: artifact.edges as unknown as SourceEdge[],
-      unresolved: artifact.unresolved as unknown as UnresolvedReference[],
-    };
+    return { artifact, content };
   }
 
   public recognition(snapshotId: string): RecognitionRecord | null {
