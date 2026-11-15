@@ -609,6 +609,24 @@ export function verifyLocalLanding(plan: LocalLandingPlan, expectedState: LocalL
   return actual;
 }
 
+/** Read the one existing-file write from the verified accepted tree for remote publication. */
+export function readLocalAcceptedWrite(plan: LocalLandingPlan, path: string): Buffer {
+  verifyPlanRef(plan);
+  requireCondition(changedPath(path), 'GIT_LANDING_CHANGE_SET_INVALID', 'The accepted proof path is not portable.');
+  const repo = openRepository(plan.repositoryRoot, plan.targetRef, plan);
+  requireInactive(repo, plan.landingRef);
+  verifyCommits(repo, plan);
+  requireCondition(observation(repo, plan).state === 'applied', 'GIT_LANDING_REF_STATE_MISMATCH',
+    'Publication requires the exact verified accepted reference.');
+  const diff = splitNul(repo.read(['diff-tree', '--raw', '--no-abbrev', '--no-renames', '-r', '-z',
+    plan.baseTree, plan.acceptedTree, '--']));
+  const match = /^:(100644|100755) (100644|100755) ([a-f0-9]+) ([a-f0-9]+) M$/u.exec(diff[0] ?? '');
+  requireCondition(diff.length === 2 && diff[1] === path && match !== null && match[1] === match[2],
+    'GIT_LANDING_TREE_MISMATCH', 'The accepted commit must keep all paths and modes except the one proved source edit.');
+  const blob = requireObject(match[4]!, repo.oidLength);
+  return repo.read(['cat-file', 'blob', blob]);
+}
+
 function transition(plan: LocalLandingPlan, base: LocalLandingState, result: LocalLandingState): LocalLandingObservation {
   verifyPlanRef(plan);
   const repo = openRepository(plan.repositoryRoot, plan.targetRef, plan);

@@ -163,7 +163,7 @@ test('DEV-P1-07: read-only and mission are the defaults, and the exceptions are 
   assert.equal(findingsPlan.requiresMission, true);
   assert.equal(findingsPlan.capability, 'fs.write.workspace');
   const preSupersession = COMMAND_AUTHORITIES.filter((entry) => !entry.command.startsWith('landing ') &&
-    entry !== supersession && entry !== gatewayCheck && entry !== findingsPlan);
+    !entry.command.startsWith('publication ') && entry !== supersession && entry !== gatewayCheck && entry !== findingsPlan);
   assert.ok(
     preSupersession.filter((entry) => !entry.mutates).length >= preSupersession.filter((entry) => entry.mutates).length,
     'read-only is at least as common as mutating in the pre-supersession command inventory',
@@ -190,6 +190,22 @@ test('P43: the CLI exposes a read-only landing preview and explicit Custodian mu
     assert.equal(authority.mutates, !preview);
     assert.equal(authority.capability, preview ? 'git.read.canonical' : 'git.land.canonical');
     assert.ok(command.options.some(({ long, mandatory }) => long === '--patch' && mandatory));
+    assert.equal(command.options.some(({ long, mandatory }) => long === '--confirmation' && mandatory), !preview);
+  }
+});
+
+test('P44: publication needs an accepted proof event and an explicit confirmation for the push', () => {
+  const publication = buildProgram().commands.find((command) => command.name() === 'publication');
+  assert.ok(publication);
+  assert.deepEqual(publication.commands.map((command) => command.name()), ['preview', 'push']);
+  for (const command of publication.commands) {
+    const preview = command.name() === 'preview';
+    const authority = requireAuthority(`publication ${command.name()}`);
+    assert.equal(authority.requiresMission, true);
+    assert.equal(authority.mutates, !preview);
+    assert.equal(authority.capability, preview ? 'git.read.canonical' : 'git.push.accepted');
+    assert.equal(command.registeredArguments.length, 1);
+    assert.equal(command.registeredArguments[0]?.required, true);
     assert.equal(command.options.some(({ long, mandatory }) => long === '--confirmation' && mandatory), !preview);
   }
 });

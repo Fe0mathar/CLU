@@ -58,6 +58,7 @@ export const CAPABILITIES = [
   'git.read.canonical',
   /** Amendment A2: the single write authority, and it is a Git operation, not a write. */
   'git.land.canonical',
+  'git.push.accepted',
   'process.run.shadow',
   'process.run.host',
   'browser.control',
@@ -81,6 +82,7 @@ const CAPABILITY_ZONE: Partial<Record<Capability, PathZone>> = {
   'fs.write.browserProfile': 'browserProfile',
   'git.read.canonical': 'canonical',
   'git.land.canonical': 'canonical',
+  'git.push.accepted': 'canonical',
   'process.run.shadow': 'shadow',
 };
 
@@ -95,6 +97,7 @@ const WRITE_CAPABILITIES: ReadonlySet<Capability> = new Set<Capability>([
 const GIT_CAPABILITIES: ReadonlySet<Capability> = new Set<Capability>([
   'git.read.canonical',
   'git.land.canonical',
+  'git.push.accepted',
 ]);
 
 /**
@@ -129,6 +132,7 @@ export const DEFAULT_GRANTS: Readonly<Record<Actor, readonly Capability[]>> = {
     'fs.write.workspace',
     'git.read.canonical',
     'git.land.canonical',
+    'git.push.accepted',
     'process.run.shadow',
   ],
   gateway: ['fs.read.workspace', 'fs.write.workspace', 'model.call'],
@@ -460,7 +464,16 @@ export class PolicyEngine {
       }
     }
 
-    // Rule 4 — token validation.
+    // Publication is a distinct Custodian operation on one accepted branch.
+    if (capability === 'git.push.accepted') {
+      if (request.actor !== 'custodian') return deny('LANDING_WRONG_ACTOR', 'Publication requires the Custodian', zone, resolved);
+      const refError = unsafeGitRef(request.gitRef, this.landingBranchPrefix);
+      if (request.gitRef == null || request.gitRef.length <= this.landingBranchPrefix.length || refError !== null) {
+        return deny('GIT_REF_FORBIDDEN', refError ?? 'Publication requires one exact accepted branch', zone, resolved);
+      }
+    }
+
+    // Rule 5 — token validation.
     const secret = request.tokenSecret ?? null;
     if (secret === null) {
       return deny('NO_TOKEN', `Capability ${capability} requires a token`, zone, resolved);

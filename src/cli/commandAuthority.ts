@@ -218,6 +218,20 @@ export const COMMAND_AUTHORITIES: readonly CommandAuthority[] = [
     rationale: 'uses the exact prebuilt rollback for the reviewed local accepted branch',
   },
   {
+    command: 'publication preview',
+    capability: 'git.read.canonical',
+    mutates: false,
+    requiresMission: true,
+    rationale: 'reviews an exact verified local source branch and its registered publication target',
+  },
+  {
+    command: 'publication push',
+    capability: 'git.push.accepted',
+    mutates: true,
+    requiresMission: true,
+    rationale: 'publishes one explicitly confirmed accepted source commit and records remote observation',
+  },
+  {
     command: 'status show',
     capability: 'fs.read.workspace',
     mutates: false,

@@ -24,7 +24,7 @@ type LandingMode = 'apply' | 'rollback';
 type Input = { readonly proofEventId: string; readonly patch: readonly PatchOperation[] };
 type GitPlan = ReturnType<typeof prepareLocalLanding>;
 
-const scopeSchema = z.object({
+export const localLandingScopeSchema = z.object({
   projectId: z.string().min(1), profileHash: z.string().min(1), profileGeneration: z.number().int().positive(),
   missionId: entityIdSchema, cycleId: entityIdSchema, proofEventId: entityIdSchema, proofEventSha256: sha256Schema,
   lockDigest: sha256Schema, contractHash: sha256Schema, patchDigest: sha256Schema, findingId: entityIdSchema,
@@ -32,14 +32,16 @@ const scopeSchema = z.object({
   screenedInputsId: sha256Schema, candidateInputsId: sha256Schema,
   supervisorSha256: sha256Schema, qualificationSha256: sha256Schema,
 }).strict();
-type Scope = z.infer<typeof scopeSchema>;
+type Scope = z.infer<typeof localLandingScopeSchema>;
 
-const gitPlanSchema = z.object({
+export const localLandingPlanSchema = z.object({
   repositoryRoot: z.string(), targetRef: z.string(), landingRef: z.string(), landingBranchPrefix: z.string(),
   baseCommit: gitObjectIdSchema, baseTree: gitObjectIdSchema, acceptedCommit: gitObjectIdSchema, acceptedTree: gitObjectIdSchema,
   rollbackCommit: gitObjectIdSchema, proofId: entityIdSchema, proofTimestamp: z.string(),
 }).strict();
-const commonPayload = z.object({ scope: scopeSchema, plan: gitPlanSchema, digest: sha256Schema }).passthrough();
+export const localLandingCheckpointSchema = z.object({ scope: localLandingScopeSchema,
+  plan: localLandingPlanSchema, digest: sha256Schema }).passthrough();
+const commonPayload = localLandingCheckpointSchema;
 type Body = z.infer<typeof commonPayload>;
 type LandingRecord = { readonly event: EventRecord; readonly body: Body };
 type History = {
@@ -93,7 +95,7 @@ function prepareReview(runtime: Runtime, input: Input) {
   const landingBranch = prefix + evidence.cycle.id.toLowerCase() + '-' + evidence.proof.id.toLowerCase();
   const policy = readLocalLandingPolicy(runtime, evidence.lock, evidence.events, evidence.screened.snapshot_id,
     evidence.contract, evidence.change.path, evidence.original, evidence.content, input.proofEventId);
-  const scope = scopeSchema.parse({
+  const scope = localLandingScopeSchema.parse({
     projectId: profile.profile.projectId, profileHash: profile.projectProfileHash, profileGeneration: profile.generation,
     missionId: evidence.cycle.mission_version, cycleId: evidence.cycle.id, proofEventId: evidence.proof.id,
     proofEventSha256: evidence.proof.hash, lockDigest: evidence.lock.digest, contractHash: evidence.accepted.contract_hash,

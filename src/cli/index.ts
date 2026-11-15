@@ -53,6 +53,7 @@ import { registerCycleCommands } from './commands/cycleCommands.js';
 import { registerBenchmarkCommands } from './commands/benchmarkCommands.js';
 import { registerProofCommand } from './commands/proofCommands.js';
 import { registerLandingCommands } from './commands/landingCommands.js';
+import { registerPublicationCommands } from './commands/publicationCommands.js';
 import { registerGatewayCommands } from './commands/gatewayCommands.js';
 import { registerSnapshotCommands } from './commands/snapshotCommands.js';
 import { registerGraphCommands } from './commands/graphCommands.js';
@@ -235,6 +236,7 @@ export function buildProgram(): Command {
   registerBenchmarkCommands(program);
   registerProofCommand(program);
   registerLandingCommands(program);
+  registerPublicationCommands(program);
   registerGatewayCommands(program);
   registerSnapshotCommands(program);
   registerGraphCommands(program);
