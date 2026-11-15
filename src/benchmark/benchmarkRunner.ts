@@ -521,6 +521,20 @@ function valueOf(measures: readonly BenchmarkMeasure[], id: string): number | un
   return measures.find((measure) => measure.id === id)?.value;
 }
 
+/** One timing comparison for the advisory gate and the cycle's verified handoff. */
+export function compareBenchmarkTimings(opening: readonly BenchmarkMeasure[], closing: readonly BenchmarkMeasure[]) {
+  const pairs = GATE_TIMING_IDS.flatMap((id) => {
+    const opening_ms = valueOf(opening, id);
+    const closing_ms = valueOf(closing, id);
+    return opening_ms === undefined || closing_ms === undefined ? [] : [{ id, opening_ms, closing_ms }];
+  });
+  const regressions = pairs.filter(({ opening_ms, closing_ms }) => closing_ms > opening_ms * 1.1);
+  const score = pairs.length === GATE_TIMING_IDS.length && pairs.every(({ opening_ms, closing_ms }) => opening_ms > 0 && closing_ms > 0)
+    ? Math.exp(pairs.reduce((sum, { opening_ms, closing_ms }) => sum + Math.log(opening_ms / closing_ms), 0) / pairs.length)
+    : null;
+  return { comparable: pairs.length, regressions, score: score !== null && Number.isFinite(score) && score > 0 ? score : null };
+}
+
 /**
  * Evaluates §7's five gates between an opening and a closing run.
  *
@@ -660,14 +674,8 @@ export function evaluateGates(input: {
 
   // GATE-005 — advisory: no timing signal regresses more than 10% against the opening run.
   {
-    const offenders: string[] = [];
-    let comparable = 0;
-    for (const id of GATE_TIMING_IDS) {
-      const timing = pair(id);
-      if (timing === null) continue;
-      comparable += 1;
-      if (timing.close > timing.open * 1.1) offenders.push(`${id} ${Math.round(timing.open)}→${Math.round(timing.close)} ms`);
-    }
+    const { comparable, regressions } = compareBenchmarkTimings(opening, closing);
+    const offenders = regressions.map(({ id, opening_ms, closing_ms }) => `${id} ${Math.round(opening_ms)}→${Math.round(closing_ms)} ms`);
     gates.push(
       comparable === 0
         ? {

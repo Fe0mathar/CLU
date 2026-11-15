@@ -21,6 +21,7 @@
  */
 
 import type { Runtime } from '../control/runtime.js';
+import { recordedOpeningComparisonSchema } from './closingBenchmarkComparison.js';
 import type { Sha256 } from '../shared/ids.js';
 import { describeTargetPublication } from '../shared/targetPublication.js';
 import {
@@ -43,6 +44,7 @@ interface ScreenedEvidence {
   readonly values_stored?: number;
   readonly corpus_size?: number;
   readonly patch_candidates?: number;
+  readonly observed_evidence?: boolean;
   readonly families_unavailable?: readonly string[];
 }
 
@@ -51,6 +53,7 @@ interface ClosingEvidence {
   readonly master_benchmark_run?: {
     readonly benchmark_version?: string;
     readonly run_artifact?: { readonly hash?: string };
+    readonly opening_comparison?: unknown;
   } | null;
 }
 
@@ -112,6 +115,8 @@ export function buildNextCycleVitalInput(deps: VitalInputDeps): NextCycleVitalIn
   // §19.2 — Master Benchmark version and closing run (B5: filled from the recorded
   // CLOSING_EVIDENCE run; the lock is the switch, the evidence is the source).
   const recordedRun = closing?.master_benchmark_run ?? null;
+  const opening = recordedOpeningComparisonSchema.safeParse(recordedRun?.opening_comparison);
+  const comparison = opening.success ? opening.data : null;
   let masterBenchmark: { version: string; closing_run: Sha256 } | null = null;
   if (lock.master_benchmark === null) {
     absences.push({
@@ -134,10 +139,9 @@ export function buildNextCycleVitalInput(deps: VitalInputDeps): NextCycleVitalIn
       version: recordedRun.benchmark_version,
       closing_run: recordedRun.run_artifact.hash as Sha256,
     };
-    absences.push({
-      field: 'master_benchmark.opening_run',
-      reason: 'no opening run this cycle — §8\u2019s score and §7\u2019s gates compare runs',
-    });
+    if (comparison === null) {
+      absences.push({ field: 'master_benchmark.opening_run', reason: 'no verified opening run matched the closing scope' });
+    }
   }
 
   // §19.4 — Project Intent Model version.
@@ -229,15 +233,15 @@ export function buildNextCycleVitalInput(deps: VitalInputDeps): NextCycleVitalIn
       benchmark_maturity:
         lock.master_benchmark === null ? 'absent' : masterBenchmark !== null ? 'locked' : 'placeholder',
       negative_knowledge: [
-        'no candidate loop was executed (diagnostic cycle by plan D3)',
-        'no benchmark comparison exists for this cycle',
-        `${screened?.patch_candidates ?? 0} patch candidate(s) under Stage G1 static-only ranking`,
+        ...(comparison === null ? ['no verified benchmark comparison is available in the closing evidence'] : []),
+        ...(screened?.observed_evidence === false && screened.patch_candidates !== undefined
+          ? [`${screened.patch_candidates} patch candidate(s) under Stage G1 static-only ranking`] : []),
       ],
       candidate_seeds: {
-        seeds: [],
-        source:
-          'screening ranking (Stage G1, static evidence only) produced no patch candidates; ' +
-          'seeds arrive with observed evidence',
+        seeds: comparison?.advisory_regressions.map(({ id, opening_ms, closing_ms }) =>
+          `Investigate ${id}: ${opening_ms.toFixed(2)} to ${closing_ms.toFixed(2)} ms. Compare on a fixed workload and journal head before attributing the change.`) ?? [],
+        source: comparison === null ? 'No verified Master Benchmark comparison was available.'
+          : `Master Benchmark comparison against ${comparison.opening_event_id}, stored in CLOSING_EVIDENCE (${stage_evidence['CLOSING_EVIDENCE']}).`,
       },
       freshness,
       stage_evidence,

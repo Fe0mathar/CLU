@@ -17,12 +17,14 @@ import { enableProjectProfileStartup, projectProfileCutoverConfirmation } from '
 import { runRecognition } from '../src/control/recognitionRun.js';
 import { withRuntime, withRuntimeAsync, type Runtime } from '../src/control/runtime.js';
 import { CycleOrchestrator } from '../src/cycle/cycleOrchestrator.js';
+import { compareClosingBenchmark, recordedOpeningComparisonSchema } from '../src/cycle/closingBenchmarkComparison.js';
 import { startClueDashboard } from '../src/daemon/clueDashboardServer.js';
 import { hashBytes, hashText, requireSha256 } from '../src/shared/ids.js';
+import { nextCycleVitalInputSchema } from '../src/shared/schemas.js';
 import { cloneProfile, makeProjectProfileFixture } from './project-profile-fixture.js';
 import { writeProfileRuntimeInstallation, writeRecognitionTarget } from './project-recognition-fixture.js';
 
-function makeRuntimeFixture(t: TestContext, ratify = true, declareBinding = false) {
+function makeRuntimeFixture(t: TestContext, ratify = true, declareBinding = false, completeBenchmark = false) {
   const fixture = makeProjectProfileFixture();
   t.after(() => fixture.dispose());
   const repoRoot = join(fixture.root, 'installation');
@@ -45,15 +47,25 @@ function makeRuntimeFixture(t: TestContext, ratify = true, declareBinding = fals
   const unit = recognize({ projectRoot: fixture.target, tsconfigPath: join(fixture.target, 'tsconfig.json') })
     .units.find((row) => row.name === 'finding_fixture');
   assert.ok(unit);
-  const body = `return { benchmarkVersion: '1.0.0', unifiedScore: null, environment: context.environment,
+  const body = completeBenchmark ? `
+    const measures = Array.from({length: 13}, (_, index) => {
+      const n = index + 1;
+      const id = 'SIG-' + String(n).padStart(3, '0');
+      return { id, name: id, scenario: 'SCN-001', native_unit: 'ms', aggregation: 'median', value: 100,
+        ...(n === 2 ? {samples: [100]} : {samples: [100, 100, 100], warmup_samples: [100]}) };
+    });
+    const protective = ['SIG-005', 'SIG-008', 'SIG-012', 'SIG-013'].map((id) => ({ id, value: 100 }));
+    return { benchmarkVersion: '0.2.0', unifiedScore: null, environment: context.environment,
+      measures, protective, incomplete: [] };
+  ` : `return { benchmarkVersion: '1.0.0', unifiedScore: null, environment: context.environment,
   measures: [{ id: 'SIG-001', name: 'Fixture timing', scenario: 'SCN-001', native_unit: 'ms',
     aggregation: 'exact', value: 1, samples: [1], warmup_samples: [1] }], protective: [], incomplete: [] };`;
   const bindings = declareBinding ? ['```clue-finding-bindings', JSON.stringify([{
     unitId: unit.logicalId, unitVersion: unit.versionHash, scenarioId: 'SCN-001', signalId: 'SIG-001',
   }]), '```', ''] : [];
   const benchmark = [
-    'benchmark_id = fixture-master',
-    'benchmark_version = 1.0.0',
+    completeBenchmark ? 'benchmark_id = clu-master' : 'benchmark_id = fixture-master',
+    completeBenchmark ? 'benchmark_version = 0.2.0' : 'benchmark_version = 1.0.0',
     'runner_adapter = cli-node',
     '',
     '[harness.HRN-001]',
@@ -72,6 +84,10 @@ function makeRuntimeFixture(t: TestContext, ratify = true, declareBinding = fals
     const authority = draft['authority'] as Record<string, unknown>;
     const masterBenchmark = authority['masterBenchmark'] as Record<string, unknown>;
     masterBenchmark['sha256'] = hashText(benchmark);
+    if (completeBenchmark) {
+      masterBenchmark['benchmarkId'] = 'clu-master';
+      masterBenchmark['benchmarkVersion'] = '0.2.0';
+    }
     const benchmarkRuntime = draft['benchmarkRuntime'] as Record<string, unknown>;
     benchmarkRuntime['scenario'] = 'SCN-001';
   });
@@ -387,6 +403,82 @@ test('declared benchmark coverage selects the screened unit after the benchmark 
     assert.equal(recognitionEvent?.type, 'cycle.stage_advanced');
     assert.equal(recognitionEvent.subject_id, receipt.cycleId);
     assert.deepEqual(readCurrentFindings(runtime), receipt);
+  });
+});
+
+test('a verified timing regression survives closure recovery as a §19 investigation seed', async (t) => {
+  const fixture = makeRuntimeFixture(t, true, false, true);
+  const contract = { path: fixture.benchmarkPath, registered: true };
+  const { cycle, lock, subject, openingHead } = withRuntime(fixture.options, (runtime) => {
+    const { cycle, lock } = new CycleOrchestrator(runtime).drive();
+    assert.equal(cycle.grade, 'proof-authoritative', JSON.stringify(lock?.absent));
+    assert.ok(lock);
+    return { cycle, lock, subject: prepareBenchmarkRunSubject(runtime, contract), openingHead: runtime.requireLog().getHead() };
+  });
+  const outcome = await runMasterBenchmark({ repoRoot: fixture.options.repoRoot, projectRoot: fixture.target,
+    workspaceRoot: fixture.options.projectProfile.profile.state.eventLogRoot, contractPath: contract.path,
+    execImpl: async () => assert.fail('The fixture harness must perform no external process work.'),
+    executionBoundary: { kind: 'linux-bwrap', sha256: hashText('test boundary') } });
+  assert.ok(outcome.ok, outcome.ok ? undefined : outcome.reason);
+  const closingOutcome = { ...outcome, result: { ...outcome.result, measures: outcome.result.measures.map((measure) =>
+    measure.id === 'SIG-009' ? { ...measure, value: 120, samples: [120, 120, 120] } : measure) } };
+  const openingId = withRuntime(fixture.options, (runtime) => {
+    const { event } = recordBenchmarkRun(runtime, { outcome, subject, contract, log_head_before: openingHead });
+    const head = runtime.requireLog().getHead();
+    const events = [...runtime.requireLog().replay()];
+    const closing = { contract, subject, outcome: closingOutcome, log_head_before: head };
+    const compare = (journal = events, run = closing) => compareClosingBenchmark(runtime.artifacts, journal, cycle, lock, run);
+    const comparison = compare();
+    assert.equal(comparison?.opening.opening_event_sha256, event.hash);
+    assert.equal(comparison?.opening.unified_score, Math.exp(Math.log(100 / 120) / 6));
+    assert.deepEqual(comparison?.opening.advisory_regressions, [{ id: 'SIG-009', opening_ms: 100, closing_ms: 120 }]);
+    assert.equal(compare(events, { ...closing, log_head_before: openingHead }), null,
+      'An opening recorded after the closing start is outside the comparison scope.');
+    assert.equal(compare(events, { ...closing, outcome: { ...closingOutcome,
+      execution_boundary: { kind: 'linux-bwrap', sha256: hashText('different test boundary') } } }), null);
+    const duplicate = { ...event, sequence: event.sequence + 1, hash: hashText('duplicate opening') };
+    assert.equal(compare([...events, duplicate], { ...closing,
+      log_head_before: { sequence: duplicate.sequence, hash: duplicate.hash } }), null);
+    const failed = compare(events, { ...closing, outcome: { ...closingOutcome, result: { ...closingOutcome.result,
+      measures: closingOutcome.result.measures.map((measure) => measure.id === 'SIG-012' ? { ...measure, value: 99 } : measure),
+      protective: closingOutcome.result.protective.map((measure) => measure.id === 'SIG-012' ? { ...measure, value: 99 } : measure),
+    } } });
+    assert.equal(failed?.gates.run_verdict, 'void');
+    assert.deepEqual(failed?.opening.advisory_regressions, []);
+
+    const put = runtime.artifacts.putJson.bind(runtime.artifacts);
+    const interruption = t.mock.method(runtime.artifacts, 'putJson', (...args: Parameters<typeof put>) => {
+      const [, options] = args;
+      if (options?.label === `cycle-${cycle.id}-handoff.json`) throw new Error('interrupted before handoff');
+      return put(...args);
+    });
+    try {
+      assert.throws(() => new CycleOrchestrator(runtime).close(closing), /interrupted before handoff/);
+      assert.equal(new CycleOrchestrator(runtime).status()?.stage, 'CLOSING_EVIDENCE');
+    } finally {
+      interruption.mock.restore();
+    }
+    return event.id;
+  });
+
+  withRuntime(fixture.options, (runtime) => {
+    const closed = new CycleOrchestrator(runtime).close();
+    assert.equal(closed.cycle.stage, 'CLOSED');
+    assert.equal(closed.cycle.criteria_met, false);
+    const ref = closed.performed.find(({ to }) => to === 'HANDOFF')?.evidence;
+    assert.ok(ref);
+    const handoff = nextCycleVitalInputSchema.parse(runtime.artifacts.getJson(requireSha256(ref.hash, 'handoff')));
+    const closingRef = handoff.stage_evidence['CLOSING_EVIDENCE'];
+    assert.ok(closingRef);
+    const evidence = runtime.artifacts.getJson(requireSha256(closingRef, 'closing evidence')) as {
+      master_benchmark_run: { opening_comparison: unknown };
+    };
+    const opening = recordedOpeningComparisonSchema.parse(evidence.master_benchmark_run.opening_comparison);
+    assert.equal(opening.opening_event_id, openingId);
+    assert.equal(handoff.candidate_seeds.seeds.length, 1);
+    assert.match(handoff.candidate_seeds.seeds[0] ?? '', /Investigate SIG-009: 100.00 to 120.00 ms/);
+    assert.match(handoff.candidate_seeds.source, new RegExp(openingId));
+    assert.ok(!handoff.stated_absences.some(({ field }) => field === 'master_benchmark.opening_run'));
   });
 });
 

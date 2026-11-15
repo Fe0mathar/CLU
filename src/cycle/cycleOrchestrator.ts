@@ -112,6 +112,7 @@ import { readCurrentCycleAuthority } from './cycleAuthority.js';
 import { computeInputLock } from './cycleInputLock.js';
 import { verifyResume } from './resumePlanner.js';
 import { buildNextCycleVitalInput } from './nextCycleVitalInput.js';
+import { compareClosingBenchmark } from './closingBenchmarkComparison.js';
 import { deriveProofClosure, proofClosureUnmet, type ProofClosureState } from './proofClosure.js';
 
 export interface DriveStep {
@@ -947,6 +948,7 @@ export class CycleOrchestrator {
       if (captured.record.id !== subject.snapshot_id) {
         throw new Error('Closing snapshot does not match the tree measured by the registered benchmark.');
       }
+      const comparison = compareClosingBenchmark(this.runtime.artifacts, this.log.replay(), cycle, this.lockOf(cycle.id), closingRun);
       const runArtifact = this.runtime.artifacts.putJson(
         { result, contract, timing, policy, budget, inputs: subject.inputs, executable_inputs: subject.executable_inputs,
           ...(closingRun.outcome.execution_boundary === undefined ? {} : { execution_boundary: closingRun.outcome.execution_boundary }) },
@@ -961,20 +963,20 @@ export class CycleOrchestrator {
         block_id: contract.block_id,
         runner_adapter: contract.runner_adapter,
         run_artifact: runArtifact,
-        unified_score: result.unifiedScore,
+        unified_score: comparison?.opening.unified_score ?? result.unifiedScore,
         measures_count: result.measures.length,
         incomplete_count: result.incomplete.length,
         protective: result.protective,
         budget_exhausted: budget.exhausted,
         log_head_before: closingRun.log_head_before,
-        // §7's gates and §8's score compare an opening and a closing run; this cycle
-        // recorded no opening run, so the comparison is a stated absence, not a zero.
-        gates: null,
-        gates_reason: 'no opening run this cycle — §7 gates and the §8 score compare runs (stated)',
+        opening_comparison: comparison?.opening ?? null,
+        gates: comparison?.gates ?? null,
+        gates_reason: comparison === null ? 'no opening run matched the verified closing scope' : null,
       };
+      const score = comparison?.opening.unified_score;
       runSummary =
         `§18 run recorded (${contract.benchmark_id}@${contract.benchmark_version}, ` +
-        `score ${result.unifiedScore === null ? 'null — no opening baseline' : result.unifiedScore.toFixed(4)}, ` +
+        `score ${score === undefined ? 'unavailable — no verified comparison' : score.toFixed(4)}, ` +
         `${result.measures.length} measure(s), ${result.incomplete.length} incomplete)`;
     }
 
@@ -1005,12 +1007,15 @@ export class CycleOrchestrator {
 
   /** The recorded §18 run, read back from the CLOSING_EVIDENCE artifact — the resume-safe
    *  truth `stepClose` derives §24 from (never this call's parameter). */
-  private closingRunRecordOf(cycleId: string): { readonly benchmark_version?: string } | null {
+  private closingRunRecordOf(cycleId: string): {
+    readonly benchmark_version?: string;
+    readonly gates?: { readonly equilibrium_blocked?: boolean } | null;
+  } | null {
     const ref = this.evidenceRefsOf(cycleId)['CLOSING_EVIDENCE'] ?? null;
     if (ref === null) return null;
     try {
       const body = this.runtime.artifacts.getJson(ref.hash as unknown as Sha256) as {
-        master_benchmark_run?: { benchmark_version?: string } | null;
+        master_benchmark_run?: { benchmark_version?: string; gates?: { equilibrium_blocked?: boolean } | null } | null;
       };
       return body.master_benchmark_run ?? null;
     } catch {
@@ -1049,7 +1054,7 @@ export class CycleOrchestrator {
       ...proofClosureUnmet(proof),
       ...(closingRun === null
         ? ['closing Master Benchmark run (§18): not performed — benchmark unregistered']
-        : []),
+        : closingRun.gates?.equilibrium_blocked === true ? ['closing Master Benchmark (§18): mandatory comparison gate failed'] : []),
     ].sort();
     this.registry.close(cycle.id, unmet);
     return {
