@@ -237,6 +237,7 @@ test('release archive carries both verified packs, the active v10 selector, and 
     writeFileSync(join(root, path), canary);
   }
   const { report, entries } = inspectRelease(root, join(parent, 'out'), env);
+  assert.deepEqual(entries.get('LICENSE'), readFileSync(join(root, 'LICENSE')), 'root LICENSE bytes');
   assert.equal(report.tree.available, false);
   assert.equal(report.releaseQualification.cleanGitTree, false);
   assert.equal(JSON.stringify(report).includes(canary), false);

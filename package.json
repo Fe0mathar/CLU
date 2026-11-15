@@ -11,6 +11,7 @@
     "clue": "dist/src/cli/index.js"
   },
   "files": [
+    "LICENSE",
     "dist/",
     "src/",
     "agents/clue/identity.md",
