@@ -24,7 +24,12 @@ import { nextCycleVitalInputSchema } from '../src/shared/schemas.js';
 import { cloneProfile, makeProjectProfileFixture } from './project-profile-fixture.js';
 import { writeProfileRuntimeInstallation, writeRecognitionTarget } from './project-recognition-fixture.js';
 
-function makeRuntimeFixture(t: TestContext, ratify = true, declareBinding = false, completeBenchmark = false) {
+function makeRuntimeFixture(
+  t: TestContext,
+  ratify = true,
+  declareBinding = false,
+  completeBenchmark: false | 'sampled' | 'derived' = false,
+) {
   const fixture = makeProjectProfileFixture();
   t.after(() => fixture.dispose());
   const repoRoot = join(fixture.root, 'installation');
@@ -51,8 +56,13 @@ function makeRuntimeFixture(t: TestContext, ratify = true, declareBinding = fals
     const measures = Array.from({length: 13}, (_, index) => {
       const n = index + 1;
       const id = 'SIG-' + String(n).padStart(3, '0');
+      if (n === 2) {
+        return { id, name: 'recognition throughput', scenario: 'SCN-001', native_unit: 'units/s',
+          aggregation: 'median', value: 1000,
+          ${completeBenchmark === 'derived' ? 'samples: [1000]' : 'samples: [1000, 1000, 1000], warmup_samples: [1000]'} };
+      }
       return { id, name: id, scenario: 'SCN-001', native_unit: 'ms', aggregation: 'median', value: 100,
-        ...(n === 2 ? {samples: [100]} : {samples: [100, 100, 100], warmup_samples: [100]}) };
+        samples: [100, 100, 100], warmup_samples: [100] };
     });
     const protective = ['SIG-005', 'SIG-008', 'SIG-012', 'SIG-013'].map((id) => ({ id, value: 100 }));
     return { benchmarkVersion: '0.2.0', unifiedScore: null, environment: context.environment,
@@ -406,8 +416,8 @@ test('declared benchmark coverage selects the screened unit after the benchmark 
   });
 });
 
-test('a verified timing regression survives closure recovery as a §19 investigation seed', async (t) => {
-  const fixture = makeRuntimeFixture(t, true, false, true);
+async function verifyTimingRegressionSurvivesClosure(t: TestContext, throughput: 'sampled' | 'derived') {
+  const fixture = makeRuntimeFixture(t, true, false, throughput);
   const contract = { path: fixture.benchmarkPath, registered: true };
   const { cycle, lock, subject, openingHead } = withRuntime(fixture.options, (runtime) => {
     const { cycle, lock } = new CycleOrchestrator(runtime).drive();
@@ -432,6 +442,15 @@ test('a verified timing regression survives closure recovery as a §19 investiga
     assert.equal(comparison?.opening.opening_event_sha256, event.hash);
     assert.equal(comparison?.opening.unified_score, Math.exp(Math.log(100 / 120) / 6));
     assert.deepEqual(comparison?.opening.advisory_regressions, [{ id: 'SIG-009', opening_ms: 100, closing_ms: 120 }]);
+    const throughputMeasure = outcome.result.measures.find(({ id }) => id === 'SIG-002');
+    assert.equal(throughputMeasure?.samples.length, throughput === 'sampled' ? 3 : 1);
+    assert.equal(throughputMeasure?.warmup_samples?.length, throughput === 'sampled' ? 1 : undefined);
+    const withoutRequiredWarmup = { ...closingOutcome, result: { ...closingOutcome.result,
+      measures: closingOutcome.result.measures.map((measure) => measure.id === 'SIG-002' ?
+        { ...measure, samples: [1000, 1000, 1000], warmup_samples: [] } : measure),
+    } };
+    assert.equal(compare(events, { ...closing, outcome: withoutRequiredWarmup }), null,
+      'Sampled throughput still requires the governed warm-up.');
     assert.equal(compare(events, { ...closing, log_head_before: openingHead }), null,
       'An opening recorded after the closing start is outside the comparison scope.');
     assert.equal(compare(events, { ...closing, outcome: { ...closingOutcome,
@@ -480,7 +499,13 @@ test('a verified timing regression survives closure recovery as a §19 investiga
     assert.match(handoff.candidate_seeds.source, new RegExp(openingId));
     assert.ok(!handoff.stated_absences.some(({ field }) => field === 'master_benchmark.opening_run'));
   });
-});
+}
+
+test('a verified regression with sampled throughput survives closure recovery as a §19 seed',
+  (t) => verifyTimingRegressionSurvivesClosure(t, 'sampled'));
+
+test('a verified regression with legacy derived throughput survives closure recovery as a §19 seed',
+  (t) => verifyTimingRegressionSurvivesClosure(t, 'derived'));
 
 function makeUnit(name: string): SourceUnit {
   const path = `src/${name}.ts`;

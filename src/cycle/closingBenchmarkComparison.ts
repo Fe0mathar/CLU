@@ -44,11 +44,12 @@ const same = (one: unknown, two: unknown) => canonicalJson(one) === canonicalJso
 function completeNativeResult(result: BenchmarkResult, policy: Extract<RunOutcome, { ok: true }>['policy']): boolean {
   const protective = ['SIG-005', 'SIG-008', 'SIG-012', 'SIG-013'].map((id) =>
     ({ id, value: result.measures.find((measure) => measure.id === id)?.value }));
+  // Throughput can report just its derived value when the median of raw rates differs.
   return isCompleteCluBenchmarkV020(result) && policy.repetitions === 3 && policy.warmupRuns === 1 &&
     same(protective, result.protective) &&
-    result.measures.every(({ id, samples, warmup_samples }) => id === 'SIG-002'
-      ? samples.length === 1 && warmup_samples === undefined
-      : samples.length === policy.repetitions && warmup_samples?.length === policy.warmupRuns);
+    result.measures.every(({ id, samples, warmup_samples }) =>
+      (samples.length === policy.repetitions && warmup_samples?.length === policy.warmupRuns) ||
+      (id === 'SIG-002' && samples.length === 1 && warmup_samples === undefined));
 }
 
 export function compareClosingBenchmark(
